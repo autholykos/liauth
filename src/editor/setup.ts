@@ -13,6 +13,7 @@ import { tags } from "@lezer/highlight";
 import { vim, Vim } from "@replit/codemirror-vim";
 import { livePreview } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
+import { criticMarkup, insertNote } from "./notes";
 
 /** Subtle source-level colors for the bits that stay visible. */
 const mdHighlight = HighlightStyle.define([
@@ -105,6 +106,7 @@ export function createEditorState(
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
       livePreview,
+      criticMarkup,
       keymap.of([
         {
           key: "Mod-s",
@@ -115,6 +117,7 @@ export function createEditorState(
         },
         { key: "Mod-b", run: toggleWrap("**") },
         { key: "Mod-i", run: toggleWrap("*") },
+        { key: "Mod-Shift-m", run: insertNote },
         ...defaultKeymap,
         ...historyKeymap,
       ]),

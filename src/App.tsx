@@ -10,12 +10,18 @@ import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
 import { createEditorState } from "./editor/setup";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
+import {
+  scanNotes,
+  insertNote,
+  stripCriticMarkup,
+  NoteMatch,
+} from "./editor/notes";
 import * as api from "./api";
 import "./App.css";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
-type Panel = "none" | "history" | "review";
+type Panel = "none" | "history" | "review" | "notes";
 type Theme = "paper" | "sepia" | "dark" | "room";
 
 const THEMES: { id: Theme; label: string }[] = [
@@ -90,18 +96,27 @@ function App() {
     () => localStorage.getItem("liauth.lines") === "1",
   );
   const lineNumsRef = useRef(lineNums);
+  const [notes, setNotes] = useState<NoteMatch[]>([]);
+  const notesTimerRef = useRef<number | undefined>(undefined);
   const vimRef = useRef(vimMode);
   const roomRef = useRef(room);
   const prevThemeRef = useRef<Theme>("paper");
   const roomMountedRef = useRef(false);
   const viewingRef = useRef(viewing);
   viewingRef.current = viewing;
+  const panelRef = useRef(panel);
+  panelRef.current = panel;
 
   const fileName = filePath ? filePath.split("/").pop() : "Untitled";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
     window.setTimeout(() => setStatus(""), 4000);
+  }, []);
+
+  const refreshNotes = useCallback(() => {
+    const view = viewRef.current;
+    if (view) setNotes(scanNotes(view.state.doc.toString()));
   }, []);
 
   const setEditorContent = useCallback((content: string, readOnly = false) => {
@@ -114,6 +129,11 @@ function App() {
         {
           onChange: () => {
             if (!loadingRef.current) setDirty(true);
+            // Keep the Notes panel in sync while typing, debounced.
+            if (panelRef.current === "notes") {
+              window.clearTimeout(notesTimerRef.current);
+              notesTimerRef.current = window.setTimeout(refreshNotes, 300);
+            }
           },
           onSave: () => saveRef.current(),
           onToggleRoom: () => setRoom((r) => !r),
@@ -445,11 +465,65 @@ function App() {
     if (!view) return;
     const root = document.getElementById("print-root");
     if (!root) return;
-    root.innerHTML = DOMPurify.sanitize(md.render(view.state.doc.toString()));
+    root.innerHTML = DOMPurify.sanitize(
+      md.render(stripCriticMarkup(view.state.doc.toString())),
+    );
     document.title =
       fileName?.replace(/\.(md|markdown|txt)$/i, "") ?? "document";
     window.print();
   }, [fileName]);
+
+  const addNote = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || viewing) return;
+    insertNote(view);
+    refreshNotes();
+  }, [viewing, refreshNotes]);
+
+  const jumpToNote = useCallback((n: NoteMatch) => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      selection: { anchor: Math.min(n.from, view.state.doc.length) },
+      effects: EditorView.scrollIntoView(
+        Math.min(n.from, view.state.doc.length),
+        {
+          y: "center",
+        },
+      ),
+    });
+    view.focus();
+  }, []);
+
+  const resolveNote = useCallback(
+    (n: NoteMatch) => {
+      const view = viewRef.current;
+      if (!view || viewing) return;
+      if (view.state.sliceDoc(n.from, n.to) !== n.raw) {
+        refreshNotes();
+        flash("Document changed under the note — list refreshed, try again");
+        return;
+      }
+      view.dispatch({
+        changes: {
+          from: n.from,
+          to: n.to,
+          insert: n.highlighted ? n.excerpt : "",
+        },
+      });
+      refreshNotes();
+      flash("Note resolved");
+    },
+    [viewing, refreshNotes, flash],
+  );
+
+  const toggleNotesPanel = useCallback(() => {
+    setPanel((p) => {
+      if (p === "notes") return "none";
+      refreshNotes();
+      return "notes";
+    });
+  }, [refreshNotes]);
 
   const versioned = !!repo?.repo_root;
 
@@ -538,6 +612,13 @@ function App() {
               {Math.round(zoom * 100)}%
             </button>
           ) : null}
+          <button
+            className={panel === "notes" ? "active" : ""}
+            title="Notes (insert with ⌘⇧M)"
+            onClick={toggleNotesPanel}
+          >
+            Notes
+          </button>
           {versioned ? (
             <>
               <button
@@ -642,6 +723,53 @@ function App() {
               edits into the current branch. Conflicts appear inline and are
               concluded by saving.
             </p>
+          </aside>
+        ) : null}
+
+        {panel === "notes" ? (
+          <aside className="side-panel">
+            <h3>Notes</h3>
+            <button className="wide" onClick={addNote} disabled={!!viewing}>
+              Add note at cursor (⌘⇧M)
+            </button>
+            {notes.length === 0 ? (
+              <p className="muted">
+                No notes. Select text and press ⌘⇧M to annotate it; notes are
+                stored as CriticMarkup in the document and stripped from PDF
+                export.
+              </p>
+            ) : null}
+            <ul className="note-list">
+              {notes.map((n, i) => (
+                <li key={`${n.from}-${i}`} onClick={() => jumpToNote(n)}>
+                  {n.highlighted ? (
+                    <span className="note-excerpt">
+                      “
+                      {n.excerpt.length > 60
+                        ? `${n.excerpt.slice(0, 60)}…`
+                        : n.excerpt}
+                      ”
+                    </span>
+                  ) : (
+                    <span className="note-excerpt muted">(standalone)</span>
+                  )}
+                  <span className="note-comment">
+                    {n.comment.trim() || "(empty)"}
+                  </span>
+                  <span className="branch-actions">
+                    <button
+                      disabled={!!viewing}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resolveNote(n);
+                      }}
+                    >
+                      Resolve
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
           </aside>
         ) : null}
       </main>

@@ -17,6 +17,11 @@ git engine for versioning and asynchronous review.
   standard `<<< >>>` markers right in the editor; saving while a merge is in
   progress concludes it with a proper two-parent merge commit. Aborting
   restores the pre-merge state.
+- **Notes** — review annotations stored as CriticMarkup in the text itself
+  (`{== span ==}{>> comment <<}`), so they version, branch, and merge like
+  any other edit. Select text and hit ⌘⇧M; the live view shows a highlight
+  with a hover bubble, the Notes panel lists/jumps/resolves them, and PDF
+  export strips them.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 
