@@ -36,11 +36,13 @@ export const saveDocument = (
   filePath: string,
   content: string,
   message?: string,
+  commit = true,
 ) =>
   invoke<CommitInfo | null>("save_document", {
     filePath,
     content,
     message: message ?? null,
+    commit,
   });
 
 export const fileHistory = (filePath: string, limit?: number) =>

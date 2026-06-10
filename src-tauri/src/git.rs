@@ -111,16 +111,22 @@ pub fn read_document(file_path: String) -> Result<String, String> {
     fs::read_to_string(&file_path).map_err(|e| e.to_string())
 }
 
-/// Write the file and, if it lives in a repository, stage and commit it.
-/// While a merge is in progress, the commit gets both parents and
-/// concludes the merge.
+/// Write the file and, when `commit` is set and it lives in a repository,
+/// stage and commit it. While a merge is in progress, the commit gets both
+/// parents and concludes the merge. Autosave passes `commit: false`: a
+/// plain disk write that can never touch git state (and so can never
+/// conclude a merge accidentally).
 #[tauri::command]
 pub fn save_document(
     file_path: String,
     content: String,
     message: Option<String>,
+    commit: bool,
 ) -> Result<Option<CommitInfo>, String> {
     fs::write(&file_path, &content).map_err(|e| e.to_string())?;
+    if !commit {
+        return Ok(None);
+    }
 
     let mut repo = match discover(&file_path) {
         Ok(r) => r,
@@ -404,23 +410,23 @@ mod tests {
         let doc_s = p(&doc);
 
         // Unversioned save: writes the file, no commit.
-        let r = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), None).unwrap();
+        let r = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), None, true).unwrap();
         assert!(r.is_none());
         assert_eq!(read_document(doc_s.clone()).unwrap(), "# Title\n\nv1 line\n");
 
         // Enable versioning.
         init_repo(doc_s.clone()).unwrap();
-        let c1 = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), Some("Initial version".into()))
+        let c1 = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), Some("Initial version".into()), true)
             .unwrap()
             .expect("first commit");
         assert_eq!(c1.summary, "Initial version");
 
         // Saving identical content must not create an empty commit.
-        let r = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), None).unwrap();
+        let r = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), None, true).unwrap();
         assert!(r.is_none());
 
         // A real edit commits; history is newest-first.
-        save_document(doc_s.clone(), "# Title\n\nv2 line\n".into(), None)
+        save_document(doc_s.clone(), "# Title\n\nv2 line\n".into(), None, true)
             .unwrap()
             .expect("second commit");
         let hist = file_history(doc_s.clone(), None).unwrap();
@@ -431,14 +437,14 @@ mod tests {
 
         // Reviewer edits on their own branch.
         create_branch(doc_s.clone(), "review/anna".into(), true).unwrap();
-        save_document(doc_s.clone(), "# Title\n\nreviewer line\n".into(), Some("Review edits".into()))
+        save_document(doc_s.clone(), "# Title\n\nreviewer line\n".into(), Some("Review edits".into()), true)
             .unwrap()
             .expect("review commit");
 
         // Author keeps working on the main branch — conflicting change.
         checkout_branch(doc_s.clone(), main_branch.clone()).unwrap();
         assert_eq!(read_document(doc_s.clone()).unwrap(), "# Title\n\nv2 line\n");
-        save_document(doc_s.clone(), "# Title\n\nauthor line\n".into(), None)
+        save_document(doc_s.clone(), "# Title\n\nauthor line\n".into(), None, true)
             .unwrap()
             .expect("author commit");
 
@@ -455,6 +461,7 @@ mod tests {
             doc_s.clone(),
             "# Title\n\nauthor and reviewer line\n".into(),
             Some("Merge review/anna".into()),
+            true,
         )
         .unwrap()
         .expect("merge commit");
@@ -466,7 +473,7 @@ mod tests {
 
         // Fast-forward path: branch ahead, main untouched.
         create_branch(doc_s.clone(), "review/ben".into(), true).unwrap();
-        save_document(doc_s.clone(), "# Title\n\nben's improvement\n".into(), None)
+        save_document(doc_s.clone(), "# Title\n\nben's improvement\n".into(), None, true)
             .unwrap()
             .expect("ben commit");
         checkout_branch(doc_s.clone(), main_branch).unwrap();
@@ -483,13 +490,13 @@ mod tests {
         let doc_s = p(&doc);
 
         init_repo(doc_s.clone()).unwrap();
-        save_document(doc_s.clone(), "base\n".into(), None).unwrap().unwrap();
+        save_document(doc_s.clone(), "base\n".into(), None, true).unwrap().unwrap();
         let main_branch = repo_info(doc_s.clone()).branch.unwrap();
 
         create_branch(doc_s.clone(), "review/x".into(), true).unwrap();
-        save_document(doc_s.clone(), "their change\n".into(), None).unwrap().unwrap();
+        save_document(doc_s.clone(), "their change\n".into(), None, true).unwrap().unwrap();
         checkout_branch(doc_s.clone(), main_branch).unwrap();
-        save_document(doc_s.clone(), "my change\n".into(), None).unwrap().unwrap();
+        save_document(doc_s.clone(), "my change\n".into(), None, true).unwrap().unwrap();
 
         let m = merge_branch(doc_s.clone(), "review/x".into()).unwrap();
         assert_eq!(m.status, "conflicts");
@@ -497,5 +504,23 @@ mod tests {
         abort_merge(doc_s.clone()).unwrap();
         assert!(!repo_info(doc_s.clone()).merging);
         assert_eq!(read_document(doc_s.clone()).unwrap(), "my change\n");
+    }
+
+    /// commit: false writes the file but never touches git state.
+    #[test]
+    fn autosave_writes_without_committing() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "v1\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+
+        let r = save_document(doc_s.clone(), "autosaved\n".into(), None, false).unwrap();
+        assert!(r.is_none());
+        assert_eq!(read_document(doc_s.clone()).unwrap(), "autosaved\n");
+        assert_eq!(file_history(doc_s.clone(), None).unwrap().len(), 1);
     }
 }

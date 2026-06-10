@@ -6,6 +6,7 @@ import {
   ask,
 } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCM } from "@replit/codemirror-vim";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
 import { createEditorState } from "./editor/setup";
@@ -105,6 +106,11 @@ function App() {
   viewingRef.current = viewing;
   const panelRef = useRef(panel);
   panelRef.current = panel;
+  const filePathRef = useRef(filePath);
+  filePathRef.current = filePath;
+  // Tracks "buffer differs from disk" — distinct from `dirty`, which now
+  // means "uncommitted changes" and only clears on a real (commit) save.
+  const diskDirtyRef = useRef(false);
 
   const fileName = filePath ? filePath.split("/").pop() : "Untitled";
 
@@ -118,35 +124,73 @@ function App() {
     if (view) setNotes(scanNotes(view.state.doc.toString()));
   }, []);
 
-  const setEditorContent = useCallback((content: string, readOnly = false) => {
+  // Autosave: plain disk write, never a commit (and so never able to
+  // conclude a merge). Triggered on leaving vim insert mode and on
+  // window blur.
+  const autoSave = useCallback(async () => {
     const view = viewRef.current;
-    if (!view) return;
-    loadingRef.current = true;
-    view.setState(
-      createEditorState(
-        content,
-        {
-          onChange: () => {
-            if (!loadingRef.current) setDirty(true);
-            // Keep the Notes panel in sync while typing, debounced.
-            if (panelRef.current === "notes") {
-              window.clearTimeout(notesTimerRef.current);
-              notesTimerRef.current = window.setTimeout(refreshNotes, 300);
-            }
-          },
-          onSave: () => saveRef.current(),
-          onToggleRoom: () => setRoom((r) => !r),
-        },
-        {
-          readOnly,
-          vim: vimRef.current,
-          typewriter: roomRef.current,
-          lineNumbers: lineNumsRef.current,
-        },
-      ),
-    );
-    loadingRef.current = false;
+    const path = filePathRef.current;
+    if (!view || !path || viewingRef.current || !diskDirtyRef.current) return;
+    try {
+      await api.saveDocument(path, view.state.doc.toString(), undefined, false);
+      diskDirtyRef.current = false;
+    } catch (e) {
+      console.warn("[liauth] autosave failed:", e);
+    }
   }, []);
+
+  useEffect(() => {
+    const onBlur = () => void autoSave();
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, [autoSave]);
+
+  const setEditorContent = useCallback(
+    (content: string, readOnly = false) => {
+      const view = viewRef.current;
+      if (!view) return;
+      loadingRef.current = true;
+      view.setState(
+        createEditorState(
+          content,
+          {
+            onChange: () => {
+              if (!loadingRef.current) {
+                setDirty(true);
+                diskDirtyRef.current = true;
+              }
+              // Keep the Notes panel in sync while typing, debounced.
+              if (panelRef.current === "notes") {
+                window.clearTimeout(notesTimerRef.current);
+                notesTimerRef.current = window.setTimeout(refreshNotes, 300);
+              }
+            },
+            onSave: () => saveRef.current(),
+            onToggleRoom: () => setRoom((r) => !r),
+          },
+          {
+            readOnly,
+            vim: vimRef.current,
+            typewriter: roomRef.current,
+            lineNumbers: lineNumsRef.current,
+          },
+        ),
+      );
+      // Autosave when leaving vim insert mode.
+      if (vimRef.current) {
+        const cm = getCM(view);
+        if (cm) {
+          let lastMode = "normal";
+          cm.on("vim-mode-change", (e: { mode: string }) => {
+            if (lastMode === "insert" && e.mode !== "insert") void autoSave();
+            lastMode = e.mode;
+          });
+        }
+      }
+      loadingRef.current = false;
+    },
+    [autoSave, refreshNotes],
+  );
 
   useEffect(() => {
     localStorage.setItem("liauth.theme", theme);
@@ -285,6 +329,7 @@ function App() {
         setFilePath(path);
         setViewing(null);
         setDirty(false);
+        diskDirtyRef.current = false;
         setEditorContent(content);
         await refreshGit(path);
       } catch (e) {
@@ -308,6 +353,7 @@ function App() {
     try {
       const commit = await api.saveDocument(path, view.state.doc.toString());
       setDirty(false);
+      diskDirtyRef.current = false;
       flash(commit ? `Saved · committed ${commit.id.slice(0, 7)}` : "Saved");
       await refreshGit(path);
     } catch (e) {
@@ -541,7 +587,15 @@ function App() {
         <div className="toolbar-title">
           <span className="doc-name">
             {fileName}
-            {dirty ? <span className="dirty-dot"> ●</span> : null}
+            {dirty ? (
+              <span
+                className="dirty-dot"
+                title="Uncommitted changes (autosaved to disk; ⌘S commits)"
+              >
+                {" "}
+                ●
+              </span>
+            ) : null}
           </span>
           {versioned && repo?.branch ? (
             <span className={`branch-badge${repo.merging ? " merging" : ""}`}>
