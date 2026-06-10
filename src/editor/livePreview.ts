@@ -42,7 +42,10 @@ class HrWidget extends WidgetType {
 }
 
 class CheckboxWidget extends WidgetType {
-  constructor(readonly checked: boolean, readonly pos: number) {
+  constructor(
+    readonly checked: boolean,
+    readonly pos: number,
+  ) {
     super();
   }
   toDOM(view: EditorView): HTMLElement {
@@ -73,20 +76,45 @@ class CheckboxWidget extends WidgetType {
 const HEADING_RE = /^ATXHeading(\d)$/;
 
 /** Does any selection range touch [from, to]? */
-function selectionTouches(state: EditorState, from: number, to: number): boolean {
+function selectionTouches(
+  state: EditorState,
+  from: number,
+  to: number,
+): boolean {
   return state.selection.ranges.some((r) => r.from <= to && r.to >= from);
 }
 
 /** Does any selection range touch the line(s) covering [from, to]? */
-function selectionOnLine(state: EditorState, from: number, to: number): boolean {
+function selectionOnLine(
+  state: EditorState,
+  from: number,
+  to: number,
+): boolean {
   const start = state.doc.lineAt(from);
   const end = to <= start.to ? start : state.doc.lineAt(to);
   return selectionTouches(state, start.from, end.to);
 }
 
-function buildDecorations(view: EditorView): DecorationSet {
+interface PreviewSets {
+  decorations: DecorationSet;
+  /** The hidden (replaced) ranges, exposed as atomic ranges so clicks and
+   *  cursor motion can never land inside invisible text. */
+  atomic: DecorationSet;
+}
+
+function buildDecorations(view: EditorView): PreviewSets {
   const decos: Range<Decoration>[] = [];
+  const hides: Range<Decoration>[] = [];
   const state = view.state;
+  const hide = (
+    from: number,
+    to: number,
+    spec: Parameters<typeof Decoration.replace>[0] = {},
+  ) => {
+    const d = Decoration.replace(spec).range(from, to);
+    decos.push(d);
+    hides.push(d);
+  };
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
@@ -99,7 +127,9 @@ function buildDecorations(view: EditorView): DecorationSet {
         if (heading) {
           const line = state.doc.lineAt(node.from);
           decos.push(
-            Decoration.line({ class: `lp-heading lp-h${heading[1]}` }).range(line.from)
+            Decoration.line({ class: `lp-heading lp-h${heading[1]}` }).range(
+              line.from,
+            ),
           );
           return;
         }
@@ -111,7 +141,7 @@ function buildDecorations(view: EditorView): DecorationSet {
             if (selectionOnLine(state, node.from, node.to)) return;
             const after = state.doc.sliceString(node.to, node.to + 1);
             const hideTo = after === " " ? node.to + 1 : node.to;
-            decos.push(Decoration.replace({}).range(node.from, hideTo));
+            hide(node.from, hideTo);
             return;
           }
 
@@ -120,38 +150,55 @@ function buildDecorations(view: EditorView): DecorationSet {
           case "StrikethroughMark": {
             const parent = node.node.parent;
             if (parent && selectionTouches(state, parent.from, parent.to)) {
-              decos.push(Decoration.mark({ class: "lp-mark" }).range(node.from, node.to));
+              decos.push(
+                Decoration.mark({ class: "lp-mark" }).range(node.from, node.to),
+              );
             } else {
-              decos.push(Decoration.replace({}).range(node.from, node.to));
+              hide(node.from, node.to);
             }
             return;
           }
 
           case "Emphasis":
-            decos.push(Decoration.mark({ class: "lp-em" }).range(node.from, node.to));
+            decos.push(
+              Decoration.mark({ class: "lp-em" }).range(node.from, node.to),
+            );
             return;
           case "StrongEmphasis":
-            decos.push(Decoration.mark({ class: "lp-strong" }).range(node.from, node.to));
+            decos.push(
+              Decoration.mark({ class: "lp-strong" }).range(node.from, node.to),
+            );
             return;
           case "Strikethrough":
-            decos.push(Decoration.mark({ class: "lp-strike" }).range(node.from, node.to));
+            decos.push(
+              Decoration.mark({ class: "lp-strike" }).range(node.from, node.to),
+            );
             return;
           case "InlineCode":
-            decos.push(Decoration.mark({ class: "lp-inline-code" }).range(node.from, node.to));
+            decos.push(
+              Decoration.mark({ class: "lp-inline-code" }).range(
+                node.from,
+                node.to,
+              ),
+            );
             return;
 
           case "Link":
           case "Image": {
             const revealed = selectionTouches(state, node.from, node.to);
-            decos.push(Decoration.mark({ class: "lp-link" }).range(node.from, node.to));
+            decos.push(
+              Decoration.mark({ class: "lp-link" }).range(node.from, node.to),
+            );
             if (revealed) return;
             // Hide everything except the [text] part.
             const n = node.node;
             for (let child = n.firstChild; child; child = child.nextSibling) {
-              if (child.name === "LinkMark") {
-                decos.push(Decoration.replace({}).range(child.from, child.to));
-              } else if (child.name === "URL" || child.name === "LinkTitle") {
-                decos.push(Decoration.replace({}).range(child.from, child.to));
+              if (
+                child.name === "LinkMark" ||
+                child.name === "URL" ||
+                child.name === "LinkTitle"
+              ) {
+                hide(child.from, child.to);
               }
             }
             return;
@@ -161,7 +208,7 @@ function buildDecorations(view: EditorView): DecorationSet {
             if (selectionOnLine(state, node.from, node.to)) return;
             const after = state.doc.sliceString(node.to, node.to + 1);
             const hideTo = after === " " ? node.to + 1 : node.to;
-            decos.push(Decoration.replace({}).range(node.from, hideTo));
+            hide(node.from, hideTo);
             return;
           }
 
@@ -170,7 +217,9 @@ function buildDecorations(view: EditorView): DecorationSet {
             const last = state.doc.lineAt(node.to);
             for (let l = first.number; l <= last.number; l++) {
               decos.push(
-                Decoration.line({ class: "lp-blockquote" }).range(state.doc.line(l).from)
+                Decoration.line({ class: "lp-blockquote" }).range(
+                  state.doc.line(l).from,
+                ),
               );
             }
             return;
@@ -184,34 +233,30 @@ function buildDecorations(view: EditorView): DecorationSet {
             const next = node.node.nextSibling;
             if (next && next.name === "Task") return;
             if (selectionOnLine(state, node.from, node.to)) return;
-            decos.push(
-              Decoration.replace({ widget: new BulletWidget() }).range(node.from, node.to)
-            );
+            hide(node.from, node.to, { widget: new BulletWidget() });
             return;
           }
 
           case "TaskMarker": {
             if (selectionOnLine(state, node.from, node.to)) return;
-            const text = state.doc.sliceString(node.from, node.to).toLowerCase();
+            const text = state.doc
+              .sliceString(node.from, node.to)
+              .toLowerCase();
             const checked = text.includes("x");
             // Hide the list mark before it as well: "- [x]" -> checkbox.
             const line = state.doc.lineAt(node.from);
             const before = state.doc.sliceString(line.from, node.from);
             const listMark = before.match(/([-*+]\s*)$/);
             const start = listMark ? node.from - listMark[1].length : node.from;
-            decos.push(
-              Decoration.replace({
-                widget: new CheckboxWidget(checked, node.from),
-              }).range(start, node.to)
-            );
+            hide(start, node.to, {
+              widget: new CheckboxWidget(checked, node.from),
+            });
             return;
           }
 
           case "HorizontalRule": {
             if (selectionOnLine(state, node.from, node.to)) return;
-            decos.push(
-              Decoration.replace({ widget: new HrWidget() }).range(node.from, node.to)
-            );
+            hide(node.from, node.to, { widget: new HrWidget() });
             return;
           }
 
@@ -221,7 +266,9 @@ function buildDecorations(view: EditorView): DecorationSet {
             const last = state.doc.lineAt(node.to);
             for (let l = first.number; l <= last.number; l++) {
               decos.push(
-                Decoration.line({ class: "lp-codeblock" }).range(state.doc.line(l).from)
+                Decoration.line({ class: "lp-codeblock" }).range(
+                  state.doc.line(l).from,
+                ),
               );
             }
             return;
@@ -231,20 +278,31 @@ function buildDecorations(view: EditorView): DecorationSet {
     });
   }
 
-  return Decoration.set(decos, true);
+  return {
+    decorations: Decoration.set(decos, true),
+    atomic: Decoration.set(hides, true),
+  };
 }
 
-export const livePreview = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet;
-    constructor(view: EditorView) {
-      this.decorations = buildDecorations(view);
+class LivePreviewPlugin {
+  decorations: DecorationSet;
+  atomic: DecorationSet;
+  constructor(view: EditorView) {
+    ({ decorations: this.decorations, atomic: this.atomic } =
+      buildDecorations(view));
+  }
+  update(update: ViewUpdate) {
+    if (update.docChanged || update.selectionSet || update.viewportChanged) {
+      ({ decorations: this.decorations, atomic: this.atomic } =
+        buildDecorations(update.view));
     }
-    update(update: ViewUpdate) {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        this.decorations = buildDecorations(update.view);
-      }
-    }
-  },
-  { decorations: (v) => v.decorations }
-);
+  }
+}
+
+export const livePreview = ViewPlugin.fromClass(LivePreviewPlugin, {
+  decorations: (v) => v.decorations,
+  provide: (plugin) =>
+    EditorView.atomicRanges.of(
+      (view) => view.plugin(plugin)?.atomic ?? Decoration.none,
+    ),
+});
