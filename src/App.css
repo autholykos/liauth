@@ -413,7 +413,7 @@ button.wide {
      windows wrap instead of overflowing. */
   max-width: min(68ch, 100%);
   margin: 0 auto;
-  padding: 48px 72px 40vh;
+  padding: 48px 56px 40vh;
   caret-color: var(--c-accent);
 }
 
