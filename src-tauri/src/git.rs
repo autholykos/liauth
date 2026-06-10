@@ -380,6 +380,29 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
     })
 }
 
+#[derive(Serialize)]
+pub struct ContentMerge {
+    pub content: String,
+    pub conflicts: bool,
+}
+
+/// Three-way merge of in-memory contents (diff3, the same algorithm git
+/// uses). Used to reconcile the editor buffer with concurrent writes to
+/// the file on disk: base = last content both sides derived from.
+#[tauri::command]
+pub fn merge_contents(base: String, ours: String, theirs: String) -> ContentMerge {
+    match diffy::merge(&base, &ours, &theirs) {
+        Ok(content) => ContentMerge {
+            content,
+            conflicts: false,
+        },
+        Err(content) => ContentMerge {
+            content,
+            conflicts: true,
+        },
+    }
+}
+
 /// Abort an in-progress merge and restore HEAD's version of the tree.
 #[tauri::command]
 pub fn abort_merge(file_path: String) -> Result<(), String> {

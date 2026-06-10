@@ -6,6 +6,7 @@ import {
   ask,
 } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { watch, type UnwatchFn } from "@tauri-apps/plugin-fs";
 import { getCM } from "@replit/codemirror-vim";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
@@ -120,6 +121,12 @@ function App() {
   // Tracks "buffer differs from disk" — distinct from `dirty`, which now
   // means "uncommitted changes" and only clears on a real (commit) save.
   const diskDirtyRef = useRef(false);
+  // Last disk content this app loaded or wrote: the merge base for
+  // reconciling concurrent external writes, and the way our own saves
+  // are told apart from someone else's.
+  const lastDiskRef = useRef("");
+  const unwatchRef = useRef<UnwatchFn | null>(null);
+  const [extConflict, setExtConflict] = useState<string | null>(null); // disk content
 
   const fileName = filePath ? filePath.split("/").pop() : "Untitled";
 
@@ -141,8 +148,10 @@ function App() {
     const path = filePathRef.current;
     if (!view || !path || viewingRef.current || !diskDirtyRef.current) return;
     try {
-      await api.saveDocument(path, view.state.doc.toString(), undefined, false);
+      const content = view.state.doc.toString();
+      await api.saveDocument(path, content, undefined, false);
       diskDirtyRef.current = false;
+      lastDiskRef.current = content;
     } catch (e) {
       console.warn("[liauth] autosave failed:", e);
     }
@@ -380,6 +389,68 @@ function App() {
     }
   }, []);
 
+  // External-change handling: called by the file watcher. Our own writes
+  // are recognized by comparing disk against what we last wrote.
+  const handleExternalChange = useCallback(async () => {
+    const path = filePathRef.current;
+    const view = viewRef.current;
+    // While viewing history the buffer holds an old version on purpose;
+    // loadFile re-reads the disk when returning to current.
+    if (!path || !view || viewingRef.current) return;
+    let disk: string;
+    try {
+      disk = await api.readDocument(path);
+    } catch {
+      return; // deleted/renamed mid-event; ignore
+    }
+    if (disk === lastDiskRef.current) return; // our own write
+    const buffer = view.state.doc.toString();
+    if (disk === buffer) {
+      lastDiskRef.current = disk;
+      return;
+    }
+    if (!diskDirtyRef.current) {
+      // Buffer is clean: just take the external version.
+      lastDiskRef.current = disk;
+      loadingRef.current = true;
+      setEditorContent(disk);
+      await refreshGit(path);
+      flash("Reloaded — file changed on disk");
+      return;
+    }
+    // Concurrent writes: try a three-way merge with the last common
+    // disk state as the ancestor (the same algorithm git merge uses).
+    const merged = await api.mergeContents(lastDiskRef.current, buffer, disk);
+    if (!merged.conflicts) {
+      lastDiskRef.current = disk;
+      setEditorContent(merged.content);
+      setDirty(true);
+      diskDirtyRef.current = true;
+      flash("Merged concurrent changes from disk — save to commit");
+    } else {
+      setExtConflict(disk);
+    }
+  }, [setEditorContent, refreshGit, flash]);
+
+  const watchFile = useCallback(
+    async (path: string) => {
+      unwatchRef.current?.();
+      unwatchRef.current = null;
+      try {
+        unwatchRef.current = await watch(
+          path,
+          () => void handleExternalChange(),
+          { delayMs: 500 },
+        );
+      } catch (e) {
+        console.warn("[liauth] file watch failed:", e);
+      }
+    },
+    [handleExternalChange],
+  );
+
+  useEffect(() => () => unwatchRef.current?.(), []);
+
   const loadFile = useCallback(
     async (path: string) => {
       try {
@@ -387,14 +458,17 @@ function App() {
         setFilePath(path);
         setViewing(null);
         setDirty(false);
+        setExtConflict(null);
         diskDirtyRef.current = false;
+        lastDiskRef.current = content;
         setEditorContent(content);
         await refreshGit(path);
+        await watchFile(path);
       } catch (e) {
         flash(`Could not open file: ${e}`);
       }
     },
-    [setEditorContent, refreshGit, flash],
+    [setEditorContent, refreshGit, flash, watchFile],
   );
 
   const doSave = useCallback(async () => {
@@ -409,19 +483,73 @@ function App() {
       setFilePath(path);
     }
     try {
-      const commit = await api.saveDocument(path, view.state.doc.toString());
+      const content = view.state.doc.toString();
+      const commit = await api.saveDocument(path, content);
       setDirty(false);
+      setExtConflict(null);
       diskDirtyRef.current = false;
+      lastDiskRef.current = content;
       flash(commit ? `Saved · committed ${commit.id.slice(0, 7)}` : "Saved");
       await refreshGit(path);
+      if (!unwatchRef.current) await watchFile(path);
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
-  }, [filePath, viewing, refreshGit, flash]);
+  }, [filePath, viewing, refreshGit, flash, watchFile]);
 
   useEffect(() => {
     saveRef.current = () => void doSave();
   }, [doSave]);
+
+  const doReload = useCallback(async () => {
+    const path = filePathRef.current;
+    if (!path) return;
+    if (diskDirtyRef.current) {
+      const ok = await ask("Discard unsaved changes and reload from disk?", {
+        title: "Reload",
+      });
+      if (!ok) return;
+    }
+    await loadFile(path);
+    flash("Reloaded from disk");
+  }, [loadFile, flash]);
+
+  const resolveExternal = useCallback(
+    async (mode: "merge" | "mine" | "theirs") => {
+      const view = viewRef.current;
+      const path = filePathRef.current;
+      if (!view || !path || extConflict === null) return;
+      const buffer = view.state.doc.toString();
+      if (mode === "mine") {
+        await api.saveDocument(path, buffer, undefined, false);
+        lastDiskRef.current = buffer;
+        diskDirtyRef.current = false;
+        setExtConflict(null);
+        flash("Kept your version — disk overwritten");
+      } else if (mode === "theirs") {
+        setExtConflict(null);
+        await loadFile(path);
+        flash("Took the disk version");
+      } else {
+        const merged = await api.mergeContents(
+          lastDiskRef.current,
+          buffer,
+          extConflict,
+        );
+        lastDiskRef.current = extConflict;
+        setEditorContent(merged.content);
+        setDirty(true);
+        diskDirtyRef.current = true;
+        setExtConflict(null);
+        flash(
+          merged.conflicts
+            ? "Conflict markers inserted — resolve them, then save"
+            : "Merged — save to commit",
+        );
+      }
+    },
+    [extConflict, loadFile, setEditorContent, flash],
+  );
 
   // Mount the editor once.
   useEffect(() => {
@@ -633,6 +761,13 @@ function App() {
           <button onClick={() => void doSave()} disabled={!!viewing}>
             Save
           </button>
+          <button
+            onClick={() => void doReload()}
+            disabled={!filePath}
+            title="Reload from disk"
+          >
+            ↻
+          </button>
           <button onClick={exportPdf}>Export PDF</button>
           <button
             className={room ? "active" : ""}
@@ -763,6 +898,21 @@ function App() {
           Merge in progress — resolve conflicts in the editor, then Save to
           conclude.
           <button onClick={() => void doAbortMerge()}>Abort merge</button>
+        </div>
+      ) : null}
+
+      {extConflict !== null ? (
+        <div className="banner warning">
+          The file changed on disk while you have unsaved edits.
+          <button onClick={() => void resolveExternal("merge")}>
+            Merge (3-way)
+          </button>
+          <button onClick={() => void resolveExternal("mine")}>
+            Keep mine
+          </button>
+          <button onClick={() => void resolveExternal("theirs")}>
+            Take disk
+          </button>
         </div>
       ) : null}
 

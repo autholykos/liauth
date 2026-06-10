@@ -25,6 +25,7 @@ serde_json = "1"
 git2 = "0.21.0"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
+diffy = "0.5.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"

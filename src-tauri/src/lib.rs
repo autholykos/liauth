@@ -19,6 +19,7 @@ pub fn run() {
             git::checkout_branch,
             git::merge_branch,
             git::abort_merge,
+            git::merge_contents,
             config::read_vim_config,
         ])
         .run(tauri::generate_context!())

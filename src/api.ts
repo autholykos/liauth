@@ -69,6 +69,14 @@ export const mergeBranch = (filePath: string, name: string) =>
 export const abortMerge = (filePath: string) =>
   invoke<void>("abort_merge", { filePath });
 
+export interface ContentMerge {
+  content: string;
+  conflicts: boolean;
+}
+
+export const mergeContents = (base: string, ours: string, theirs: string) =>
+  invoke<ContentMerge>("merge_contents", { base, ours, theirs });
+
 export interface VimConfig {
   path: string;
   content: string;

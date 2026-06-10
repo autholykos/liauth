@@ -27,6 +27,11 @@ git engine for versioning and asynchronous review.
   pivot, sentence/paragraph-aware pacing, 100–900 WPM (↑/↓), arrows to step,
   Esc drops the cursor where you stopped. Markdown syntax and notes are
   stripped from the word stream.
+- **Concurrent-write detection** — the open file is watched; external writes
+  reload automatically when the buffer is clean, merge automatically (diff3,
+  same algorithm as git) when both sides changed compatibly, and otherwise
+  offer Merge-with-markers / Keep mine / Take disk. A toolbar ↻ reloads on
+  demand.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 
