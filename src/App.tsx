@@ -100,7 +100,6 @@ function App() {
   const notesTimerRef = useRef<number | undefined>(undefined);
   const vimRef = useRef(vimMode);
   const roomRef = useRef(room);
-  const prevThemeRef = useRef<Theme>("paper");
   const roomMountedRef = useRef(false);
   const viewingRef = useRef(viewing);
   viewingRef.current = viewing;
@@ -230,8 +229,8 @@ function App() {
     }
   }, [lineNums, setEditorContent]);
 
-  // Room mode: fullscreen, chrome hidden, typewriter scrolling, and the
-  // terminal theme (previous theme restored on exit unless changed inside).
+  // Room mode: fullscreen, chrome hidden, typewriter scrolling. Theme and
+  // font stay as they are — the Room theme is just an option in the picker.
   useEffect(() => {
     roomRef.current = room;
     if (!roomMountedRef.current) {
@@ -243,12 +242,6 @@ function App() {
       .catch((e) => console.warn("[liauth] fullscreen failed:", e));
     if (room) {
       setPanel("none");
-      setTheme((t) => {
-        prevThemeRef.current = t;
-        return "room";
-      });
-    } else {
-      setTheme((t) => (t === "room" ? prevThemeRef.current : t));
     }
     const view = viewRef.current;
     if (view) {
