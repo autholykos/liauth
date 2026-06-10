@@ -5,15 +5,35 @@ import {
   save as saveDialog,
   ask,
 } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
 import { createEditorState } from "./editor/setup";
+import { applyVimrc, VimrcSummary } from "./editor/vimrc";
 import * as api from "./api";
 import "./App.css";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
 type Panel = "none" | "history" | "review";
+type Theme = "paper" | "sepia" | "dark" | "room";
+
+const THEMES: { id: Theme; label: string }[] = [
+  { id: "paper", label: "Paper" },
+  { id: "sepia", label: "Sepia" },
+  { id: "dark", label: "Dark" },
+  { id: "room", label: "Room" },
+];
+
+function initialTheme(): Theme {
+  const stored = localStorage.getItem("liauth.theme");
+  if (THEMES.some((t) => t.id === stored)) {
+    return stored as Theme;
+  }
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "paper";
+}
 
 function fmtTime(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -36,6 +56,18 @@ function App() {
   const [branches, setBranches] = useState<api.BranchInfo[]>([]);
   const [viewing, setViewing] = useState<api.CommitInfo | null>(null);
   const [status, setStatus] = useState<string>("");
+  const [vimMode, setVimMode] = useState(
+    () => localStorage.getItem("liauth.vim") === "1",
+  );
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
+  const [room, setRoom] = useState(false);
+  const vimRef = useRef(vimMode);
+  const roomRef = useRef(room);
+  const prevThemeRef = useRef<Theme>("paper");
+  const roomMountedRef = useRef(false);
+  const viewingRef = useRef(viewing);
+  viewingRef.current = viewing;
 
   const fileName = filePath ? filePath.split("/").pop() : "Untitled";
 
@@ -56,11 +88,99 @@ function App() {
             if (!loadingRef.current) setDirty(true);
           },
           onSave: () => saveRef.current(),
+          onToggleRoom: () => setRoom((r) => !r),
         },
-        readOnly,
+        {
+          readOnly,
+          vim: vimRef.current,
+          typewriter: roomRef.current,
+        },
       ),
     );
     loadingRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("liauth.theme", theme);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  // Load the user's vimrc subset once at startup. Mappings register in the
+  // vim engine's global registry, so this works regardless of when (or how
+  // often) vim mode is toggled.
+  useEffect(() => {
+    api
+      .readVimConfig()
+      .then((cfg) => {
+        if (!cfg) return;
+        const summary = applyVimrc(cfg.path, cfg.content);
+        setVimrc(summary);
+        if (vimRef.current && summary.applied > 0) {
+          flash(
+            `Vim config: ${summary.applied} entries from ${cfg.path}` +
+              (summary.skipped.length
+                ? ` (${summary.skipped.length} skipped)`
+                : ""),
+          );
+        }
+        if (summary.skipped.length) {
+          console.info("[liauth] vimrc lines skipped:", summary.skipped);
+        }
+      })
+      .catch((e) => console.warn("[liauth] vimrc load failed:", e));
+  }, [flash]);
+
+  // Rebuild the editor state when vim mode toggles, keeping the content.
+  useEffect(() => {
+    localStorage.setItem("liauth.vim", vimMode ? "1" : "0");
+    vimRef.current = vimMode;
+    const view = viewRef.current;
+    if (view) {
+      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+    }
+  }, [vimMode, setEditorContent]);
+
+  // Room mode: fullscreen, chrome hidden, typewriter scrolling, and the
+  // terminal theme (previous theme restored on exit unless changed inside).
+  useEffect(() => {
+    roomRef.current = room;
+    if (!roomMountedRef.current) {
+      roomMountedRef.current = true;
+      return;
+    }
+    getCurrentWindow()
+      .setFullscreen(room)
+      .catch((e) => console.warn("[liauth] fullscreen failed:", e));
+    if (room) {
+      setPanel("none");
+      setTheme((t) => {
+        prevThemeRef.current = t;
+        return "room";
+      });
+    } else {
+      setTheme((t) => (t === "room" ? prevThemeRef.current : t));
+    }
+    const view = viewRef.current;
+    if (view) {
+      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+      view.focus();
+    }
+  }, [room, setEditorContent]);
+
+  // Cmd/Ctrl-Shift-F toggles room mode from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "f"
+      ) {
+        e.preventDefault();
+        setRoom((r) => !r);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   const refreshGit = useCallback(async (path: string) => {
@@ -264,7 +384,8 @@ function App() {
   const versioned = !!repo?.repo_root;
 
   return (
-    <div className="app">
+    <div className={`app${room ? " room" : ""}`}>
+      <div className="toolbar-hotzone" />
       <header className="toolbar">
         <div className="toolbar-left">
           <button onClick={doOpen}>Open</button>
@@ -272,6 +393,13 @@ function App() {
             Save
           </button>
           <button onClick={exportPdf}>Export PDF</button>
+          <button
+            className={room ? "active" : ""}
+            title="Distraction-free writing room (⌘⇧F, or :room in vim mode)"
+            onClick={() => setRoom(!room)}
+          >
+            Room
+          </button>
         </div>
         <div className="toolbar-title">
           <span className="doc-name">
@@ -286,6 +414,32 @@ function App() {
           ) : null}
         </div>
         <div className="toolbar-right">
+          <button
+            className={vimMode ? "active" : ""}
+            title={
+              vimrc
+                ? `Toggle vim keybindings (:w saves)\n${vimrc.path}: ${vimrc.applied} entries applied` +
+                  (vimrc.skipped.length
+                    ? `, ${vimrc.skipped.length} skipped (see console)`
+                    : "")
+                : "Toggle vim keybindings (:w saves)"
+            }
+            onClick={() => setVimMode(!vimMode)}
+          >
+            Vim
+          </button>
+          <select
+            className="theme-select"
+            value={theme}
+            title="Color theme"
+            onChange={(e) => setTheme(e.target.value as Theme)}
+          >
+            {THEMES.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
           {versioned ? (
             <>
               <button

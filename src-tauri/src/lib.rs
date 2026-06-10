@@ -1,3 +1,4 @@
+mod config;
 mod git;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +19,7 @@ pub fn run() {
             git::checkout_branch,
             git::merge_branch,
             git::abort_merge,
+            config::read_vim_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

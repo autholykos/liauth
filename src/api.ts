@@ -32,8 +32,16 @@ export const initRepo = (filePath: string) =>
 export const readDocument = (filePath: string) =>
   invoke<string>("read_document", { filePath });
 
-export const saveDocument = (filePath: string, content: string, message?: string) =>
-  invoke<CommitInfo | null>("save_document", { filePath, content, message: message ?? null });
+export const saveDocument = (
+  filePath: string,
+  content: string,
+  message?: string,
+) =>
+  invoke<CommitInfo | null>("save_document", {
+    filePath,
+    content,
+    message: message ?? null,
+  });
 
 export const fileHistory = (filePath: string, limit?: number) =>
   invoke<CommitInfo[]>("file_history", { filePath, limit: limit ?? null });
@@ -44,8 +52,11 @@ export const fileAtCommit = (filePath: string, commitId: string) =>
 export const listBranches = (filePath: string) =>
   invoke<BranchInfo[]>("list_branches", { filePath });
 
-export const createBranch = (filePath: string, name: string, checkout: boolean) =>
-  invoke<void>("create_branch", { filePath, name, checkout });
+export const createBranch = (
+  filePath: string,
+  name: string,
+  checkout: boolean,
+) => invoke<void>("create_branch", { filePath, name, checkout });
 
 export const checkoutBranch = (filePath: string, name: string) =>
   invoke<void>("checkout_branch", { filePath, name });
@@ -55,3 +66,10 @@ export const mergeBranch = (filePath: string, name: string) =>
 
 export const abortMerge = (filePath: string) =>
   invoke<void>("abort_merge", { filePath });
+
+export interface VimConfig {
+  path: string;
+  content: string;
+}
+
+export const readVimConfig = () => invoke<VimConfig | null>("read_vim_config");

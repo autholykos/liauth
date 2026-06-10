@@ -17,17 +17,57 @@
   background: var(--c-bg);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --c-bg: #1e1f22;
-    --c-panel: #25262a;
-    --c-text: #d8d9dc;
-    --c-muted: #7f8085;
-    --c-border: #36373c;
-    --c-accent: #7aa2d6;
-    --c-warning-bg: #4a3c14;
-    --c-code-bg: #2a2b30;
-  }
+/* Paper is the :root default above. */
+
+[data-theme="sepia"] {
+  --c-bg: #f6ecd9;
+  --c-panel: #efe3cb;
+  --c-text: #4a3f30;
+  --c-muted: #94835f;
+  --c-border: #ddcfae;
+  --c-accent: #8a5a2b;
+  --c-warning-bg: #f3d9a4;
+  --c-code-bg: #ede0c4;
+}
+
+[data-theme="dark"] {
+  --c-bg: #1e1f22;
+  --c-panel: #25262a;
+  --c-text: #d8d9dc;
+  --c-muted: #7f8085;
+  --c-border: #36373c;
+  --c-accent: #7aa2d6;
+  --c-warning-bg: #4a3c14;
+  --c-code-bg: #2a2b30;
+}
+
+/* WriteRoom homage: phosphor green on near-black. */
+[data-theme="room"] {
+  --c-bg: #0c0d0c;
+  --c-panel: #131513;
+  --c-text: #2fdc58;
+  --c-muted: #1a7a35;
+  --c-border: #1d231d;
+  --c-accent: #00f900;
+  --c-warning-bg: #2c2a07;
+  --c-code-bg: #121712;
+}
+
+[data-theme="sepia"] body,
+[data-theme="dark"] body,
+[data-theme="room"] body {
+  background: var(--c-bg);
+  color: var(--c-text);
+}
+
+[data-theme="room"] .cm-editor {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+[data-theme="room"] .cm-editor .cm-selectionBackground {
+  background: #14491f !important;
 }
 
 * {
@@ -130,6 +170,61 @@ button:disabled {
 button.wide {
   width: 100%;
   margin-bottom: 10px;
+}
+
+.theme-select {
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  padding: 4px 6px;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+  color: var(--c-text);
+  cursor: pointer;
+}
+
+.theme-select:hover {
+  border-color: var(--c-accent);
+}
+
+/* ---------- room mode (distraction-free) ---------- */
+
+.toolbar-hotzone {
+  display: none;
+}
+
+.app.room .toolbar-hotzone {
+  display: block;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 12px;
+  z-index: 41;
+}
+
+.app.room .toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  transform: translateY(-100%);
+  transition: transform 0.22s ease;
+  z-index: 40;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
+}
+
+.app.room .toolbar-hotzone:hover ~ .toolbar,
+.app.room .toolbar:hover,
+.app.room .toolbar:focus-within {
+  transform: translateY(0);
+}
+
+/* Extra vertical breathing room so typewriter centering works at the
+   start and end of the document. */
+.app.room .cm-content {
+  padding-top: 42vh;
+  padding-bottom: 50vh;
 }
 
 /* ---------- banners & toast ---------- */
@@ -278,6 +373,35 @@ button.wide {
   border-left-color: var(--c-accent) !important;
 }
 
+/* Vim normal-mode block cursor. */
+.cm-fat-cursor {
+  background: var(--c-accent) !important;
+  color: var(--c-bg) !important;
+}
+
+.cm-editor:not(.cm-focused) .cm-fat-cursor {
+  background: none !important;
+  outline: 1px solid var(--c-accent);
+  color: inherit !important;
+}
+
+/* Vim command line (: prompt) at the bottom of the editor. */
+.cm-vim-panel {
+  background: var(--c-panel);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 3px 10px;
+}
+
+.cm-vim-panel input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--c-text);
+  font-family: var(--font-mono);
+}
+
 .lp-heading {
   font-weight: 700;
   line-height: 1.3;
@@ -379,6 +503,13 @@ button.wide {
 }
 
 @media print {
+  html,
+  body,
+  .app {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
   .app > *:not(#print-root) {
     display: none !important;
   }
