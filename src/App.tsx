@@ -25,6 +25,28 @@ const THEMES: { id: Theme; label: string }[] = [
   { id: "room", label: "Room" },
 ];
 
+type FontPref = "serif" | "sans" | "mono";
+
+const FONTS: { id: FontPref; label: string }[] = [
+  { id: "serif", label: "Serif" },
+  { id: "sans", label: "Sans" },
+  { id: "mono", label: "Mono" },
+];
+
+const ZOOM_MIN = 0.8;
+const ZOOM_MAX = 2.0;
+const ZOOM_STEP = 0.1;
+
+function initialFont(): FontPref {
+  const stored = localStorage.getItem("liauth.font");
+  return stored === "sans" || stored === "mono" ? stored : "serif";
+}
+
+function initialZoom(): number {
+  const stored = Number(localStorage.getItem("liauth.zoom"));
+  return stored >= ZOOM_MIN && stored <= ZOOM_MAX ? stored : 1;
+}
+
 function initialTheme(): Theme {
   const stored = localStorage.getItem("liauth.theme");
   if (THEMES.some((t) => t.id === stored)) {
@@ -62,6 +84,12 @@ function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
   const [room, setRoom] = useState(false);
+  const [font, setFont] = useState<FontPref>(initialFont);
+  const [zoom, setZoom] = useState<number>(initialZoom);
+  const [lineNums, setLineNums] = useState(
+    () => localStorage.getItem("liauth.lines") === "1",
+  );
+  const lineNumsRef = useRef(lineNums);
   const vimRef = useRef(vimMode);
   const roomRef = useRef(room);
   const prevThemeRef = useRef<Theme>("paper");
@@ -94,6 +122,7 @@ function App() {
           readOnly,
           vim: vimRef.current,
           typewriter: roomRef.current,
+          lineNumbers: lineNumsRef.current,
         },
       ),
     );
@@ -104,6 +133,37 @@ function App() {
     localStorage.setItem("liauth.theme", theme);
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("liauth.font", font);
+    document.documentElement.dataset.font = font;
+  }, [font]);
+
+  useEffect(() => {
+    localStorage.setItem("liauth.zoom", String(zoom));
+    document.documentElement.style.setProperty("--editor-zoom", String(zoom));
+  }, [zoom]);
+
+  // Cmd/Ctrl +/-/0 text zoom.
+  useEffect(() => {
+    const clamp = (z: number) =>
+      Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        setZoom((z) => clamp(z + ZOOM_STEP));
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        setZoom((z) => clamp(z - ZOOM_STEP));
+      } else if (e.key === "0") {
+        e.preventDefault();
+        setZoom(1);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
 
   // Load the user's vimrc subset once at startup. Mappings register in the
   // vim engine's global registry, so this works regardless of when (or how
@@ -139,6 +199,16 @@ function App() {
       setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
     }
   }, [vimMode, setEditorContent]);
+
+  // Same for the line-number gutter.
+  useEffect(() => {
+    localStorage.setItem("liauth.lines", lineNums ? "1" : "0");
+    lineNumsRef.current = lineNums;
+    const view = viewRef.current;
+    if (view) {
+      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+    }
+  }, [lineNums, setEditorContent]);
 
   // Room mode: fullscreen, chrome hidden, typewriter scrolling, and the
   // terminal theme (previous theme restored on exit unless changed inside).
@@ -428,6 +498,13 @@ function App() {
           >
             Vim
           </button>
+          <button
+            className={lineNums ? "active" : ""}
+            title="Toggle line numbers"
+            onClick={() => setLineNums(!lineNums)}
+          >
+            №
+          </button>
           <select
             className="theme-select"
             value={theme}
@@ -440,6 +517,27 @@ function App() {
               </option>
             ))}
           </select>
+          <select
+            className="theme-select"
+            value={font}
+            title="Prose font"
+            onChange={(e) => setFont(e.target.value as FontPref)}
+          >
+            {FONTS.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          {zoom !== 1 ? (
+            <button
+              className="zoom-indicator"
+              title="Text zoom (⌘+ / ⌘− / ⌘0 to reset)"
+              onClick={() => setZoom(1)}
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+          ) : null}
           {versioned ? (
             <>
               <button

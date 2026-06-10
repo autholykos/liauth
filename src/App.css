@@ -1,7 +1,17 @@
 :root {
-  --font-prose: "Charter", "Iowan Old Style", "Palatino", Georgia, serif;
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Screen-first serif: large x-height, sturdy strokes (Georgia was
+     designed for screens; Charter is the print-era fallback). */
+  --font-serif: "Literata", Georgia, "Iowan Old Style", "Charter", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-prose: var(--font-serif);
+  --font-ui: var(--font-sans);
+
+  /* Editor type scale: everything derives from base × zoom, and the
+     68ch measure is in the font's own units, so zoom keeps the line
+     length correct automatically. */
+  --editor-base: 17.5px;
+  --editor-zoom: 1;
 
   --c-bg: #fdfdfc;
   --c-panel: #f5f4f1;
@@ -11,10 +21,19 @@
   --c-accent: #3b6ea5;
   --c-warning-bg: #fff3d6;
   --c-code-bg: #f3f2ef;
+  --c-selection: #cde2f5;
 
   font-family: var(--font-ui);
   color: var(--c-text);
   background: var(--c-bg);
+}
+
+[data-font="sans"] {
+  --font-prose: var(--font-sans);
+}
+
+[data-font="mono"] {
+  --font-prose: var(--font-mono);
 }
 
 /* Paper is the :root default above. */
@@ -28,6 +47,7 @@
   --c-accent: #8a5a2b;
   --c-warning-bg: #f3d9a4;
   --c-code-bg: #ede0c4;
+  --c-selection: #e3cf9e;
 }
 
 [data-theme="dark"] {
@@ -39,6 +59,7 @@
   --c-accent: #7aa2d6;
   --c-warning-bg: #4a3c14;
   --c-code-bg: #2a2b30;
+  --c-selection: #31476b;
 }
 
 /* WriteRoom homage: phosphor green on near-black. */
@@ -51,6 +72,7 @@
   --c-accent: #00f900;
   --c-warning-bg: #2c2a07;
   --c-code-bg: #121712;
+  --c-selection: #14491f;
 }
 
 [data-theme="sepia"] body,
@@ -60,14 +82,31 @@
   color: var(--c-text);
 }
 
+[data-theme="room"] {
+  --editor-base: 15px;
+}
+
 [data-theme="room"] .cm-editor {
   font-family: var(--font-mono);
-  font-size: 15px;
   line-height: 1.8;
 }
 
-[data-theme="room"] .cm-editor .cm-selectionBackground {
-  background: #14491f !important;
+/* Light-on-dark text smears bolder on macOS without this. */
+[data-theme="dark"] .cm-editor,
+[data-theme="room"] .cm-editor {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Selection must come from the theme: CodeMirror's default lavender
+   swallows light text on dark backgrounds. */
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground {
+  background: var(--c-selection) !important;
+}
+
+.cm-content ::selection,
+.cm-content::selection {
+  background: var(--c-selection);
 }
 
 * {
@@ -187,6 +226,11 @@ button.wide {
   border-color: var(--c-accent);
 }
 
+.zoom-indicator {
+  color: var(--c-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- room mode (distraction-free) ---------- */
 
 .toolbar-hotzone {
@@ -222,7 +266,7 @@ button.wide {
 
 /* Extra vertical breathing room so typewriter centering works at the
    start and end of the document. */
-.app.room .cm-content {
+.app.room .editor-wrap .cm-editor .cm-content {
   padding-top: 42vh;
   padding-bottom: 50vh;
 }
@@ -347,10 +391,11 @@ button.wide {
   height: 100%;
   outline: none !important;
   font-family: var(--font-prose);
-  font-size: 16.5px;
+  font-size: calc(var(--editor-base) * var(--editor-zoom));
   line-height: 1.65;
   background: var(--c-bg);
   color: var(--c-text);
+  text-rendering: optimizeLegibility;
 }
 
 .cm-scroller {
@@ -358,14 +403,41 @@ button.wide {
   overflow: auto;
 }
 
-.cm-content {
-  max-width: 760px;
+/* CodeMirror injects its stylesheet at runtime with generated parent
+   classes (.ͼ1 .cm-content = specificity 0,2,0), so layout overrides
+   need .editor-wrap .cm-editor prefixes (0,3,0+) to reliably win. */
+
+.editor-wrap .cm-editor .cm-content {
+  /* 68ch ≈ the 45–75 chars-per-line comfort band; ch tracks the
+     prose font and zoom level. Capped at the viewport so narrow
+     windows wrap instead of overflowing. */
+  max-width: min(68ch, 100%);
   margin: 0 auto;
-  padding: 48px 56px 40vh;
+  padding: 48px 72px 40vh;
   caret-color: var(--c-accent);
 }
 
-.cm-line {
+/* Line-number gutter: quiet, borderless, clearly separated from text. */
+.editor-wrap .cm-editor .cm-gutters {
+  background: transparent !important;
+  border-right: none !important;
+  color: var(--c-muted);
+  font-family: var(--font-mono);
+  font-size: 0.75em;
+  padding-left: 18px;
+}
+
+.editor-wrap .cm-editor .cm-lineNumbers .cm-gutterElement {
+  padding: 0 18px 0 8px;
+  min-width: 2.4em;
+}
+
+.editor-wrap .cm-editor .cm-activeLineGutter {
+  background: transparent !important;
+  color: var(--c-text);
+}
+
+.editor-wrap .cm-editor .cm-line {
   padding: 0;
 }
 

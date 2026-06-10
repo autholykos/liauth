@@ -3,6 +3,7 @@ import {
   keymap,
   drawSelection,
   placeholder,
+  lineNumbers,
 } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import { history, historyKeymap, defaultKeymap } from "@codemirror/commands";
@@ -69,6 +70,7 @@ export interface EditorOptions {
   readOnly?: boolean;
   vim?: boolean;
   typewriter?: boolean;
+  lineNumbers?: boolean;
 }
 
 export function createEditorState(
@@ -80,6 +82,7 @@ export function createEditorState(
     readOnly = false,
     vim: useVim = false,
     typewriter: useTypewriter = false,
+    lineNumbers: useLineNumbers = false,
   } = opts;
   if (useVim) {
     // Ex commands are registered globally; rebind to the current document's
@@ -93,6 +96,7 @@ export function createEditorState(
       // vim() must precede other keymaps to take precedence.
       useVim ? vim() : [],
       useTypewriter ? typewriterScroll : [],
+      useLineNumbers ? lineNumbers() : [],
       EditorState.readOnly.of(readOnly),
       history(),
       drawSelection(),
