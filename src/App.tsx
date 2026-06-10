@@ -564,6 +564,27 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Remember the open document across launches.
+  useEffect(() => {
+    if (filePath) localStorage.setItem("liauth.lastFile", filePath);
+  }, [filePath]);
+
+  // Reopen the last document on startup (runs after the editor mounts).
+  useEffect(() => {
+    const last = localStorage.getItem("liauth.lastFile");
+    if (!last) return;
+    void (async () => {
+      try {
+        await api.readDocument(last); // existence check, quiet on failure
+        await loadFile(last);
+      } catch {
+        localStorage.removeItem("liauth.lastFile");
+      }
+    })();
+    // Run once on mount; loadFile is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const doOpen = useCallback(async () => {
     const path = await openDialog({
       multiple: false,
