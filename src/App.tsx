@@ -17,6 +17,8 @@ import {
   stripCriticMarkup,
   NoteMatch,
 } from "./editor/notes";
+import { buildRsvpWords, RsvpWord } from "./editor/rsvp";
+import { RsvpOverlay } from "./RsvpOverlay";
 import * as api from "./api";
 import "./App.css";
 
@@ -99,6 +101,13 @@ function App() {
   const lineNumsRef = useRef(lineNums);
   const [notes, setNotes] = useState<NoteMatch[]>([]);
   const notesTimerRef = useRef<number | undefined>(undefined);
+  const [rsvp, setRsvp] = useState<{
+    words: RsvpWord[];
+    startIndex: number;
+  } | null>(null);
+  const rsvpRef = useRef<() => void>(() => {});
+  const rsvpOpenRef = useRef(false);
+  rsvpOpenRef.current = rsvp !== null;
   const vimRef = useRef(vimMode);
   const roomRef = useRef(room);
   const roomMountedRef = useRef(false);
@@ -145,6 +154,54 @@ function App() {
     return () => window.removeEventListener("blur", onBlur);
   }, [autoSave]);
 
+  // RSVP speed reading: starts at the cursor's word.
+  const startRsvp = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const words = buildRsvpWords(view.state.doc.toString());
+    if (words.length === 0) {
+      flash("Nothing to read");
+      return;
+    }
+    const head = view.state.selection.main.head;
+    let startIndex = words.findIndex((w) => w.offset >= head);
+    if (startIndex < 0) startIndex = words.length - 1;
+    setRsvp({ words, startIndex });
+  }, [flash]);
+
+  useEffect(() => {
+    rsvpRef.current = startRsvp;
+  }, [startRsvp]);
+
+  const exitRsvp = useCallback((offset: number) => {
+    setRsvp(null);
+    const view = viewRef.current;
+    if (!view) return;
+    const pos = Math.min(offset, view.state.doc.length);
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
+  }, []);
+
+  // Cmd/Ctrl-Shift-R opens the reader.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "r" &&
+        !rsvpOpenRef.current
+      ) {
+        e.preventDefault();
+        rsvpRef.current();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   const setEditorContent = useCallback(
     (content: string, readOnly = false) => {
       const view = viewRef.current;
@@ -167,6 +224,7 @@ function App() {
             },
             onSave: () => saveRef.current(),
             onToggleRoom: () => setRoom((r) => !r),
+            onRsvp: () => rsvpRef.current(),
           },
           {
             readOnly,
@@ -583,6 +641,12 @@ function App() {
           >
             Room
           </button>
+          <button
+            title="Speed-read from the cursor (⌘⇧R, or :rsvp in vim mode)"
+            onClick={startRsvp}
+          >
+            Read
+          </button>
         </div>
         <div className="toolbar-title">
           <span className="doc-name">
@@ -822,6 +886,13 @@ function App() {
       </main>
 
       {status ? <div className="status-toast">{status}</div> : null}
+      {rsvp ? (
+        <RsvpOverlay
+          words={rsvp.words}
+          startIndex={rsvp.startIndex}
+          onExit={exitRsvp}
+        />
+      ) : null}
       <div id="print-root" />
     </div>
   );

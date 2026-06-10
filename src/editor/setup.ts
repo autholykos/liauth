@@ -65,6 +65,7 @@ export interface EditorCallbacks {
   onChange: () => void;
   onSave: () => void;
   onToggleRoom?: () => void;
+  onRsvp?: () => void;
 }
 
 export interface EditorOptions {
@@ -90,6 +91,7 @@ export function createEditorState(
     // callbacks each time a state is built.
     Vim.defineEx("write", "w", () => cb.onSave());
     Vim.defineEx("room", "room", () => cb.onToggleRoom?.());
+    Vim.defineEx("rsvp", "rsvp", () => cb.onRsvp?.());
   }
   return EditorState.create({
     doc,

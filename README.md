@@ -22,6 +22,11 @@ git engine for versioning and asynchronous review.
   any other edit. Select text and hit ⌘⇧M; the live view shows a highlight
   with a hover bubble, the Notes panel lists/jumps/resolves them, and PDF
   export strips them.
+- **RSVP speed reading** — ⌘⇧R (or `:rsvp`) flashes the document one word at
+  a time, Spritz-style, starting at the cursor: fixed optimal-recognition
+  pivot, sentence/paragraph-aware pacing, 100–900 WPM (↑/↓), arrows to step,
+  Esc drops the cursor where you stopped. Markdown syntax and notes are
+  stripped from the word stream.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 
