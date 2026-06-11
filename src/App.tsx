@@ -6,12 +6,22 @@ import {
   ask,
 } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { watch, type UnwatchFn } from "@tauri-apps/plugin-fs";
 import { getCM } from "@replit/codemirror-vim";
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
-import { createEditorState } from "./editor/setup";
+import {
+  createEditorState,
+  toggleBold,
+  toggleItalic,
+  CursorStatus,
+} from "./editor/setup";
+import { buildAppMenu } from "./menu";
+import { CommandPalette, PaletteCommand } from "./CommandPalette";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
+import { HelpPanel } from "./HelpPanel";
 import {
   scanNotes,
   insertNote,
@@ -25,7 +35,7 @@ import "./App.css";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
-type Panel = "none" | "history" | "review" | "notes";
+type Panel = "none" | "history" | "review" | "notes" | "help";
 type Theme = "paper" | "sepia" | "dark" | "room";
 
 const THEMES: { id: Theme; label: string }[] = [
@@ -46,6 +56,27 @@ const FONTS: { id: FontPref; label: string }[] = [
 const ZOOM_MIN = 0.8;
 const ZOOM_MAX = 2.0;
 const ZOOM_STEP = 0.1;
+
+const clampZoom = (z: number) =>
+  Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
+
+function loadRecents(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("liauth.recents") ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((p) => typeof p === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function timeNow(): string {
+  return new Date().toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 function initialFont(): FontPref {
   const stored = localStorage.getItem("liauth.font");
@@ -92,7 +123,6 @@ function App() {
     () => localStorage.getItem("liauth.vim") === "1",
   );
   const [theme, setTheme] = useState<Theme>(initialTheme);
-  const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
   const [room, setRoom] = useState(false);
   const [font, setFont] = useState<FontPref>(initialFont);
   const [zoom, setZoom] = useState<number>(initialZoom);
@@ -127,6 +157,14 @@ function App() {
   const lastDiskRef = useRef("");
   const unwatchRef = useRef<UnwatchFn | null>(null);
   const [extConflict, setExtConflict] = useState<string | null>(null); // disk content
+  const [recents, setRecents] = useState<string[]>(loadRecents);
+  const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [cursor, setCursor] = useState<CursorStatus>({ line: 1, col: 1 });
+  const [counts, setCounts] = useState({ words: 0, chars: 0 });
+  const [lastSave, setLastSave] = useState("");
+  const countsTimerRef = useRef<number | undefined>(undefined);
+  const runRef = useRef<(id: string) => void>(() => {});
 
   const fileName = filePath ? filePath.split("/").pop() : "Untitled";
 
@@ -140,6 +178,33 @@ function App() {
     if (view) setNotes(scanNotes(view.state.doc.toString()));
   }, []);
 
+  const updateCounts = useCallback(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const text = view.state.doc.toString();
+    setCounts({
+      words: (text.match(/\S+/g) ?? []).length,
+      chars: text.length,
+    });
+  }, []);
+
+  const scheduleCounts = useCallback(() => {
+    window.clearTimeout(countsTimerRef.current);
+    countsTimerRef.current = window.setTimeout(updateCounts, 300);
+  }, [updateCounts]);
+
+  useEffect(() => {
+    setLastSave("");
+    updateCounts();
+  }, [filePath, updateCounts]);
+
+  useEffect(() => {
+    const name = fileName ?? "Untitled";
+    void getCurrentWindow()
+      .setTitle(`${name}${dirty ? " — Edited" : ""}`)
+      .catch(() => {});
+  }, [fileName, dirty]);
+
   // Autosave: plain disk write, never a commit (and so never able to
   // conclude a merge). Triggered on leaving vim insert mode and on
   // window blur.
@@ -152,6 +217,7 @@ function App() {
       await api.saveDocument(path, content, undefined, false);
       diskDirtyRef.current = false;
       lastDiskRef.current = content;
+      setLastSave(`autosaved ${timeNow()}`);
     } catch (e) {
       console.warn("[liauth] autosave failed:", e);
     }
@@ -225,6 +291,7 @@ function App() {
                 setDirty(true);
                 diskDirtyRef.current = true;
               }
+              scheduleCounts();
               // Keep the Notes panel in sync while typing, debounced.
               if (panelRef.current === "notes") {
                 window.clearTimeout(notesTimerRef.current);
@@ -234,6 +301,7 @@ function App() {
             onSave: () => saveRef.current(),
             onToggleRoom: () => setRoom((r) => !r),
             onRsvp: () => rsvpRef.current(),
+            onStatus: (s) => setCursor(s),
           },
           {
             readOnly,
@@ -256,7 +324,7 @@ function App() {
       }
       loadingRef.current = false;
     },
-    [autoSave, refreshNotes],
+    [autoSave, refreshNotes, scheduleCounts],
   );
 
   useEffect(() => {
@@ -274,26 +342,32 @@ function App() {
     document.documentElement.style.setProperty("--editor-zoom", String(zoom));
   }, [zoom]);
 
-  // Cmd/Ctrl +/-/0 text zoom.
+  // Cmd/Ctrl +/-/0 text zoom and Cmd/Ctrl-K palette (fallbacks for when
+  // the native menu accelerators don't fire, e.g. dev reload states).
   useEffect(() => {
-    const clamp = (z: number) =>
-      Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       if (e.key === "=" || e.key === "+") {
         e.preventDefault();
-        setZoom((z) => clamp(z + ZOOM_STEP));
+        setZoom((z) => clampZoom(z + ZOOM_STEP));
       } else if (e.key === "-" || e.key === "_") {
         e.preventDefault();
-        setZoom((z) => clamp(z - ZOOM_STEP));
+        setZoom((z) => clampZoom(z - ZOOM_STEP));
       } else if (e.key === "0") {
         e.preventDefault();
         setZoom(1);
+      } else if (e.key.toLowerCase() === "k" && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("liauth.recents", JSON.stringify(recents));
+  }, [recents]);
 
   // Load the user's vimrc subset once at startup. Mappings register in the
   // vim engine's global registry, so this works regardless of when (or how
@@ -462,6 +536,7 @@ function App() {
         diskDirtyRef.current = false;
         lastDiskRef.current = content;
         setEditorContent(content);
+        setRecents((r) => [path, ...r.filter((p) => p !== path)].slice(0, 8));
         await refreshGit(path);
         await watchFile(path);
       } catch (e) {
@@ -489,13 +564,34 @@ function App() {
       setExtConflict(null);
       diskDirtyRef.current = false;
       lastDiskRef.current = content;
-      flash(commit ? `Saved · committed ${commit.id.slice(0, 7)}` : "Saved");
+      setLastSave(
+        commit
+          ? `committed ${commit.id.slice(0, 7)} · ${timeNow()}`
+          : `saved ${timeNow()}`,
+      );
       await refreshGit(path);
       if (!unwatchRef.current) await watchFile(path);
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
   }, [filePath, viewing, refreshGit, flash, watchFile]);
+
+  const doSaveAs = useCallback(async () => {
+    const view = viewRef.current;
+    if (!view || viewing) return;
+    const path = await saveDialog({
+      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+      defaultPath: fileName ?? undefined,
+    });
+    if (!path) return;
+    try {
+      await api.saveDocument(path, view.state.doc.toString());
+      await loadFile(path);
+      setLastSave(`saved as ${path.split("/").pop()} · ${timeNow()}`);
+    } catch (e) {
+      flash(`Save As failed: ${e}`);
+    }
+  }, [viewing, fileName, loadFile, flash]);
 
   useEffect(() => {
     saveRef.current = () => void doSave();
@@ -569,11 +665,17 @@ function App() {
     if (filePath) localStorage.setItem("liauth.lastFile", filePath);
   }, [filePath]);
 
-  // Reopen the last document on startup (runs after the editor mounts).
+  // On startup: a file handed to us by the OS (Finder "Open with",
+  // double-click) wins; otherwise reopen the last document.
   useEffect(() => {
-    const last = localStorage.getItem("liauth.lastFile");
-    if (!last) return;
     void (async () => {
+      const pending = await api.takePendingOpen().catch(() => null);
+      if (pending) {
+        await loadFile(pending);
+        return;
+      }
+      const last = localStorage.getItem("liauth.lastFile");
+      if (!last) return;
       try {
         await api.readDocument(last); // existence check, quiet on failure
         await loadFile(last);
@@ -583,6 +685,63 @@ function App() {
     })();
     // Run once on mount; loadFile is stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Files opened from the OS while the app is already running.
+  useEffect(() => {
+    const un = listen<string>("open-file", (e) => {
+      void api.takePendingOpen().catch(() => null); // consume the stash
+      void loadFile(e.payload);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Drop a markdown file anywhere on the window to open it.
+  useEffect(() => {
+    const un = getCurrentWebview().onDragDropEvent((e) => {
+      if (e.payload.type !== "drop") return;
+      const path = e.payload.paths.find((p) => /\.(md|markdown|txt)$/i.test(p));
+      if (path) void loadFile(path);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Closing/quitting: a named document autosaves to disk; an untitled
+  // buffer with content asks before being discarded.
+  useEffect(() => {
+    const un = getCurrentWindow().onCloseRequested(async (e) => {
+      const view = viewRef.current;
+      const path = filePathRef.current;
+      if (view && path && diskDirtyRef.current) {
+        try {
+          await api.saveDocument(
+            path,
+            view.state.doc.toString(),
+            undefined,
+            false,
+          );
+        } catch {
+          // fall through; closing loses nothing that a failed write kept
+        }
+        return;
+      }
+      if (view && !path && view.state.doc.length > 0) {
+        const ok = await ask(
+          "The untitled document has unsaved content. Quit anyway?",
+          { title: "Quit Liauth", kind: "warning" },
+        );
+        if (!ok) e.preventDefault();
+      }
+    });
+    return () => {
+      void un.then((f) => f());
+    };
   }, []);
 
   const doOpen = useCallback(async () => {
@@ -773,37 +932,185 @@ function App() {
 
   const versioned = !!repo?.repo_root;
 
+  // Central command runner: native menus, the command palette, and the
+  // remaining toolbar buttons all route through here.
+  const execCommand = useCallback(
+    (id: string) => {
+      if (id.startsWith("recent:")) {
+        void loadFile(id.slice(7));
+        return;
+      }
+      if (id.startsWith("theme:")) {
+        setTheme(id.slice(6) as Theme);
+        return;
+      }
+      if (id.startsWith("font:")) {
+        setFont(id.slice(5) as FontPref);
+        return;
+      }
+      const view = viewRef.current;
+      switch (id) {
+        case "open":
+          void doOpen();
+          break;
+        case "save":
+          void doSave();
+          break;
+        case "save-as":
+          void doSaveAs();
+          break;
+        case "reload":
+          void doReload();
+          break;
+        case "export-pdf":
+          exportPdf();
+          break;
+        case "quit":
+          void getCurrentWindow().close();
+          break;
+        case "clear-recents":
+          setRecents([]);
+          break;
+        case "bold":
+          if (view) {
+            toggleBold(view);
+            view.focus();
+          }
+          break;
+        case "italic":
+          if (view) {
+            toggleItalic(view);
+            view.focus();
+          }
+          break;
+        case "insert-note":
+          addNote();
+          break;
+        case "zoom-in":
+          setZoom((z) => clampZoom(z + ZOOM_STEP));
+          break;
+        case "zoom-out":
+          setZoom((z) => clampZoom(z - ZOOM_STEP));
+          break;
+        case "zoom-reset":
+          setZoom(1);
+          break;
+        case "toggle-lines":
+          setLineNums((v) => !v);
+          break;
+        case "toggle-vim":
+          setVimMode((v) => !v);
+          break;
+        case "toggle-room":
+          setRoom((r) => !r);
+          break;
+        case "rsvp":
+          startRsvp();
+          break;
+        case "panel-notes":
+          toggleNotesPanel();
+          break;
+        case "panel-history":
+          setPanel((p) => (p === "history" ? "none" : "history"));
+          break;
+        case "panel-review":
+          setPanel((p) => (p === "review" ? "none" : "review"));
+          break;
+        case "panel-help":
+          setPanel((p) => (p === "help" ? "none" : "help"));
+          break;
+        case "enable-versioning":
+          void enableVersioning();
+          break;
+        case "new-review-branch":
+          void newReviewBranch();
+          break;
+        case "palette":
+          setPaletteOpen(true);
+          break;
+      }
+    },
+    [
+      loadFile,
+      doOpen,
+      doSave,
+      doSaveAs,
+      doReload,
+      exportPdf,
+      addNote,
+      startRsvp,
+      toggleNotesPanel,
+      enableVersioning,
+      newReviewBranch,
+    ],
+  );
+
+  useEffect(() => {
+    runRef.current = execCommand;
+  }, [execCommand]);
+
+  // Native menu bar: rebuilt whenever the state it reflects changes.
+  useEffect(() => {
+    void buildAppMenu((id) => runRef.current(id), {
+      theme,
+      font,
+      vim: vimMode,
+      lineNumbers: lineNums,
+      room,
+      versioned,
+      panel,
+      recents,
+    }).catch((e) => console.warn("[liauth] menu build failed:", e));
+  }, [theme, font, vimMode, lineNums, room, versioned, panel, recents]);
+
+  const paletteCommands: PaletteCommand[] = [
+    { id: "open", title: "Open…", shortcut: "⌘O" },
+    { id: "save", title: "Save (Commit)", shortcut: "⌘S" },
+    { id: "save-as", title: "Save As…", shortcut: "⇧⌘S" },
+    { id: "reload", title: "Reload from Disk", shortcut: "⌘R" },
+    { id: "export-pdf", title: "Export as PDF", shortcut: "⇧⌘E" },
+    { id: "bold", title: "Bold", shortcut: "⌘B" },
+    { id: "italic", title: "Italic", shortcut: "⌘I" },
+    { id: "insert-note", title: "Insert Note", shortcut: "⇧⌘M" },
+    {
+      id: "toggle-room",
+      title: room ? "Exit Writing Room" : "Enter Writing Room",
+      shortcut: "⇧⌘F",
+    },
+    { id: "rsvp", title: "Speed Read", shortcut: "⇧⌘R" },
+    {
+      id: "toggle-lines",
+      title: lineNums ? "Hide Line Numbers" : "Show Line Numbers",
+      shortcut: "⇧⌘L",
+    },
+    {
+      id: "toggle-vim",
+      title: vimMode ? "Disable Vim Keybindings" : "Enable Vim Keybindings",
+    },
+    { id: "zoom-in", title: "Zoom In", shortcut: "⌘+" },
+    { id: "zoom-out", title: "Zoom Out", shortcut: "⌘−" },
+    { id: "zoom-reset", title: "Actual Size", shortcut: "⌘0" },
+    ...THEMES.map((t) => ({ id: `theme:${t.id}`, title: `Theme: ${t.label}` })),
+    ...FONTS.map((f) => ({ id: `font:${f.id}`, title: `Font: ${f.label}` })),
+    { id: "panel-notes", title: "Toggle Notes Panel" },
+    { id: "panel-help", title: "Help" },
+    ...(versioned
+      ? [
+          { id: "panel-history", title: "Toggle History Panel" },
+          { id: "panel-review", title: "Toggle Review Panel" },
+          { id: "new-review-branch", title: "New Review Branch…" },
+        ]
+      : [{ id: "enable-versioning", title: "Enable Versioning…" }]),
+    ...recents.map((p) => ({
+      id: `recent:${p}`,
+      title: `Open Recent: ${p.split("/").pop()}`,
+    })),
+  ];
+
   return (
     <div className={`app${room ? " room" : ""}`}>
       <div className="toolbar-hotzone" />
       <header className="toolbar">
-        <div className="toolbar-left">
-          <button onClick={doOpen}>Open</button>
-          <button onClick={() => void doSave()} disabled={!!viewing}>
-            Save
-          </button>
-          <button
-            onClick={() => void doReload()}
-            disabled={!filePath}
-            title="Reload from disk"
-          >
-            ↻
-          </button>
-          <button onClick={exportPdf}>Export PDF</button>
-          <button
-            className={room ? "active" : ""}
-            title="Distraction-free writing room (⌘⇧F, or :room in vim mode)"
-            onClick={() => setRoom(!room)}
-          >
-            Room
-          </button>
-          <button
-            title="Speed-read from the cursor (⌘⇧R, or :rsvp in vim mode)"
-            onClick={startRsvp}
-          >
-            Read
-          </button>
-        </div>
         <div className="toolbar-title">
           <span className="doc-name">
             {fileName}
@@ -817,72 +1124,19 @@ function App() {
               </span>
             ) : null}
           </span>
-          {versioned && repo?.branch ? (
-            <span className={`branch-badge${repo.merging ? " merging" : ""}`}>
-              ⎇ {repo.branch}
-              {repo.merging ? " · merging" : ""}
-            </span>
-          ) : null}
         </div>
         <div className="toolbar-right">
           <button
-            className={vimMode ? "active" : ""}
-            title={
-              vimrc
-                ? `Toggle vim keybindings (:w saves)\n${vimrc.path}: ${vimrc.applied} entries applied` +
-                  (vimrc.skipped.length
-                    ? `, ${vimrc.skipped.length} skipped (see console)`
-                    : "")
-                : "Toggle vim keybindings (:w saves)"
-            }
-            onClick={() => setVimMode(!vimMode)}
+            onClick={() => execCommand("reload")}
+            disabled={!filePath}
+            title="Reload from disk (⌘R)"
           >
-            Vim
+            ↻
           </button>
-          <button
-            className={lineNums ? "active" : ""}
-            title="Toggle line numbers"
-            onClick={() => setLineNums(!lineNums)}
-          >
-            №
-          </button>
-          <select
-            className="theme-select"
-            value={theme}
-            title="Color theme"
-            onChange={(e) => setTheme(e.target.value as Theme)}
-          >
-            {THEMES.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.label}
-              </option>
-            ))}
-          </select>
-          <select
-            className="theme-select"
-            value={font}
-            title="Prose font"
-            onChange={(e) => setFont(e.target.value as FontPref)}
-          >
-            {FONTS.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.label}
-              </option>
-            ))}
-          </select>
-          {zoom !== 1 ? (
-            <button
-              className="zoom-indicator"
-              title="Text zoom (⌘+ / ⌘− / ⌘0 to reset)"
-              onClick={() => setZoom(1)}
-            >
-              {Math.round(zoom * 100)}%
-            </button>
-          ) : null}
           <button
             className={panel === "notes" ? "active" : ""}
             title="Notes (insert with ⌘⇧M)"
-            onClick={toggleNotesPanel}
+            onClick={() => execCommand("panel-notes")}
           >
             Notes
           </button>
@@ -890,27 +1144,32 @@ function App() {
             <>
               <button
                 className={panel === "history" ? "active" : ""}
-                onClick={() =>
-                  setPanel(panel === "history" ? "none" : "history")
-                }
+                onClick={() => execCommand("panel-history")}
               >
                 History
               </button>
               <button
                 className={panel === "review" ? "active" : ""}
-                onClick={() => setPanel(panel === "review" ? "none" : "review")}
+                onClick={() => execCommand("panel-review")}
               >
                 Review
               </button>
             </>
           ) : (
             <button
-              onClick={() => void enableVersioning()}
+              onClick={() => execCommand("enable-versioning")}
               disabled={!filePath}
             >
               Enable versioning
             </button>
           )}
+          <button
+            className={panel === "help" ? "active" : ""}
+            title="Help"
+            onClick={() => execCommand("panel-help")}
+          >
+            ?
+          </button>
         </div>
       </header>
 
@@ -1054,7 +1313,24 @@ function App() {
             </ul>
           </aside>
         ) : null}
+
+        {panel === "help" ? (
+          <HelpPanel vimActive={vimMode} vimrc={vimrc} />
+        ) : null}
       </main>
+
+      <footer className="statusbar">
+        <span>
+          {versioned && repo?.branch ? `⎇ ${repo.branch}` : ""}
+          {repo?.merging ? " · merging" : ""}
+        </span>
+        <span>
+          Ln {cursor.line}, Col {cursor.col} · {counts.words.toLocaleString()}{" "}
+          words · {counts.chars.toLocaleString()} chars
+          {zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}
+        </span>
+        <span>{lastSave || (dirty ? "uncommitted changes" : "")}</span>
+      </footer>
 
       {status ? <div className="status-toast">{status}</div> : null}
       {rsvp ? (
@@ -1062,6 +1338,13 @@ function App() {
           words={rsvp.words}
           startIndex={rsvp.startIndex}
           onExit={exitRsvp}
+        />
+      ) : null}
+      {paletteOpen ? (
+        <CommandPalette
+          commands={paletteCommands}
+          onRun={execCommand}
+          onClose={() => setPaletteOpen(false)}
         />
       ) : null}
       <div id="print-root" />

@@ -83,3 +83,5 @@ export interface VimConfig {
 }
 
 export const readVimConfig = () => invoke<VimConfig | null>("read_vim_config");
+
+export const takePendingOpen = () => invoke<string | null>("take_pending_open");

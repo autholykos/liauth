@@ -61,11 +61,21 @@ function toggleWrap(marker: string) {
   };
 }
 
+/** Toggle bold/italic on the selection — shared by keymap, menu, palette. */
+export const toggleBold = toggleWrap("**");
+export const toggleItalic = toggleWrap("*");
+
+export interface CursorStatus {
+  line: number;
+  col: number;
+}
+
 export interface EditorCallbacks {
   onChange: () => void;
   onSave: () => void;
   onToggleRoom?: () => void;
   onRsvp?: () => void;
+  onStatus?: (s: CursorStatus) => void;
 }
 
 export interface EditorOptions {
@@ -117,14 +127,19 @@ export function createEditorState(
             return true;
           },
         },
-        { key: "Mod-b", run: toggleWrap("**") },
-        { key: "Mod-i", run: toggleWrap("*") },
+        { key: "Mod-b", run: toggleBold },
+        { key: "Mod-i", run: toggleItalic },
         { key: "Mod-Shift-m", run: insertNote },
         ...defaultKeymap,
         ...historyKeymap,
       ]),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) cb.onChange();
+        if ((u.docChanged || u.selectionSet) && cb.onStatus) {
+          const head = u.state.selection.main.head;
+          const line = u.state.doc.lineAt(head);
+          cb.onStatus({ line: line.number, col: head - line.from + 1 });
+        }
       }),
     ],
   });
