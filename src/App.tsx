@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { EditorView } from "@codemirror/view";
 import {
   open as openDialog,
@@ -16,6 +16,7 @@ import {
   createEditorState,
   toggleBold,
   toggleItalic,
+  sweepGhostCursorLayers,
   CursorStatus,
 } from "./editor/setup";
 import { buildAppMenu } from "./menu";
@@ -35,7 +36,7 @@ import "./App.css";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
-type Panel = "none" | "history" | "review" | "notes" | "help";
+type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
 
 const THEMES: { id: Theme; label: string }[] = [
@@ -59,6 +60,14 @@ const ZOOM_STEP = 0.1;
 
 const clampZoom = (z: number) =>
   Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
+
+const DEFAULT_VIMRC = `" Liauth vim config — supported: the map/noremap/unmap families,
+" let mapleader, and a few set options. Examples:
+"
+" let mapleader = ","
+" nnoremap j gj
+" nnoremap k gk
+`;
 
 function loadRecents(): string[] {
   try {
@@ -159,6 +168,14 @@ function App() {
   const [extConflict, setExtConflict] = useState<string | null>(null); // disk content
   const [recents, setRecents] = useState<string[]>(loadRecents);
   const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
+  const [vimrcDraft, setVimrcDraft] = useState("");
+  const [navOpen, setNavOpen] = useState(
+    () => localStorage.getItem("liauth.nav") === "1",
+  );
+  const [project, setProject] = useState<api.ProjectFiles | null>(null);
+  // A folder opened directly (File ▸ Open Folder…): anchors the navigator
+  // while the buffer is still untitled, and is where ⌘S will default to.
+  const [openFolder, setOpenFolder] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [cursor, setCursor] = useState<CursorStatus>({ line: 1, col: 1 });
   const [counts, setCounts] = useState({ words: 0, chars: 0 });
@@ -311,6 +328,7 @@ function App() {
           },
         ),
       );
+      sweepGhostCursorLayers(view);
       // Autosave when leaving vim insert mode.
       if (vimRef.current) {
         const cm = getCM(view);
@@ -369,6 +387,26 @@ function App() {
     localStorage.setItem("liauth.recents", JSON.stringify(recents));
   }, [recents]);
 
+  useEffect(() => {
+    localStorage.setItem("liauth.nav", navOpen ? "1" : "0");
+  }, [navOpen]);
+
+  // Navigator contents: the markdown files of the document's project
+  // (its git repo, or just its folder when unversioned). Re-roots when
+  // versioning is enabled, since that creates the repo. An explicitly
+  // opened folder anchors it while no document is open.
+  useEffect(() => {
+    const anchor = filePath ?? openFolder;
+    if (!navOpen || !anchor) {
+      setProject(null);
+      return;
+    }
+    api
+      .listProjectFiles(anchor)
+      .then(setProject)
+      .catch(() => setProject(null));
+  }, [navOpen, filePath, openFolder, repo?.repo_root]);
+
   // Load the user's vimrc subset once at startup. Mappings register in the
   // vim engine's global registry, so this works regardless of when (or how
   // often) vim mode is toggled.
@@ -393,6 +431,33 @@ function App() {
       })
       .catch((e) => console.warn("[liauth] vimrc load failed:", e));
   }, [flash]);
+
+  const openVimrcPanel = useCallback(async () => {
+    try {
+      const cfg = await api.readVimConfig();
+      setVimrcDraft(cfg?.content ?? DEFAULT_VIMRC);
+    } catch (e) {
+      flash(`Could not read vim config: ${e}`);
+      setVimrcDraft("");
+    }
+    setPanel("vimrc");
+  }, [flash]);
+
+  const saveVimrc = useCallback(async () => {
+    try {
+      const saved = await api.writeVimConfig(vimrcDraft);
+      const summary = applyVimrc(saved.path, saved.content);
+      setVimrc(summary);
+      flash(
+        `Saved — ${summary.applied} entries applied` +
+          (summary.skipped.length
+            ? `, ${summary.skipped.length} skipped (devtools console lists why)`
+            : ""),
+      );
+    } catch (e) {
+      flash(`Could not save vim config: ${e}`);
+    }
+  }, [vimrcDraft, flash]);
 
   // Rebuild the editor state when vim mode toggles, keeping the content.
   useEffect(() => {
@@ -546,6 +611,25 @@ function App() {
     [setEditorContent, refreshGit, flash, watchFile],
   );
 
+  // Navigator switch: flush the buffer to disk first so nothing is lost,
+  // then load the target (same path as Open Recent). Untitled buffers
+  // have no disk home to flush to, so they ask before being discarded.
+  const switchToFile = useCallback(
+    async (path: string) => {
+      const view = viewRef.current;
+      if (!filePathRef.current && view && view.state.doc.length > 0) {
+        const ok = await ask("Discard the untitled document?", {
+          title: "Open file",
+          kind: "warning",
+        });
+        if (!ok) return;
+      }
+      await autoSave();
+      await loadFile(path);
+    },
+    [autoSave, loadFile],
+  );
+
   const doSave = useCallback(async () => {
     const view = viewRef.current;
     if (!view || viewing) return;
@@ -553,6 +637,8 @@ function App() {
     if (!path) {
       path = await saveDialog({
         filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+        // An explicitly opened folder is where the untitled buffer lives.
+        defaultPath: openFolder ?? undefined,
       });
       if (!path) return;
       setFilePath(path);
@@ -574,7 +660,7 @@ function App() {
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
-  }, [filePath, viewing, refreshGit, flash, watchFile]);
+  }, [filePath, viewing, openFolder, refreshGit, flash, watchFile]);
 
   const doSaveAs = useCallback(async () => {
     const view = viewRef.current;
@@ -751,6 +837,29 @@ function App() {
     });
     if (typeof path === "string") await loadFile(path);
   }, [loadFile]);
+
+  // Open Folder…: navigator rooted at the folder (or its repo), and a
+  // fresh untitled buffer that will save into it. Untitled means no
+  // autosave — nothing exists on disk until the user names the file.
+  const doOpenFolder = useCallback(async () => {
+    const dir = await openDialog({ directory: true });
+    if (typeof dir !== "string") return;
+    await autoSave(); // flush the outgoing document
+    unwatchRef.current?.();
+    unwatchRef.current = null;
+    setFilePath(null);
+    setViewing(null);
+    setDirty(false);
+    setExtConflict(null);
+    diskDirtyRef.current = false;
+    lastDiskRef.current = "";
+    setEditorContent("");
+    setRepo(null);
+    setHistory([]);
+    setBranches([]);
+    setOpenFolder(dir);
+    setNavOpen(true);
+  }, [autoSave, setEditorContent]);
 
   const enableVersioning = useCallback(async () => {
     if (!filePath) {
@@ -953,6 +1062,9 @@ function App() {
         case "open":
           void doOpen();
           break;
+        case "open-folder":
+          void doOpenFolder();
+          break;
         case "save":
           void doSave();
           break;
@@ -1019,6 +1131,13 @@ function App() {
         case "panel-help":
           setPanel((p) => (p === "help" ? "none" : "help"));
           break;
+        case "edit-vimrc":
+          if (panelRef.current === "vimrc") setPanel("none");
+          else void openVimrcPanel();
+          break;
+        case "toggle-nav":
+          setNavOpen((v) => !v);
+          break;
         case "enable-versioning":
           void enableVersioning();
           break;
@@ -1033,6 +1152,7 @@ function App() {
     [
       loadFile,
       doOpen,
+      doOpenFolder,
       doSave,
       doSaveAs,
       doReload,
@@ -1042,6 +1162,7 @@ function App() {
       toggleNotesPanel,
       enableVersioning,
       newReviewBranch,
+      openVimrcPanel,
     ],
   );
 
@@ -1057,14 +1178,26 @@ function App() {
       vim: vimMode,
       lineNumbers: lineNums,
       room,
+      navOpen,
       versioned,
       panel,
       recents,
     }).catch((e) => console.warn("[liauth] menu build failed:", e));
-  }, [theme, font, vimMode, lineNums, room, versioned, panel, recents]);
+  }, [
+    theme,
+    font,
+    vimMode,
+    lineNums,
+    room,
+    navOpen,
+    versioned,
+    panel,
+    recents,
+  ]);
 
   const paletteCommands: PaletteCommand[] = [
     { id: "open", title: "Open…", shortcut: "⌘O" },
+    { id: "open-folder", title: "Open Folder…", shortcut: "⇧⌘O" },
     { id: "save", title: "Save (Commit)", shortcut: "⌘S" },
     { id: "save-as", title: "Save As…", shortcut: "⇧⌘S" },
     { id: "reload", title: "Reload from Disk", shortcut: "⌘R" },
@@ -1087,11 +1220,17 @@ function App() {
       id: "toggle-vim",
       title: vimMode ? "Disable Vim Keybindings" : "Enable Vim Keybindings",
     },
+    { id: "edit-vimrc", title: "Edit Vim Config…" },
     { id: "zoom-in", title: "Zoom In", shortcut: "⌘+" },
     { id: "zoom-out", title: "Zoom Out", shortcut: "⌘−" },
     { id: "zoom-reset", title: "Actual Size", shortcut: "⌘0" },
     ...THEMES.map((t) => ({ id: `theme:${t.id}`, title: `Theme: ${t.label}` })),
     ...FONTS.map((f) => ({ id: `font:${f.id}`, title: `Font: ${f.label}` })),
+    {
+      id: "toggle-nav",
+      title: navOpen ? "Hide Files Sidebar" : "Show Files Sidebar",
+      shortcut: "⇧⌘B",
+    },
     { id: "panel-notes", title: "Toggle Notes Panel" },
     { id: "panel-help", title: "Help" },
     ...(versioned
@@ -1111,19 +1250,31 @@ function App() {
     <div className={`app${room ? " room" : ""}`}>
       <div className="toolbar-hotzone" />
       <header className="toolbar">
-        <div className="toolbar-title">
-          <span className="doc-name">
-            {fileName}
-            {dirty ? (
-              <span
-                className="dirty-dot"
-                title="Uncommitted changes (autosaved to disk; ⌘S commits)"
-              >
-                {" "}
-                ●
-              </span>
-            ) : null}
-          </span>
+        <div className="toolbar-left">
+          <button
+            className={navOpen ? "active" : ""}
+            title="Files sidebar (⌘⇧B)"
+            onClick={() => execCommand("toggle-nav")}
+          >
+            Files
+          </button>
+          {/* Outside room mode the native title bar already shows the
+              file name and edited state; repeat it only in room mode,
+              where fullscreen hides the title bar. */}
+          {room ? (
+            <span className="doc-name">
+              {fileName}
+              {dirty ? (
+                <span
+                  className="dirty-dot"
+                  title="Uncommitted changes (autosaved to disk; ⌘S commits)"
+                >
+                  {" "}
+                  ●
+                </span>
+              ) : null}
+            </span>
+          ) : null}
         </div>
         <div className="toolbar-right">
           <button
@@ -1208,6 +1359,47 @@ function App() {
       ) : null}
 
       <main className="content">
+        {navOpen && !room ? (
+          <aside className="nav-panel">
+            <h3 title={project?.root}>{project?.name ?? "Project"}</h3>
+            {!filePath ? (
+              <p className="muted">Open a document to list its project.</p>
+            ) : null}
+            <ul className="nav-list">
+              {(project?.files ?? []).map((f, i, all) => {
+                const cut = f.rel.lastIndexOf("/");
+                const dir = cut >= 0 ? f.rel.slice(0, cut) : "";
+                const name = cut >= 0 ? f.rel.slice(cut + 1) : f.rel;
+                const prev = i > 0 ? all[i - 1].rel : "";
+                const prevCut = prev.lastIndexOf("/");
+                const prevDir = prevCut >= 0 ? prev.slice(0, prevCut) : "";
+                const cls = [
+                  f.path === filePath ? "selected" : "",
+                  dir ? "nested" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+                return (
+                  <Fragment key={f.path}>
+                    {dir && dir !== prevDir ? (
+                      <li className="nav-dir">{dir}/</li>
+                    ) : null}
+                    <li
+                      className={cls}
+                      title={f.rel}
+                      onClick={() => {
+                        if (f.path !== filePath) void switchToFile(f.path);
+                      }}
+                    >
+                      {name}
+                    </li>
+                  </Fragment>
+                );
+              })}
+            </ul>
+          </aside>
+        ) : null}
+
         <div className="editor-wrap" ref={editorHost} />
 
         {panel === "history" && versioned ? (
@@ -1316,6 +1508,38 @@ function App() {
 
         {panel === "help" ? (
           <HelpPanel vimActive={vimMode} vimrc={vimrc} />
+        ) : null}
+
+        {panel === "vimrc" ? (
+          <aside className="side-panel vimrc-panel">
+            <h3 className="panel-title">
+              Vim Config
+              <button
+                className="panel-close"
+                title="Close (esc)"
+                onClick={() => setPanel("none")}
+              >
+                ×
+              </button>
+            </h3>
+            <textarea
+              className="vimrc-editor"
+              value={vimrcDraft}
+              onChange={(e) => setVimrcDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setPanel("none");
+              }}
+              spellCheck={false}
+              autoFocus
+            />
+            <button className="wide" onClick={() => void saveVimrc()}>
+              Save &amp; Apply
+            </button>
+            <p className="muted">
+              Saved to <code>~/.config/liauth/vimrc</code> and applied
+              immediately. Removing a mapping takes effect after restart.
+            </p>
+          </aside>
         ) : null}
       </main>
 

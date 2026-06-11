@@ -10,7 +10,7 @@ import { history, historyKeymap, defaultKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
-import { vim, Vim } from "@replit/codemirror-vim";
+import { vim, Vim, getCM } from "@replit/codemirror-vim";
 import { livePreview } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
 import { criticMarkup, insertNote } from "./notes";
@@ -22,6 +22,27 @@ const mdHighlight = HighlightStyle.define([
   { tag: tags.processingInstruction, color: "var(--c-muted)" },
   { tag: tags.meta, color: "var(--c-muted)" },
 ]);
+
+/**
+ * Remove vim block-cursor layers that the live vim plugin doesn't own.
+ * The plugin appends its layer to scrollDOM (which survives setState);
+ * when its teardown is skipped or fails, the layer is orphaned and shows
+ * up as a frozen ghost cursor at some past cursor position.
+ */
+export function sweepGhostCursorLayers(view: EditorView): void {
+  const layers = view.scrollDOM.querySelectorAll(".cm-vimCursorLayer");
+  if (layers.length === 0) return;
+  // Internal plugin state; absent when vim mode is off (no layer is legit).
+  const live =
+    (
+      getCM(view) as {
+        state?: { vimPlugin?: { blockCursor?: { cursorLayer?: Element } } };
+      } | null
+    )?.state?.vimPlugin?.blockCursor?.cursorLayer ?? null;
+  layers.forEach((el) => {
+    if (el !== live) el.remove();
+  });
+}
 
 /** Wrap the selection in `marker` (or insert it) — used for Cmd-B / Cmd-I. */
 function toggleWrap(marker: string) {
@@ -134,6 +155,9 @@ export function createEditorState(
         ...historyKeymap,
       ]),
       EditorView.updateListener.of((u) => {
+        // Updates fire on focus changes too, so ghosts get culled right
+        // when the unfocused outline style would make them visible.
+        sweepGhostCursorLayers(u.view);
         if (u.docChanged) cb.onChange();
         if ((u.docChanged || u.selectionSet) && cb.onStatus) {
           const head = u.state.selection.main.head;

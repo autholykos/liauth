@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { fuzzy } from "./fuzzy";
 
 export interface PaletteCommand {
   id: string;
@@ -12,24 +13,6 @@ interface Props {
   onClose: () => void;
 }
 
-/** Subsequence fuzzy match; returns a score (lower = better) or null. */
-function fuzzy(query: string, target: string): number | null {
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  if (!q) return t.length;
-  let qi = 0;
-  let score = 0;
-  let last = -1;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) {
-      score += last >= 0 ? ti - last - 1 : ti;
-      last = ti;
-      qi++;
-    }
-  }
-  return qi === q.length ? score : null;
-}
-
 export function CommandPalette({ commands, onRun, onClose }: Props) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -39,7 +22,9 @@ export function CommandPalette({ commands, onRun, onClose }: Props) {
   const filtered = useMemo(() => {
     return commands
       .map((c) => ({ c, score: fuzzy(query, c.title) }))
-      .filter((x): x is { c: PaletteCommand; score: number } => x.score !== null)
+      .filter(
+        (x): x is { c: PaletteCommand; score: number } => x.score !== null,
+      )
       .sort((a, b) => a.score - b.score)
       .map((x) => x.c);
   }, [commands, query]);

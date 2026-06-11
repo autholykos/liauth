@@ -29,3 +29,22 @@ pub fn read_vim_config() -> Option<VimConfig> {
     }
     None
 }
+
+/// Save the vim config. Always writes the dedicated Liauth file — never a
+/// fallback (~/.vimrc), so editing inside Liauth can't clobber the user's
+/// real vim setup. Since the Liauth file wins on lookup, saving content
+/// that was loaded from a fallback effectively forks it.
+#[tauri::command]
+pub fn write_vim_config(content: String) -> Result<VimConfig, String> {
+    let home =
+        PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
+    let path = home.join(".config/liauth/vimrc");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, &content).map_err(|e| e.to_string())?;
+    Ok(VimConfig {
+        path: path.display().to_string(),
+        content,
+    })
+}

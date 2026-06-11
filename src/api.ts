@@ -84,4 +84,21 @@ export interface VimConfig {
 
 export const readVimConfig = () => invoke<VimConfig | null>("read_vim_config");
 
+export const writeVimConfig = (content: string) =>
+  invoke<VimConfig>("write_vim_config", { content });
+
 export const takePendingOpen = () => invoke<string | null>("take_pending_open");
+
+export interface ProjectFile {
+  path: string;
+  rel: string;
+}
+
+export interface ProjectFiles {
+  root: string;
+  name: string;
+  files: ProjectFile[];
+}
+
+export const listProjectFiles = (filePath: string) =>
+  invoke<ProjectFiles | null>("list_project_files", { filePath });

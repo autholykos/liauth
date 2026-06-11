@@ -18,6 +18,7 @@ export interface MenuSnapshot {
   vim: boolean;
   lineNumbers: boolean;
   room: boolean;
+  navOpen: boolean;
   versioned: boolean;
   panel: string;
   recents: string[];
@@ -93,6 +94,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
     text: "File",
     items: [
       await item("open", "Open…", "CmdOrCtrl+O"),
+      await item("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
       openRecent,
       await sep(),
       await item("save", "Save (Commit)", "CmdOrCtrl+S"),
@@ -155,12 +157,19 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
       await item("zoom-reset", "Actual Size", "CmdOrCtrl+0"),
       await sep(),
       await check(
+        "toggle-nav",
+        "Files Sidebar",
+        s.navOpen,
+        "CmdOrCtrl+Shift+B",
+      ),
+      await check(
         "toggle-lines",
         "Line Numbers",
         s.lineNumbers,
         "CmdOrCtrl+Shift+L",
       ),
       await check("toggle-vim", "Vim Keybindings", s.vim),
+      await item("edit-vimrc", "Edit Vim Config…"),
       await sep(),
       await check("toggle-room", "Writing Room", s.room, "CmdOrCtrl+Shift+F"),
       await item("rsvp", "Speed Read", "CmdOrCtrl+Shift+R"),
