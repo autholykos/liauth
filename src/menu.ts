@@ -17,6 +17,7 @@ export interface MenuSnapshot {
   font: string;
   vim: boolean;
   lineNumbers: boolean;
+  pageLayout: boolean;
   room: boolean;
   navOpen: boolean;
   versioned: boolean;
@@ -167,6 +168,12 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
         "Line Numbers",
         s.lineNumbers,
         "CmdOrCtrl+Shift+L",
+      ),
+      await check(
+        "toggle-page",
+        "Page Layout",
+        s.pageLayout,
+        "CmdOrCtrl+Shift+P",
       ),
       await check("toggle-vim", "Vim Keybindings", s.vim),
       await item("edit-vimrc", "Edit Vim Config…"),

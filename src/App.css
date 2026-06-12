@@ -549,6 +549,27 @@ button.wide {
   caret-color: var(--c-accent);
 }
 
+/* ---------- page layout ----------
+   The content column becomes an A4-width paper sheet on a darker desk.
+   Derived from the theme vars so it works across all themes. Suppressed
+   in room mode, which has its own chrome-free layout. */
+
+[data-page="1"] .app:not(.room) .editor-wrap .cm-scroller {
+  background: color-mix(in srgb, var(--c-text) 7%, var(--c-bg));
+  padding: 32px 16px;
+}
+
+[data-page="1"] .app:not(.room) .editor-wrap .cm-editor .cm-content {
+  max-width: min(21cm, 100%);
+  background: var(--c-bg);
+  border: 1px solid color-mix(in srgb, var(--c-border) 60%, transparent);
+  border-radius: 2px;
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.1),
+    0 8px 28px rgb(0 0 0 / 0.12);
+  padding: 2.2cm 2cm 5cm;
+}
+
 /* Line-number gutter: quiet, borderless, clearly separated from text. */
 .editor-wrap .cm-editor .cm-gutters {
   background: transparent !important;

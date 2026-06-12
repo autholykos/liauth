@@ -138,6 +138,9 @@ function App() {
   const [lineNums, setLineNums] = useState(
     () => localStorage.getItem("liauth.lines") === "1",
   );
+  const [pageLayout, setPageLayout] = useState(
+    () => localStorage.getItem("liauth.page") === "1",
+  );
   const lineNumsRef = useRef(lineNums);
   const [notes, setNotes] = useState<NoteMatch[]>([]);
   const notesTimerRef = useRef<number | undefined>(undefined);
@@ -478,6 +481,12 @@ function App() {
       setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
     }
   }, [lineNums, setEditorContent]);
+
+  // Page layout: the content column styled as a paper sheet (pure CSS).
+  useEffect(() => {
+    localStorage.setItem("liauth.page", pageLayout ? "1" : "0");
+    document.documentElement.dataset.page = pageLayout ? "1" : "0";
+  }, [pageLayout]);
 
   // Room mode: fullscreen, chrome hidden, typewriter scrolling. Theme and
   // font stay as they are — the Room theme is just an option in the picker.
@@ -1119,6 +1128,9 @@ function App() {
         case "toggle-room":
           setRoom((r) => !r);
           break;
+        case "toggle-page":
+          setPageLayout((p) => !p);
+          break;
         case "rsvp":
           startRsvp();
           break;
@@ -1180,6 +1192,7 @@ function App() {
       font,
       vim: vimMode,
       lineNumbers: lineNums,
+      pageLayout,
       room,
       navOpen,
       versioned,
@@ -1191,6 +1204,7 @@ function App() {
     font,
     vimMode,
     lineNums,
+    pageLayout,
     room,
     navOpen,
     versioned,
@@ -1218,6 +1232,11 @@ function App() {
       id: "toggle-lines",
       title: lineNums ? "Hide Line Numbers" : "Show Line Numbers",
       shortcut: "⇧⌘L",
+    },
+    {
+      id: "toggle-page",
+      title: pageLayout ? "Exit Page Layout" : "Page Layout",
+      shortcut: "⇧⌘P",
     },
     {
       id: "toggle-vim",
