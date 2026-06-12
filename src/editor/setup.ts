@@ -11,7 +11,7 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { vim, Vim, getCM } from "@replit/codemirror-vim";
-import { livePreview } from "./livePreview";
+import { livePreview, tableRendering } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
 import { criticMarkup, insertNote } from "./notes";
 
@@ -139,6 +139,7 @@ export function createEditorState(
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
       livePreview,
+      tableRendering,
       criticMarkup,
       keymap.of([
         {

@@ -14,8 +14,8 @@ import {
   ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
-import { EditorState, Range } from "@codemirror/state";
-import { syntaxTree } from "@codemirror/language";
+import { EditorState, Range, StateField } from "@codemirror/state";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { SyntaxNodeRef } from "@lezer/common";
 
 class BulletWidget extends WidgetType {
@@ -305,4 +305,194 @@ export const livePreview = ViewPlugin.fromClass(LivePreviewPlugin, {
     EditorView.atomicRanges.of(
       (view) => view.plugin(plugin)?.atomic ?? Decoration.none,
     ),
+});
+
+// ---------------------------------------------------------------------------
+// Table rendering.
+//
+// A whole GFM table is replaced by a rendered <table> block widget unless the
+// selection is inside it, in which case the source is shown (monospaced, so
+// the pipes line up). Replacing decorations that span line breaks must be
+// provided by a StateField, not a ViewPlugin, so tables live here rather
+// than in LivePreviewPlugin.
+
+interface TableCellData {
+  /** Offset of the cell relative to the table start. */
+  offset: number;
+  text: string;
+}
+
+interface TableRowData {
+  header: boolean;
+  cells: TableCellData[];
+}
+
+/** Render a cell's inline markdown (code, links, bold, italic, strike). */
+function renderInline(text: string, out: HTMLElement): void {
+  const RE =
+    /(`+)(.+?)\1|!?\[([^\]]*)\]\(([^)]*)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|_([^_]+)_|~~([^~]+)~~/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const flush = (to: number) => {
+    if (to > last)
+      out.appendChild(
+        document.createTextNode(text.slice(last, to).replace(/\\\|/g, "|")),
+      );
+  };
+  while ((m = RE.exec(text))) {
+    flush(m.index);
+    const el = document.createElement("span");
+    if (m[2] !== undefined) {
+      el.className = "lp-inline-code";
+      el.textContent = m[2];
+    } else if (m[3] !== undefined) {
+      el.className = "lp-link";
+      renderInline(m[3], el);
+    } else {
+      const inner = m[5] ?? m[6] ?? m[7] ?? m[8] ?? m[9];
+      el.className =
+        m[9] !== undefined
+          ? "lp-strike"
+          : (m[7] ?? m[8])
+            ? "lp-em"
+            : "lp-strong";
+      renderInline(inner, el);
+    }
+    out.appendChild(el);
+    last = RE.lastIndex;
+  }
+  flush(text.length);
+}
+
+function parseAligns(delimiter: string): string[] {
+  return delimiter
+    .replace(/^\s*\|/, "")
+    .replace(/\|\s*$/, "")
+    .split("|")
+    .map((c) => {
+      const t = c.trim();
+      if (t.startsWith(":") && t.endsWith(":")) return "center";
+      if (t.endsWith(":")) return "right";
+      return "left";
+    });
+}
+
+class TableWidget extends WidgetType {
+  constructor(
+    readonly rows: TableRowData[],
+    readonly aligns: string[],
+    /** Full table source, used for cheap DOM reuse via eq(). */
+    readonly key: string,
+  ) {
+    super();
+  }
+
+  eq(other: TableWidget): boolean {
+    return other.key === this.key;
+  }
+
+  get estimatedHeight(): number {
+    return this.rows.length * 34;
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    // Wrapper allows horizontal scrolling when the table is wider than the
+    // editor content area.
+    const wrap = document.createElement("div");
+    wrap.className = "lp-table-wrap";
+    const table = wrap.appendChild(document.createElement("table"));
+    table.className = "lp-table";
+    const cols = Math.max(...this.rows.map((r) => r.cells.length));
+    for (const row of this.rows) {
+      const tr = table.appendChild(document.createElement("tr"));
+      for (let i = 0; i < cols; i++) {
+        const cell = row.cells[i];
+        const el = tr.appendChild(
+          document.createElement(row.header ? "th" : "td"),
+        );
+        el.style.textAlign = this.aligns[i] ?? "left";
+        if (!cell) continue;
+        el.dataset.offset = String(cell.offset);
+        renderInline(cell.text, el);
+      }
+    }
+    // Clicking a cell reveals the table and puts the cursor on that cell's
+    // source. The widget's own position is resolved at click time so the
+    // handler stays valid when eq() lets the DOM be reused after edits
+    // elsewhere in the document.
+    table.addEventListener("mousedown", (e) => {
+      const cell = (e.target as HTMLElement).closest<HTMLElement>("td,th");
+      if (!cell) return;
+      e.preventDefault();
+      const base = view.posAtDOM(table);
+      const offset = Number(cell.dataset.offset ?? 0);
+      view.dispatch({
+        selection: { anchor: base + offset },
+        scrollIntoView: true,
+      });
+      view.focus();
+    });
+    return wrap;
+  }
+}
+
+function buildTableDecos(state: EditorState): DecorationSet {
+  const decos: Range<Decoration>[] = [];
+  const tree =
+    ensureSyntaxTree(state, state.doc.length, 50) ?? syntaxTree(state);
+  tree.iterate({
+    enter: (node: SyntaxNodeRef) => {
+      if (node.name !== "Table") return;
+      if (selectionOnLine(state, node.from, node.to)) {
+        // Revealed: keep the source, but monospace it so columns align.
+        const first = state.doc.lineAt(node.from);
+        const last = state.doc.lineAt(node.to);
+        for (let l = first.number; l <= last.number; l++) {
+          decos.push(
+            Decoration.line({ class: "lp-table-source" }).range(
+              state.doc.line(l).from,
+            ),
+          );
+        }
+        return false;
+      }
+      const rows: TableRowData[] = [];
+      let aligns: string[] = [];
+      for (let child = node.node.firstChild; child; child = child.nextSibling) {
+        if (child.name === "TableDelimiter") {
+          aligns = parseAligns(state.doc.sliceString(child.from, child.to));
+        } else if (child.name === "TableHeader" || child.name === "TableRow") {
+          const cells: TableCellData[] = [];
+          for (let c = child.firstChild; c; c = c.nextSibling) {
+            if (c.name === "TableCell") {
+              cells.push({
+                offset: c.from - node.from,
+                text: state.doc.sliceString(c.from, c.to),
+              });
+            }
+          }
+          rows.push({ header: child.name === "TableHeader", cells });
+        }
+      }
+      if (!rows.length) return false;
+      const key = state.doc.sliceString(node.from, node.to);
+      decos.push(
+        Decoration.replace({
+          widget: new TableWidget(rows, aligns, key),
+          block: true,
+        }).range(node.from, node.to),
+      );
+      return false;
+    },
+  });
+  return Decoration.set(decos, true);
+}
+
+export const tableRendering = StateField.define<DecorationSet>({
+  create: buildTableDecos,
+  update(decos, tr) {
+    if (!tr.docChanged && !tr.selection) return decos;
+    return buildTableDecos(tr.state);
+  },
+  provide: (f) => EditorView.decorations.from(f),
 });

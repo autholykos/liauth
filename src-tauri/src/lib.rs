@@ -105,6 +105,42 @@ fn list_project_files(file_path: String) -> Option<ProjectFiles> {
     })
 }
 
+/// Native print dialog. `window.print()` is a silent no-op in WKWebView,
+/// so PDF export invokes this instead. On macOS the print operation is
+/// built by hand because tauri's `Webview::print()` hardcodes zero page
+/// margins (and WKWebView ignores CSS `@page` margins).
+#[tauri::command]
+fn print_page(webview: tauri::Webview) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        webview
+            .with_webview(|pw| unsafe {
+                let wk = &*(pw.inner() as *const objc2_web_kit::WKWebView);
+                let info = objc2_app_kit::NSPrintInfo::sharedPrintInfo();
+                // Points: ~15mm top/bottom, ~16mm sides.
+                info.setTopMargin(42.0);
+                info.setBottomMargin(42.0);
+                info.setLeftMargin(45.0);
+                info.setRightMargin(45.0);
+                let op = wk.printOperationWithPrintInfo(&info);
+                op.setCanSpawnSeparateThread(true);
+                if let Some(window) = wk.window() {
+                    op.runOperationModalForWindow_delegate_didRunSelector_contextInfo(
+                        &window,
+                        None,
+                        None,
+                        std::ptr::null_mut(),
+                    );
+                }
+            })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        webview.print().map_err(|e| e.to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -113,6 +149,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(PendingOpen(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
+            print_page,
             git::repo_info,
             git::init_repo,
             git::read_document,

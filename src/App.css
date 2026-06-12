@@ -680,6 +680,47 @@ button.wide {
   padding-right: 14px !important;
 }
 
+.lp-table-wrap {
+  overflow-x: auto;
+  margin: 0.6em 0;
+}
+
+.lp-table {
+  border-collapse: collapse;
+  font-size: 0.95em;
+  cursor: text;
+  line-height: 1.45;
+  /* The editor content uses pre-wrap + overflow-wrap:anywhere for line
+     wrapping; inside a table that collapses columns to one character wide.
+     Restore normal word-boundary wrapping. */
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.lp-table th,
+.lp-table td {
+  border: 1px solid var(--c-border);
+  padding: 5px 12px;
+  min-width: 2em;
+  vertical-align: top;
+}
+
+.lp-table th {
+  background: var(--c-code-bg);
+  font-weight: 600;
+}
+
+.lp-table tr:hover td {
+  background: color-mix(in srgb, var(--c-accent) 5%, transparent);
+}
+
+/* Revealed table source: monospace so the pipes line up. */
+.lp-table-source {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
 .lp-bullet {
   color: var(--c-accent);
   font-weight: 700;
@@ -988,6 +1029,8 @@ button.wide {
 
 /* ---------- PDF export (print) ---------- */
 
+/* Page margins are set natively via NSPrintInfo in the print_page command;
+   WKWebView ignores CSS @page margins. */
 #print-root {
   display: none;
 }

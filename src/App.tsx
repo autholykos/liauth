@@ -984,7 +984,10 @@ function App() {
     );
     document.title =
       fileName?.replace(/\.(md|markdown|txt)$/i, "") ?? "document";
-    window.print();
+    // Give the DOM a frame to flush #print-root before the native snapshot.
+    requestAnimationFrame(() => {
+      api.printPage().catch(() => window.print());
+    });
   }, [fileName]);
 
   const addNote = useCallback(() => {

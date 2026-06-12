@@ -27,6 +27,26 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
 diffy = "0.5.0"
 
+# Native print with real page margins; tauri's Webview::print() hardcodes
+# zero margins. Versions/features match what wry already pulls in, so this
+# adds nothing to the build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSPrintInfo",
+    "NSPrintOperation",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "objc2-app-kit",
+    "block2",
+    "WKWebView",
+] }
+
 [dev-dependencies]
 tempfile = "3.27.0"
 

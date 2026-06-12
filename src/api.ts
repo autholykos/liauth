@@ -23,6 +23,9 @@ export interface MergeResult {
   conflicts: string[];
 }
 
+/** Native print dialog; window.print() is a no-op in WKWebView. */
+export const printPage = () => invoke<void>("print_page");
+
 export const repoInfo = (filePath: string) =>
   invoke<RepoInfo>("repo_info", { filePath });
 
