@@ -25,14 +25,13 @@ struct ProjectFiles {
     root: String,
     name: String,
     files: Vec<ProjectFile>,
+    truncated: bool,
 }
 
 fn is_markdown(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|x| x.to_str())
-        .is_some_and(|x| {
-            matches!(x.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt")
-        })
+        .is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt"))
 }
 
 fn collect_markdown(
@@ -40,33 +39,38 @@ fn collect_markdown(
     root: &std::path::Path,
     depth: usize,
     out: &mut Vec<ProjectFile>,
-) {
+) -> bool {
     // Bounded so a navigator rooted in an unexpectedly huge tree stays cheap.
-    if depth > 6 || out.len() >= 500 {
-        return;
+    if depth > 6 {
+        return false;
+    }
+    if out.len() >= 500 {
+        return true;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return false;
     };
     for e in entries.flatten() {
+        if out.len() >= 500 {
+            return true;
+        }
         if e.file_name().to_string_lossy().starts_with('.') {
             continue; // hidden files and .git
         }
         let p = e.path();
         if p.is_dir() {
-            collect_markdown(&p, root, depth + 1, out);
+            if collect_markdown(&p, root, depth + 1, out) {
+                return true;
+            }
         } else if is_markdown(&p) {
-            let rel = p
-                .strip_prefix(root)
-                .unwrap_or(&p)
-                .display()
-                .to_string();
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
             out.push(ProjectFile {
                 path: p.display().to_string(),
                 rel,
             });
         }
     }
+    false
 }
 
 /// Markdown files of the document's project, for the navigator. The
@@ -86,11 +90,14 @@ fn list_project_files(file_path: String) -> Option<ProjectFiles> {
         .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
         .unwrap_or_else(|| parent.to_path_buf());
     let mut files = Vec::new();
-    collect_markdown(&root, &root, 0, &mut files);
+    let truncated = collect_markdown(&root, &root, 0, &mut files);
     // Root-level files first, then each subfolder as a group.
     files.sort_by(|a, b| {
         let dir = |f: &ProjectFile| {
-            f.rel.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default()
+            f.rel
+                .rsplit_once('/')
+                .map(|x| x.0.to_string())
+                .unwrap_or_default()
         };
         dir(a).cmp(&dir(b)).then(a.rel.cmp(&b.rel))
     });
@@ -102,6 +109,7 @@ fn list_project_files(file_path: String) -> Option<ProjectFiles> {
         root: root.display().to_string(),
         name,
         files,
+        truncated,
     })
 }
 
@@ -144,6 +152,8 @@ fn print_page(webview: tauri::Webview) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())

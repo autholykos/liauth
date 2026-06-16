@@ -10,6 +10,7 @@
 export interface RsvpWord {
   text: string;
   offset: number; // position of the raw token in the document
+  end: number; // end of the raw token in the document
   mult: number; // display-duration multiplier
 }
 
@@ -86,7 +87,12 @@ export function buildRsvpWords(text: string): RsvpWord[] {
     else if (/[,;:—]$/.test(cleaned)) mult = 1.4;
     if (cleaned.length >= 10) mult += 0.3;
 
-    words.push({ text: cleaned, offset: m.index, mult });
+    words.push({
+      text: cleaned,
+      offset: m.index,
+      end: m.index + raw.length,
+      mult,
+    });
   }
   return words;
 }

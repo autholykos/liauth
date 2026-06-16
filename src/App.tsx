@@ -4,7 +4,10 @@ import {
   open as openDialog,
   save as saveDialog,
   ask,
+  message,
 } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -38,6 +41,7 @@ const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
+type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
 
 const THEMES: { id: Theme; label: string }[] = [
   { id: "paper", label: "Paper" },
@@ -169,6 +173,8 @@ function App() {
   const lastDiskRef = useRef("");
   const unwatchRef = useRef<UnwatchFn | null>(null);
   const [extConflict, setExtConflict] = useState<string | null>(null); // disk content
+  const extConflictRef = useRef<string | null>(null);
+  extConflictRef.current = extConflict;
   const [recents, setRecents] = useState<string[]>(loadRecents);
   const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
   const [vimrcDraft, setVimrcDraft] = useState("");
@@ -228,18 +234,23 @@ function App() {
   // Autosave: plain disk write, never a commit (and so never able to
   // conclude a merge). Triggered on leaving vim insert mode and on
   // window blur.
-  const autoSave = useCallback(async () => {
+  const autoSave = useCallback(async (): Promise<AutoSaveResult> => {
     const view = viewRef.current;
     const path = filePathRef.current;
-    if (!view || !path || viewingRef.current || !diskDirtyRef.current) return;
+    if (!view || !path || viewingRef.current || !diskDirtyRef.current) {
+      return "ok";
+    }
+    if (extConflictRef.current !== null) return "blocked-conflict";
     try {
       const content = view.state.doc.toString();
       await api.saveDocument(path, content, undefined, false);
       diskDirtyRef.current = false;
       lastDiskRef.current = content;
       setLastSave(`autosaved ${timeNow()}`);
+      return "ok";
     } catch (e) {
       console.warn("[liauth] autosave failed:", e);
+      return "failed";
     }
   }, []);
 
@@ -259,7 +270,10 @@ function App() {
       return;
     }
     const head = view.state.selection.main.head;
-    let startIndex = words.findIndex((w) => w.offset >= head);
+    let startIndex = words.findIndex(
+      (w) => head >= w.offset && head < w.end,
+    );
+    if (startIndex < 0) startIndex = words.findIndex((w) => w.offset >= head);
     if (startIndex < 0) startIndex = words.length - 1;
     setRsvp({ words, startIndex });
   }, [flash]);
@@ -535,6 +549,7 @@ function App() {
       setHistory([]);
       setBranches([]);
     }
+    return info;
   }, []);
 
   // External-change handling: called by the file watcher. Our own writes
@@ -560,9 +575,9 @@ function App() {
     if (!diskDirtyRef.current) {
       // Buffer is clean: just take the external version.
       lastDiskRef.current = disk;
-      loadingRef.current = true;
       setEditorContent(disk);
-      await refreshGit(path);
+      const info = await refreshGit(path);
+      if (!diskDirtyRef.current) setDirty(info.file_dirty);
       flash("Reloaded — file changed on disk");
       return;
     }
@@ -599,6 +614,44 @@ function App() {
 
   useEffect(() => () => unwatchRef.current?.(), []);
 
+  const checkForUpdates = useCallback(async () => {
+    flash("Checking for updates...");
+    try {
+      const update = await check();
+      if (!update) {
+        await message("Liauth is up to date.", {
+          title: "Check for Updates",
+          kind: "info",
+        });
+        return;
+      }
+
+      const notes = update.body ? `\n\n${update.body}` : "";
+      const install = await ask(
+        `Liauth ${update.version} is available.${notes}\n\nInstall it and relaunch now?`,
+        { title: "Update Available", kind: "info" },
+      );
+      if (!install) {
+        await update.close();
+        flash("Update postponed");
+        return;
+      }
+
+      flash(`Downloading Liauth ${update.version}...`);
+      await update.downloadAndInstall();
+      await message("The update was installed. Liauth will relaunch now.", {
+        title: "Update Installed",
+        kind: "info",
+      });
+      await relaunch();
+    } catch (e) {
+      await message(`Could not check for updates:\n${e}`, {
+        title: "Check for Updates",
+        kind: "error",
+      });
+    }
+  }, [flash]);
+
   const loadFile = useCallback(
     async (path: string) => {
       try {
@@ -611,7 +664,8 @@ function App() {
         lastDiskRef.current = content;
         setEditorContent(content);
         setRecents((r) => [path, ...r.filter((p) => p !== path)].slice(0, 8));
-        await refreshGit(path);
+        const info = await refreshGit(path);
+        if (!diskDirtyRef.current) setDirty(info.file_dirty);
         await watchFile(path);
       } catch (e) {
         flash(`Could not open file: ${e}`);
@@ -620,23 +674,36 @@ function App() {
     [setEditorContent, refreshGit, flash, watchFile],
   );
 
-  // Navigator switch: flush the buffer to disk first so nothing is lost,
-  // then load the target (same path as Open Recent). Untitled buffers
-  // have no disk home to flush to, so they ask before being discarded.
-  const switchToFile = useCallback(
-    async (path: string) => {
+  const leaveCurrentDocument = useCallback(
+    async (title: string): Promise<boolean> => {
       const view = viewRef.current;
-      if (!filePathRef.current && view && view.state.doc.length > 0) {
-        const ok = await ask("Discard the untitled document?", {
-          title: "Open file",
+      if (!view) return true;
+      if (!filePathRef.current && view.state.doc.length > 0) {
+        return ask("Discard the untitled document?", {
+          title,
           kind: "warning",
         });
-        if (!ok) return;
       }
-      await autoSave();
+      const saved = await autoSave();
+      if (saved === "blocked-conflict") {
+        flash("Resolve the disk conflict before opening another document");
+        return false;
+      }
+      if (saved === "failed") {
+        flash("Autosave failed; current document left open");
+        return false;
+      }
+      return true;
+    },
+    [autoSave, flash],
+  );
+
+  const openPath = useCallback(
+    async (path: string) => {
+      if (!(await leaveCurrentDocument("Open file"))) return;
       await loadFile(path);
     },
-    [autoSave, loadFile],
+    [leaveCurrentDocument, loadFile],
   );
 
   const doSave = useCallback(async () => {
@@ -664,7 +731,8 @@ function App() {
           ? `committed ${commit.id.slice(0, 7)} · ${timeNow()}`
           : `saved ${timeNow()}`,
       );
-      await refreshGit(path);
+      const info = await refreshGit(path);
+      if (!diskDirtyRef.current) setDirty(info.file_dirty);
       if (!unwatchRef.current) await watchFile(path);
     } catch (e) {
       flash(`Save failed: ${e}`);
@@ -715,6 +783,8 @@ function App() {
         await api.saveDocument(path, buffer, undefined, false);
         lastDiskRef.current = buffer;
         diskDirtyRef.current = false;
+        const info = await refreshGit(path);
+        if (!diskDirtyRef.current) setDirty(info.file_dirty);
         setExtConflict(null);
         flash("Kept your version — disk overwritten");
       } else if (mode === "theirs") {
@@ -739,7 +809,7 @@ function App() {
         );
       }
     },
-    [extConflict, loadFile, setEditorContent, flash],
+    [extConflict, loadFile, refreshGit, setEditorContent, flash],
   );
 
   // Mount the editor once.
@@ -786,26 +856,26 @@ function App() {
   useEffect(() => {
     const un = listen<string>("open-file", (e) => {
       void api.takePendingOpen().catch(() => null); // consume the stash
-      void loadFile(e.payload);
+      void openPath(e.payload);
     });
     return () => {
       void un.then((f) => f());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openPath]);
 
   // Drop a markdown file anywhere on the window to open it.
   useEffect(() => {
     const un = getCurrentWebview().onDragDropEvent((e) => {
       if (e.payload.type !== "drop") return;
-      const path = e.payload.paths.find((p) => /\.(md|markdown|txt)$/i.test(p));
-      if (path) void loadFile(path);
+      const path = e.payload.paths.find((p) =>
+        /\.(md|markdown|txt)$/i.test(p),
+      );
+      if (path) void openPath(path);
     });
     return () => {
       void un.then((f) => f());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [openPath]);
 
   // Closing/quitting: a named document autosaves to disk; an untitled
   // buffer with content asks before being discarded.
@@ -813,16 +883,37 @@ function App() {
     const un = getCurrentWindow().onCloseRequested(async (e) => {
       const view = viewRef.current;
       const path = filePathRef.current;
+      if (view && path && extConflictRef.current !== null) {
+        const ok = await ask(
+          "The file has an unresolved disk conflict. Quit and discard your in-memory version?",
+          { title: "Quit Liauth", kind: "warning" },
+        );
+        if (!ok) {
+          e.preventDefault();
+          flash("Resolve the disk conflict before closing");
+        }
+        return;
+      }
       if (view && path && diskDirtyRef.current) {
         try {
+          const content = view.state.doc.toString();
           await api.saveDocument(
             path,
-            view.state.doc.toString(),
+            content,
             undefined,
             false,
           );
+          diskDirtyRef.current = false;
+          lastDiskRef.current = content;
         } catch {
-          // fall through; closing loses nothing that a failed write kept
+          const ok = await ask(
+            "Autosave failed. Quit and discard unsaved in-memory changes?",
+            { title: "Quit Liauth", kind: "warning" },
+          );
+          if (!ok) {
+            e.preventDefault();
+            flash("Autosave failed; close canceled");
+          }
         }
         return;
       }
@@ -837,6 +928,8 @@ function App() {
     return () => {
       void un.then((f) => f());
     };
+    // Close handling is registered once; it reads live state through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const doOpen = useCallback(async () => {
@@ -844,8 +937,8 @@ function App() {
       multiple: false,
       filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
     });
-    if (typeof path === "string") await loadFile(path);
-  }, [loadFile]);
+    if (typeof path === "string") await openPath(path);
+  }, [openPath]);
 
   // Open Folder…: navigator rooted at the folder (or its repo), and a
   // fresh untitled buffer that will save into it. Untitled means no
@@ -853,7 +946,7 @@ function App() {
   const doOpenFolder = useCallback(async () => {
     const dir = await openDialog({ directory: true });
     if (typeof dir !== "string") return;
-    await autoSave(); // flush the outgoing document
+    if (!(await leaveCurrentDocument("Open folder"))) return;
     unwatchRef.current?.();
     unwatchRef.current = null;
     setFilePath(null);
@@ -868,7 +961,7 @@ function App() {
     setBranches([]);
     setOpenFolder(dir);
     setNavOpen(true);
-  }, [autoSave, setEditorContent]);
+  }, [leaveCurrentDocument, setEditorContent]);
 
   const enableVersioning = useCallback(async () => {
     if (!filePath) {
@@ -883,24 +976,38 @@ function App() {
     await api.initRepo(filePath);
     const view = viewRef.current;
     if (view) {
+      const content = view.state.doc.toString();
       await api.saveDocument(
         filePath,
-        view.state.doc.toString(),
+        content,
         "Initial version",
       );
+      diskDirtyRef.current = false;
+      lastDiskRef.current = content;
+      setDirty(false);
     }
-    await refreshGit(filePath);
+    const info = await refreshGit(filePath);
+    if (!diskDirtyRef.current) setDirty(info.file_dirty);
     flash("Versioning enabled");
   }, [filePath, refreshGit, flash]);
 
   const viewVersion = useCallback(
     async (commit: api.CommitInfo) => {
       if (!filePath) return;
+      const saved = await autoSave();
+      if (saved === "blocked-conflict") {
+        flash("Resolve the disk conflict before viewing history");
+        return;
+      }
+      if (saved === "failed") {
+        flash("Autosave failed; current version left open");
+        return;
+      }
       const content = await api.fileAtCommit(filePath, commit.id);
       setViewing(commit);
       setEditorContent(content, true);
     },
-    [filePath, setEditorContent],
+    [filePath, autoSave, flash, setEditorContent],
   );
 
   const backToCurrent = useCallback(async () => {
@@ -913,6 +1020,7 @@ function App() {
     const content = await api.fileAtCommit(filePath, viewing.id);
     setViewing(null);
     setEditorContent(content);
+    diskDirtyRef.current = true;
     setDirty(true);
     flash(
       `Restored ${viewing.id.slice(0, 7)} into the editor — save to commit`,
@@ -923,6 +1031,15 @@ function App() {
     if (!filePath) return;
     const name = window.prompt("Review branch name", "review/reviewer");
     if (!name) return;
+    const saved = await autoSave();
+    if (saved === "blocked-conflict") {
+      flash("Resolve the disk conflict before creating a review branch");
+      return;
+    }
+    if (saved === "failed") {
+      flash("Autosave failed; review branch not created");
+      return;
+    }
     try {
       await api.createBranch(filePath, name, true);
       await loadFile(filePath);
@@ -930,13 +1047,13 @@ function App() {
     } catch (e) {
       flash(`Could not create branch: ${e}`);
     }
-  }, [filePath, loadFile, flash]);
+  }, [filePath, autoSave, loadFile, flash]);
 
   const switchBranch = useCallback(
     async (name: string) => {
       if (!filePath) return;
       if (dirty) {
-        flash("Save your changes before switching branches");
+        flash("Commit uncommitted changes before switching branches");
         return;
       }
       try {
@@ -954,7 +1071,7 @@ function App() {
     async (name: string) => {
       if (!filePath) return;
       if (dirty) {
-        flash("Save your changes before merging");
+        flash("Commit uncommitted changes before merging");
         return;
       }
       try {
@@ -1058,7 +1175,7 @@ function App() {
   const execCommand = useCallback(
     (id: string) => {
       if (id.startsWith("recent:")) {
-        void loadFile(id.slice(7));
+        void openPath(id.slice(7));
         return;
       }
       if (id.startsWith("theme:")) {
@@ -1088,6 +1205,9 @@ function App() {
           break;
         case "export-pdf":
           exportPdf();
+          break;
+        case "check-updates":
+          void checkForUpdates();
           break;
         case "quit":
           void getCurrentWindow().close();
@@ -1165,13 +1285,14 @@ function App() {
       }
     },
     [
-      loadFile,
+      openPath,
       doOpen,
       doOpenFolder,
       doSave,
       doSaveAs,
       doReload,
       exportPdf,
+      checkForUpdates,
       addNote,
       startRsvp,
       toggleNotesPanel,
@@ -1219,6 +1340,7 @@ function App() {
     { id: "save-as", title: "Save As…", shortcut: "⇧⌘S" },
     { id: "reload", title: "Reload from Disk", shortcut: "⌘R" },
     { id: "export-pdf", title: "Export as PDF", shortcut: "⇧⌘E" },
+    { id: "check-updates", title: "Check for Updates…" },
     { id: "bold", title: "Bold", shortcut: "⌘B" },
     { id: "italic", title: "Italic", shortcut: "⌘I" },
     { id: "insert-note", title: "Insert Note", shortcut: "⇧⌘M" },
@@ -1387,6 +1509,9 @@ function App() {
             {!filePath ? (
               <p className="muted">Open a document to list its project.</p>
             ) : null}
+            {project?.truncated ? (
+              <p className="muted">Showing first 500 markdown files.</p>
+            ) : null}
             <ul className="nav-list">
               {(project?.files ?? []).map((f, i, all) => {
                 const cut = f.rel.lastIndexOf("/");
@@ -1410,7 +1535,7 @@ function App() {
                       className={cls}
                       title={f.rel}
                       onClick={() => {
-                        if (f.path !== filePath) void switchToFile(f.path);
+                        if (f.path !== filePath) void openPath(f.path);
                       }}
                     >
                       {name}

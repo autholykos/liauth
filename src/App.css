@@ -570,6 +570,37 @@ button.wide {
   padding: 2.2cm 2cm 5cm;
 }
 
+/* Vim visual mode uses CodeMirror's drawn selection layer. In page layout,
+   the paper background on .cm-content otherwise paints over that layer. */
+[data-page="1"]
+  .app:not(.room)
+  .editor-wrap
+  .cm-editor
+  .cm-selectionLayer.cm-layer {
+  z-index: 2 !important;
+}
+
+[data-page="1"]
+  .app:not(.room)
+  .editor-wrap
+  .cm-editor
+  .cm-selectionBackground {
+  background: color-mix(in srgb, var(--c-selection) 72%, transparent) !important;
+}
+
+[data-page="1"]
+  .app:not(.room)
+  .editor-wrap
+  .cm-editor
+  .cm-cursorLayer.cm-layer,
+[data-page="1"]
+  .app:not(.room)
+  .editor-wrap
+  .cm-editor
+  .cm-vimCursorLayer.cm-layer {
+  z-index: 3 !important;
+}
+
 /* Line-number gutter: quiet, borderless, clearly separated from text. */
 .editor-wrap .cm-editor .cm-gutters {
   background: transparent !important;

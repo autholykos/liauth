@@ -4,6 +4,7 @@ export interface RepoInfo {
   repo_root: string | null;
   branch: string | null;
   merging: boolean;
+  file_dirty: boolean;
 }
 
 export interface CommitInfo {
@@ -101,6 +102,7 @@ export interface ProjectFiles {
   root: string;
   name: string;
   files: ProjectFile[];
+  truncated: boolean;
 }
 
 export const listProjectFiles = (filePath: string) =>

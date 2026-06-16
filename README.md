@@ -59,3 +59,23 @@ npm run tauri dev      # run the app
 npm run build          # typecheck + bundle frontend
 cd src-tauri && cargo test   # git engine end-to-end tests
 ```
+
+## Releases
+
+Updates are served from GitHub Releases. The app checks:
+
+```text
+https://github.com/autholykos/liauth/releases/latest/download/latest.json
+```
+
+To publish an update, bump the version in `package.json`,
+`src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then push a matching
+tag:
+
+```sh
+git tag app-v0.1.1
+git push origin app-v0.1.1
+```
+
+The release workflow signs updater artifacts with the
+`TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret and uploads `latest.json`.

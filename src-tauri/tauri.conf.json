@@ -23,6 +23,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -43,5 +44,13 @@
         "mimeType": "text/markdown"
       }
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI5MURBOUFEQUQzMzJGOTkKUldTWkx6T3RyYWtkdWRYcGJ5cFRLYzl2Q1FvNE51RUxoWGdGZU0yWkNTOEozZWd4WVpuQ1VEWDQK",
+      "endpoints": [
+        "https://github.com/autholykos/liauth/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

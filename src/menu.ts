@@ -53,6 +53,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
         item: { About: null },
         text: "About Liauth",
       }),
+      await item("check-updates", "Check for Updates…"),
       await sep(),
       await item("palette", "Command Palette…", "CmdOrCtrl+K"),
       await sep(),

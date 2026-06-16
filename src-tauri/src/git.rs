@@ -1,5 +1,6 @@
 use git2::{
     BranchType, Commit, ErrorCode, MergeOptions, Oid, Repository, RepositoryState, Signature,
+    Status,
 };
 use serde::Serialize;
 use std::fs;
@@ -10,6 +11,7 @@ pub struct RepoInfo {
     pub repo_root: Option<String>,
     pub branch: Option<String>,
     pub merging: bool,
+    pub file_dirty: bool,
 }
 
 #[derive(Serialize)]
@@ -82,17 +84,30 @@ fn info(repo: &Repository) -> RepoInfo {
         repo_root: repo.workdir().map(|p| p.display().to_string()),
         branch,
         merging: repo.state() == RepositoryState::Merge,
+        file_dirty: false,
+    }
+}
+
+fn info_for_file(repo: &Repository, file_path: &str) -> RepoInfo {
+    let file_dirty = workdir_rel(repo, file_path)
+        .ok()
+        .and_then(|rel| repo.status_file(&rel).ok())
+        .is_some_and(|s| s != Status::CURRENT);
+    RepoInfo {
+        file_dirty,
+        ..info(repo)
     }
 }
 
 #[tauri::command]
 pub fn repo_info(file_path: String) -> RepoInfo {
     match discover(&file_path) {
-        Ok(repo) => info(&repo),
+        Ok(repo) => info_for_file(&repo, &file_path),
         Err(_) => RepoInfo {
             repo_root: None,
             branch: None,
             merging: false,
+            file_dirty: false,
         },
     }
 }
@@ -152,7 +167,9 @@ pub fn save_document(
     let sig = signature(&repo)?;
     let default_msg = format!(
         "Save {}",
-        rel.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+        rel.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
     );
     let msg = message.unwrap_or(default_msg);
 
@@ -307,7 +324,9 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
     let repo = discover(&file_path)?;
     let refname = format!("refs/heads/{name}");
     let their_ref = repo.find_reference(&refname).map_err(err)?;
-    let annotated = repo.reference_to_annotated_commit(&their_ref).map_err(err)?;
+    let annotated = repo
+        .reference_to_annotated_commit(&their_ref)
+        .map_err(err)?;
     let (analysis, _) = repo.merge_analysis(&[&annotated]).map_err(err)?;
 
     if analysis.is_up_to_date() {
@@ -435,13 +454,21 @@ mod tests {
         // Unversioned save: writes the file, no commit.
         let r = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), None, true).unwrap();
         assert!(r.is_none());
-        assert_eq!(read_document(doc_s.clone()).unwrap(), "# Title\n\nv1 line\n");
+        assert_eq!(
+            read_document(doc_s.clone()).unwrap(),
+            "# Title\n\nv1 line\n"
+        );
 
         // Enable versioning.
         init_repo(doc_s.clone()).unwrap();
-        let c1 = save_document(doc_s.clone(), "# Title\n\nv1 line\n".into(), Some("Initial version".into()), true)
-            .unwrap()
-            .expect("first commit");
+        let c1 = save_document(
+            doc_s.clone(),
+            "# Title\n\nv1 line\n".into(),
+            Some("Initial version".into()),
+            true,
+        )
+        .unwrap()
+        .expect("first commit");
         assert_eq!(c1.summary, "Initial version");
 
         // Saving identical content must not create an empty commit.
@@ -454,19 +481,30 @@ mod tests {
             .expect("second commit");
         let hist = file_history(doc_s.clone(), None).unwrap();
         assert_eq!(hist.len(), 2);
-        assert_eq!(file_at_commit(doc_s.clone(), hist[1].id.clone()).unwrap(), "# Title\n\nv1 line\n");
+        assert_eq!(
+            file_at_commit(doc_s.clone(), hist[1].id.clone()).unwrap(),
+            "# Title\n\nv1 line\n"
+        );
 
         let main_branch = repo_info(doc_s.clone()).branch.expect("branch name");
 
         // Reviewer edits on their own branch.
         create_branch(doc_s.clone(), "review/anna".into(), true).unwrap();
-        save_document(doc_s.clone(), "# Title\n\nreviewer line\n".into(), Some("Review edits".into()), true)
-            .unwrap()
-            .expect("review commit");
+        save_document(
+            doc_s.clone(),
+            "# Title\n\nreviewer line\n".into(),
+            Some("Review edits".into()),
+            true,
+        )
+        .unwrap()
+        .expect("review commit");
 
         // Author keeps working on the main branch — conflicting change.
         checkout_branch(doc_s.clone(), main_branch.clone()).unwrap();
-        assert_eq!(read_document(doc_s.clone()).unwrap(), "# Title\n\nv2 line\n");
+        assert_eq!(
+            read_document(doc_s.clone()).unwrap(),
+            "# Title\n\nv2 line\n"
+        );
         save_document(doc_s.clone(), "# Title\n\nauthor line\n".into(), None, true)
             .unwrap()
             .expect("author commit");
@@ -476,7 +514,10 @@ mod tests {
         assert_eq!(m.status, "conflicts");
         assert_eq!(m.conflicts, vec!["doc.md".to_string()]);
         let conflicted = read_document(doc_s.clone()).unwrap();
-        assert!(conflicted.contains("<<<<<<<"), "conflict markers expected: {conflicted}");
+        assert!(
+            conflicted.contains("<<<<<<<"),
+            "conflict markers expected: {conflicted}"
+        );
         assert!(repo_info(doc_s.clone()).merging);
 
         // Resolving = editing the markers away and saving.
@@ -491,18 +532,32 @@ mod tests {
         assert!(!repo_info(doc_s.clone()).merging);
 
         let repo = Repository::discover(dir.path()).unwrap();
-        let commit = repo.find_commit(Oid::from_str(&merge_commit.id).unwrap()).unwrap();
-        assert_eq!(commit.parent_count(), 2, "merge commit must have two parents");
+        let commit = repo
+            .find_commit(Oid::from_str(&merge_commit.id).unwrap())
+            .unwrap();
+        assert_eq!(
+            commit.parent_count(),
+            2,
+            "merge commit must have two parents"
+        );
 
         // Fast-forward path: branch ahead, main untouched.
         create_branch(doc_s.clone(), "review/ben".into(), true).unwrap();
-        save_document(doc_s.clone(), "# Title\n\nben's improvement\n".into(), None, true)
-            .unwrap()
-            .expect("ben commit");
+        save_document(
+            doc_s.clone(),
+            "# Title\n\nben's improvement\n".into(),
+            None,
+            true,
+        )
+        .unwrap()
+        .expect("ben commit");
         checkout_branch(doc_s.clone(), main_branch).unwrap();
         let m = merge_branch(doc_s.clone(), "review/ben".into()).unwrap();
         assert_eq!(m.status, "fast_forward");
-        assert_eq!(read_document(doc_s.clone()).unwrap(), "# Title\n\nben's improvement\n");
+        assert_eq!(
+            read_document(doc_s.clone()).unwrap(),
+            "# Title\n\nben's improvement\n"
+        );
     }
 
     /// abort_merge restores HEAD's tree and clears the merge state.
@@ -513,13 +568,19 @@ mod tests {
         let doc_s = p(&doc);
 
         init_repo(doc_s.clone()).unwrap();
-        save_document(doc_s.clone(), "base\n".into(), None, true).unwrap().unwrap();
+        save_document(doc_s.clone(), "base\n".into(), None, true)
+            .unwrap()
+            .unwrap();
         let main_branch = repo_info(doc_s.clone()).branch.unwrap();
 
         create_branch(doc_s.clone(), "review/x".into(), true).unwrap();
-        save_document(doc_s.clone(), "their change\n".into(), None, true).unwrap().unwrap();
+        save_document(doc_s.clone(), "their change\n".into(), None, true)
+            .unwrap()
+            .unwrap();
         checkout_branch(doc_s.clone(), main_branch).unwrap();
-        save_document(doc_s.clone(), "my change\n".into(), None, true).unwrap().unwrap();
+        save_document(doc_s.clone(), "my change\n".into(), None, true)
+            .unwrap()
+            .unwrap();
 
         let m = merge_branch(doc_s.clone(), "review/x".into()).unwrap();
         assert_eq!(m.status, "conflicts");
@@ -545,5 +606,26 @@ mod tests {
         assert!(r.is_none());
         assert_eq!(read_document(doc_s.clone()).unwrap(), "autosaved\n");
         assert_eq!(file_history(doc_s.clone(), None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repo_info_reports_file_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "v1\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert!(!repo_info(doc_s.clone()).file_dirty);
+
+        save_document(doc_s.clone(), "autosaved\n".into(), None, false).unwrap();
+        assert!(repo_info(doc_s.clone()).file_dirty);
+
+        save_document(doc_s.clone(), "autosaved\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert!(!repo_info(doc_s).file_dirty);
     }
 }

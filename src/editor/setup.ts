@@ -129,6 +129,8 @@ export function createEditorState(
     extensions: [
       // vim() must precede other keymaps to take precedence.
       useVim ? vim() : [],
+      // Visual block mode emits one range per selected line.
+      useVim ? EditorState.allowMultipleSelections.of(true) : [],
       useTypewriter ? typewriterScroll : [],
       useLineNumbers ? lineNumbers() : [],
       EditorState.readOnly.of(readOnly),
