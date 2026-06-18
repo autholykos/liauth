@@ -15,6 +15,15 @@ import { livePreview, tableRendering } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
 import { criticMarkup, insertNote } from "./notes";
 
+function installWrappedLineVimNavigation(): void {
+  Vim.noremap("j", "gj", "normal");
+  Vim.noremap("k", "gk", "normal");
+  Vim.noremap("j", "gj", "visual");
+  Vim.noremap("k", "gk", "visual");
+}
+
+installWrappedLineVimNavigation();
+
 /** Subtle source-level colors for the bits that stay visible. */
 const mdHighlight = HighlightStyle.define([
   { tag: tags.monospace, fontFamily: "var(--font-mono)" },
