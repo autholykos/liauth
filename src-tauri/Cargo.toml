@@ -1,6 +1,6 @@
 [package]
 name = "liauth"
-version = "0.1.1"
+version = "0.1.2"
 description = "A markdown editor that doesn't suck: Typora-style live preview with an embedded git engine"
 authors = ["you"]
 edition = "2021"
