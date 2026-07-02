@@ -29,8 +29,11 @@ import { HelpPanel } from "./HelpPanel";
 import {
   scanNotes,
   insertNote,
+  insertSuggestion,
   stripCriticMarkup,
+  CommentNote,
   NoteMatch,
+  SuggestionNote,
 } from "./editor/notes";
 import { buildRsvpWords, RsvpWord } from "./editor/rsvp";
 import { RsvpOverlay } from "./RsvpOverlay";
@@ -110,6 +113,8 @@ function initialTheme(): Theme {
     ? "dark"
     : "paper";
 }
+
+const clip = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
 
 function fmtTime(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -270,9 +275,7 @@ function App() {
       return;
     }
     const head = view.state.selection.main.head;
-    let startIndex = words.findIndex(
-      (w) => head >= w.offset && head < w.end,
-    );
+    let startIndex = words.findIndex((w) => head >= w.offset && head < w.end);
     if (startIndex < 0) startIndex = words.findIndex((w) => w.offset >= head);
     if (startIndex < 0) startIndex = words.length - 1;
     setRsvp({ words, startIndex });
@@ -867,9 +870,7 @@ function App() {
   useEffect(() => {
     const un = getCurrentWebview().onDragDropEvent((e) => {
       if (e.payload.type !== "drop") return;
-      const path = e.payload.paths.find((p) =>
-        /\.(md|markdown|txt)$/i.test(p),
-      );
+      const path = e.payload.paths.find((p) => /\.(md|markdown|txt)$/i.test(p));
       if (path) void openPath(path);
     });
     return () => {
@@ -897,12 +898,7 @@ function App() {
       if (view && path && diskDirtyRef.current) {
         try {
           const content = view.state.doc.toString();
-          await api.saveDocument(
-            path,
-            content,
-            undefined,
-            false,
-          );
+          await api.saveDocument(path, content, undefined, false);
           diskDirtyRef.current = false;
           lastDiskRef.current = content;
         } catch {
@@ -977,11 +973,7 @@ function App() {
     const view = viewRef.current;
     if (view) {
       const content = view.state.doc.toString();
-      await api.saveDocument(
-        filePath,
-        content,
-        "Initial version",
-      );
+      await api.saveDocument(filePath, content, "Initial version");
       diskDirtyRef.current = false;
       lastDiskRef.current = content;
       setDirty(false);
@@ -1123,6 +1115,13 @@ function App() {
     refreshNotes();
   }, [viewing, refreshNotes]);
 
+  const addSuggestion = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || viewing) return;
+    insertSuggestion(view);
+    refreshNotes();
+  }, [viewing, refreshNotes]);
+
   const jumpToNote = useCallback((n: NoteMatch) => {
     const view = viewRef.current;
     if (!view) return;
@@ -1138,8 +1137,10 @@ function App() {
     view.focus();
   }, []);
 
-  const resolveNote = useCallback(
-    (n: NoteMatch) => {
+  // Shared by dismiss/accept/reject: swap the whole markup span for `insert`,
+  // guarding against a document that moved under the notes list.
+  const replaceNoteSpan = useCallback(
+    (n: NoteMatch, insert: string, msg: string) => {
       const view = viewRef.current;
       if (!view || viewing) return;
       if (view.state.sliceDoc(n.from, n.to) !== n.raw) {
@@ -1147,17 +1148,27 @@ function App() {
         flash("Document changed under the note — list refreshed, try again");
         return;
       }
-      view.dispatch({
-        changes: {
-          from: n.from,
-          to: n.to,
-          insert: n.highlighted ? n.excerpt : "",
-        },
-      });
+      view.dispatch({ changes: { from: n.from, to: n.to, insert } });
       refreshNotes();
-      flash("Note resolved");
+      flash(msg);
     },
     [viewing, refreshNotes, flash],
+  );
+
+  const dismissNote = useCallback(
+    (n: CommentNote) =>
+      replaceNoteSpan(n, n.highlighted ? n.excerpt : "", "Note dismissed"),
+    [replaceNoteSpan],
+  );
+
+  const applySuggestion = useCallback(
+    (n: SuggestionNote, accept: boolean) =>
+      replaceNoteSpan(
+        n,
+        accept ? n.newText : n.oldText,
+        accept ? "Suggestion accepted" : "Suggestion rejected",
+      ),
+    [replaceNoteSpan],
   );
 
   const toggleNotesPanel = useCallback(() => {
@@ -1230,6 +1241,9 @@ function App() {
         case "insert-note":
           addNote();
           break;
+        case "insert-suggestion":
+          addSuggestion();
+          break;
         case "zoom-in":
           setZoom((z) => clampZoom(z + ZOOM_STEP));
           break;
@@ -1294,6 +1308,7 @@ function App() {
       exportPdf,
       checkForUpdates,
       addNote,
+      addSuggestion,
       startRsvp,
       toggleNotesPanel,
       enableVersioning,
@@ -1344,6 +1359,7 @@ function App() {
     { id: "bold", title: "Bold", shortcut: "⌘B" },
     { id: "italic", title: "Italic", shortcut: "⌘I" },
     { id: "insert-note", title: "Insert Note", shortcut: "⇧⌘M" },
+    { id: "insert-suggestion", title: "Insert Suggestion", shortcut: "⇧⌘U" },
     {
       id: "toggle-room",
       title: room ? "Exit Writing Room" : "Enter Writing Room",
@@ -1612,41 +1628,77 @@ function App() {
             <button className="wide" onClick={addNote} disabled={!!viewing}>
               Add note at cursor (⌘⇧M)
             </button>
+            <button
+              className="wide"
+              onClick={addSuggestion}
+              disabled={!!viewing}
+            >
+              Suggest edit to selection (⌘⇧U)
+            </button>
             {notes.length === 0 ? (
               <p className="muted">
-                No notes. Select text and press ⌘⇧M to annotate it; notes are
-                stored as CriticMarkup in the document and stripped from PDF
-                export.
+                No notes. Select text and press ⌘⇧M to annotate it or ⌘⇧U to
+                suggest a rewording; both are stored as CriticMarkup in the
+                document and removed from PDF export.
               </p>
             ) : null}
             <ul className="note-list">
               {notes.map((n, i) => (
                 <li key={`${n.from}-${i}`} onClick={() => jumpToNote(n)}>
-                  {n.highlighted ? (
-                    <span className="note-excerpt">
-                      “
-                      {n.excerpt.length > 60
-                        ? `${n.excerpt.slice(0, 60)}…`
-                        : n.excerpt}
-                      ”
-                    </span>
+                  {n.kind === "suggestion" ? (
+                    <>
+                      <span className="note-excerpt note-old">
+                        {n.oldText ? `“${clip(n.oldText)}”` : "(insertion)"}
+                      </span>
+                      <span className="note-comment">
+                        {n.newText ? `→ ${clip(n.newText)}` : "→ (deletion)"}
+                      </span>
+                      <span className="branch-actions">
+                        <button
+                          disabled={!!viewing}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            applySuggestion(n, true);
+                          }}
+                        >
+                          Accept
+                        </button>
+                        <button
+                          disabled={!!viewing}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            applySuggestion(n, false);
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </span>
+                    </>
                   ) : (
-                    <span className="note-excerpt muted">(standalone)</span>
+                    <>
+                      {n.highlighted ? (
+                        <span className="note-excerpt">
+                          “{clip(n.excerpt)}”
+                        </span>
+                      ) : (
+                        <span className="note-excerpt muted">(standalone)</span>
+                      )}
+                      <span className="note-comment">
+                        {n.comment.trim() || "(empty)"}
+                      </span>
+                      <span className="branch-actions">
+                        <button
+                          disabled={!!viewing}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            dismissNote(n);
+                          }}
+                        >
+                          Dismiss
+                        </button>
+                      </span>
+                    </>
                   )}
-                  <span className="note-comment">
-                    {n.comment.trim() || "(empty)"}
-                  </span>
-                  <span className="branch-actions">
-                    <button
-                      disabled={!!viewing}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        resolveNote(n);
-                      }}
-                    >
-                      Resolve
-                    </button>
-                  </span>
                 </li>
               ))}
             </ul>
