@@ -1203,7 +1203,7 @@ function App() {
         // made while the model ran simply reduce to missed pairs.
         const live = viewRef.current;
         if (!live) return;
-        const { applied, missed } = applyEditsAsSuggestions(live, pairs);
+        const { applied, missed } = applyEditsAsSuggestions(live, pairs, n);
         refreshNotes();
         flash(
           applied === 0
