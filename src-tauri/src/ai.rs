@@ -100,8 +100,10 @@ pub async fn draft_note_edits(
          - To insert new text, use the sentence at the insertion point as \
          \"find\" and return it with the new text in the right position as \
          \"replace\".\n\
-         - Propose ONLY edits this note explicitly asks for; ignore other \
-         flaws. If the note is purely informational, return [].\n\
+         - The note may start with an identifier label (e.g. \"NOTE 14-D4 —\"); \
+         ignore the label, the instruction is what follows.\n\
+         - Propose ONLY edits this note asks for; ignore other flaws. Return \
+         [] only when the note requests no change to the text at all.\n\
          - Never include the {{>> <<}}, {{== ==}}, or {{~~ ~~}} annotation \
          markers in a find or replace.",
         doc_prefix(&document),
