@@ -29,11 +29,14 @@ diffy = "0.5.0"
 tauri-plugin-process = "2"
 # Mirror the updater plugin's TLS stack (rustls-no-provider + the ring
 # provider already in the tree); reqwest's own "rustls" feature would drag
-# in the aws-lc-sys native build instead.
+# in the aws-lc-sys native build instead. With no-provider, reqwest panics
+# at Client build unless a process-level CryptoProvider is installed —
+# done once in ai.rs via the direct rustls dependency below.
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls-no-provider",
 ] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Native print with real page margins; tauri's Webview::print() hardcodes
 # zero margins. Versions/features match what wry already pulls in, so this
