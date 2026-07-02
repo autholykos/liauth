@@ -280,11 +280,13 @@ export function matchEditPairs(
       : undefined;
   const excerptEdits: { from: number; to: number; replace: string }[] = [];
   for (const p of pairs) {
-    if (
-      !p.find ||
-      p.find === p.replace ||
-      CRITIC_TOKENS.test(p.find + p.replace)
-    ) {
+    // Notes are glued to the prose, so models quote passages together
+    // with their annotations despite instructions: strip the markup
+    // rather than discard the edit. Anything still markup-shaped after
+    // stripping would corrupt the document and is dropped.
+    const find = stripCriticMarkup(p.find);
+    const replace = stripCriticMarkup(p.replace);
+    if (!find || find === replace || CRITIC_TOKENS.test(find + replace)) {
       missed++;
       continue;
     }
@@ -303,21 +305,38 @@ export function matchEditPairs(
     // The anchored excerpt is the note's explicit target — try it first,
     // so a duplicate of the excerpt elsewhere cannot steal the edit.
     if (src) {
-      for (const m of matchIn(src.excerpt, p.find, p.replace)) {
+      for (const m of matchIn(src.excerpt, find, replace)) {
         if (m.original === m.replace) continue;
         if (excerptEdits.some((e) => m.from < e.to && m.to > e.from)) continue;
         excerptEdits.push({ from: m.from, to: m.to, replace: m.replace });
         found = true;
       }
     }
-    // Document-wide pass still runs (pattern-wide asks reach every
-    // occurrence; the note's own span is excluded via `taken`). Exact
-    // occurrences take the model's replacement verbatim — matching
-    // typography proves the model was not normalizing, and a note may
-    // intentionally change quotes or ellipses. The normalized scan always
-    // runs too (documents mix forms); `taken` dedupes claimed spans.
-    for (const m of matchIn(doc, p.find, p.replace)) {
-      push(m.from, m.to, m.original, m.replace);
+    if (find !== p.find) {
+      // The raw find carried annotations: pin the edit to where those
+      // annotations actually are — a sanitized find must never drift to
+      // an unannotated duplicate elsewhere. Markup at the find's edges
+      // leaves the sanitized text contiguous inside the raw window;
+      // markup interior to the find is unrepresentable and skipped.
+      for (
+        let idx = doc.indexOf(p.find);
+        idx !== -1;
+        idx = doc.indexOf(p.find, idx + p.find.length)
+      ) {
+        const inner = doc.slice(idx, idx + p.find.length).indexOf(find);
+        if (inner === -1) continue;
+        push(idx + inner, idx + inner + find.length, find, replace);
+      }
+    } else {
+      // Document-wide pass (pattern-wide asks reach every occurrence;
+      // the note's own span is excluded via `taken`). Exact occurrences
+      // take the model's replacement verbatim — matching typography
+      // proves the model was not normalizing, and a note may
+      // intentionally change quotes or ellipses. The normalized scan
+      // always runs too (documents mix forms); `taken` dedupes claims.
+      for (const m of matchIn(doc, find, replace)) {
+        push(m.from, m.to, m.original, m.replace);
+      }
     }
     if (!found) missed++;
   }
