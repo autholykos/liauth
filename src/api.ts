@@ -105,6 +105,11 @@ export const draftNoteEdits = (
   document: string,
 ) => invoke<EditPair[]>("draft_note_edits", { note, excerpt, document });
 
+/** Fire-and-forget: pre-fill the model's KV cache with the document so the
+ *  first Draft edits call skips the multi-minute prompt-processing cost. */
+export const warmNoteCache = (document: string) =>
+  invoke<void>("warm_note_cache", { document });
+
 export interface ProjectFile {
   path: string;
   rel: string;

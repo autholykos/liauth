@@ -668,6 +668,11 @@ function App() {
         diskDirtyRef.current = false;
         lastDiskRef.current = content;
         setEditorContent(content);
+        // A document carrying review notes will likely get Draft edits;
+        // pre-fill the model's KV cache so the first draft is fast.
+        if (scanNotes(content).some((n) => n.kind === "comment")) {
+          void api.warmNoteCache(content);
+        }
         setRecents((r) => [path, ...r.filter((p) => p !== path)].slice(0, 8));
         const info = await refreshGit(path);
         if (!diskDirtyRef.current) setDirty(info.file_dirty);
