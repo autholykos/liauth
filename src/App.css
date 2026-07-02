@@ -849,15 +849,15 @@ button.wide {
 /* {~~old~>new~~} suggestions: struck-through original beside proposal. */
 
 .lp-sug-old {
-  background: color-mix(in srgb, #d33f49 14%, transparent);
+  background: color-mix(in srgb, #d33f49 28%, transparent);
   text-decoration: line-through;
-  text-decoration-color: color-mix(in srgb, #d33f49 60%, var(--c-text));
+  text-decoration-color: color-mix(in srgb, #d33f49 75%, var(--c-text));
   border-radius: 3px;
   padding: 0 1px;
 }
 
 .lp-sug-new {
-  background: color-mix(in srgb, #2f9e5f 16%, transparent);
+  background: color-mix(in srgb, #2f9e5f 30%, transparent);
   border-radius: 3px;
   padding: 0 1px;
 }

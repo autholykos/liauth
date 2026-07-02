@@ -13,7 +13,12 @@ import { tags } from "@lezer/highlight";
 import { vim, Vim, getCM } from "@replit/codemirror-vim";
 import { livePreview, tableRendering } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
-import { criticMarkup, insertNote, insertSuggestion } from "./notes";
+import {
+  criticMarkup,
+  insertNote,
+  insertSuggestion,
+  gotoNextNote,
+} from "./notes";
 
 function installWrappedLineVimNavigation(): void {
   Vim.noremap("j", "gj", "normal");
@@ -164,6 +169,7 @@ export function createEditorState(
         { key: "Mod-i", run: toggleItalic },
         { key: "Mod-Shift-m", run: insertNote },
         { key: "Mod-Shift-u", run: insertSuggestion },
+        { key: "Mod-Shift-j", run: gotoNextNote },
         ...defaultKeymap,
         ...historyKeymap,
       ]),
