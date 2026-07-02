@@ -517,6 +517,11 @@ button.wide {
   font-size: 12.5px;
 }
 
+.note-old {
+  text-decoration: line-through;
+  color: var(--c-muted);
+}
+
 /* ---------- editor / live preview prose ---------- */
 
 .cm-editor {
@@ -839,6 +844,22 @@ button.wide {
 
 .lp-note:hover .lp-note-pop {
   display: block;
+}
+
+/* {~~old~>new~~} suggestions: struck-through original beside proposal. */
+
+.lp-sug-old {
+  background: color-mix(in srgb, #d33f49 14%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, #d33f49 60%, var(--c-text));
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.lp-sug-new {
+  background: color-mix(in srgb, #2f9e5f 16%, transparent);
+  border-radius: 3px;
+  padding: 0 1px;
 }
 
 .lp-hr {

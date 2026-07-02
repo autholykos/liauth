@@ -4,9 +4,11 @@
  *
  *   {>> standalone comment <<}
  *   {== highlighted text ==}{>> comment on it <<}
+ *   {~~old text~>suggested replacement~~}
  *
  * The live view hides the syntax and renders a highlight plus a hoverable
- * note bubble; placing the cursor inside reveals the raw markup.
+ * note bubble — or, for suggestions, the old text struck through beside
+ * the proposed text; placing the cursor inside reveals the raw markup.
  */
 import {
   Decoration,
@@ -18,10 +20,15 @@ import {
 } from "@codemirror/view";
 import { EditorState, Range } from "@codemirror/state";
 
-export interface NoteMatch {
+interface NoteBase {
   from: number;
   to: number;
   raw: string;
+}
+
+/** A {>> <<} comment, optionally attached to a {== ==} highlight. */
+export interface CommentNote extends NoteBase {
+  kind: "comment";
   excerpt: string; // highlighted text, "" for standalone comments
   comment: string;
   highlighted: boolean;
@@ -32,8 +39,21 @@ export interface NoteMatch {
   commentTextPos: number; // caret position inside the comment text
 }
 
+/** A {~~old~>new~~} substitution the author can accept or reject. */
+export interface SuggestionNote extends NoteBase {
+  kind: "suggestion";
+  oldText: string;
+  newText: string;
+  oldFrom: number;
+  oldTo: number;
+  newFrom: number;
+  newTo: number;
+}
+
+export type NoteMatch = CommentNote | SuggestionNote;
+
 const CRITIC_RE =
-  /\{==([\s\S]*?)==\}(\s*\{>>([\s\S]*?)<<\})?|\{>>([\s\S]*?)<<\}/g;
+  /\{==([\s\S]*?)==\}(\s*\{>>([\s\S]*?)<<\})?|\{>>([\s\S]*?)<<\}|\{~~([\s\S]*?)~>([\s\S]*?)~~\}/g;
 
 export function scanNotes(text: string, base = 0): NoteMatch[] {
   const out: NoteMatch[] = [];
@@ -49,6 +69,7 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
       const commentFrom = hasComment ? hlTo + 3 : -1;
       const commentTo = hasComment ? commentFrom + m[2]!.length : -1;
       out.push({
+        kind: "comment",
         from,
         to,
         raw: m[0],
@@ -61,8 +82,25 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
         commentTo,
         commentTextPos: hasComment ? commentTo - 3 - m[3]!.length : -1,
       });
+    } else if (m[5] !== undefined) {
+      const oldFrom = from + 3;
+      const oldTo = oldFrom + m[5].length;
+      const newFrom = oldTo + 2;
+      out.push({
+        kind: "suggestion",
+        from,
+        to,
+        raw: m[0],
+        oldText: m[5],
+        newText: m[6]!,
+        oldFrom,
+        oldTo,
+        newFrom,
+        newTo: newFrom + m[6]!.length,
+      });
     } else {
       out.push({
+        kind: "comment",
         from,
         to,
         raw: m[0],
@@ -80,12 +118,14 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
   return out;
 }
 
-/** Remove all notes for export: comments dropped, highlights unwrapped. */
+/** Remove all notes for export: comments dropped, highlights unwrapped,
+ *  unaccepted suggestions keep the original text. */
 export function stripCriticMarkup(text: string): string {
   return text
     .replace(/\{==([\s\S]*?)==\}\s*\{>>[\s\S]*?<<\}/g, "$1")
     .replace(/\{==([\s\S]*?)==\}/g, "$1")
-    .replace(/ ?\{>>[\s\S]*?<<\}/g, "");
+    .replace(/ ?\{>>[\s\S]*?<<\}/g, "")
+    .replace(/\{~~([\s\S]*?)~>[\s\S]*?~~\}/g, "$1");
 }
 
 /** Wrap the selection in a note (or insert a standalone one) and place
@@ -103,6 +143,28 @@ export function insertNote(view: EditorView): boolean {
     view.dispatch({
       changes: { from, to, insert: `{==${sel}==}{>>  <<}` },
       selection: { anchor: from + sel.length + 10 },
+    });
+  }
+  view.focus();
+  return true;
+}
+
+/** Wrap the selection in a suggestion with the proposed text selected for
+ *  overtyping; with no selection, insert an empty insertion proposal. */
+export function insertSuggestion(view: EditorView): boolean {
+  if (view.state.readOnly) return false;
+  const { from, to } = view.state.selection.main;
+  if (from === to) {
+    view.dispatch({
+      changes: { from, insert: "{~~~>~~}" },
+      selection: { anchor: from + 5 },
+    });
+  } else {
+    const sel = view.state.sliceDoc(from, to);
+    const newFrom = from + 3 + sel.length + 2;
+    view.dispatch({
+      changes: { from, to, insert: `{~~${sel}~>${sel}~~}` },
+      selection: { anchor: newFrom, head: newFrom + sel.length },
     });
   }
   view.focus();
@@ -177,7 +239,21 @@ function buildDecorations(view: EditorView): NoteSets {
         );
         continue;
       }
-      if (n.highlighted) {
+      if (n.kind === "suggestion") {
+        hide(n.from, n.oldFrom); // {~~
+        if (n.oldFrom < n.oldTo) {
+          decos.push(
+            Decoration.mark({ class: "lp-sug-old" }).range(n.oldFrom, n.oldTo),
+          );
+        }
+        hide(n.oldTo, n.newFrom); // ~>
+        if (n.newFrom < n.newTo) {
+          decos.push(
+            Decoration.mark({ class: "lp-sug-new" }).range(n.newFrom, n.newTo),
+          );
+        }
+        hide(n.newTo, n.to); // ~~}
+      } else if (n.highlighted) {
         hide(n.from, n.hlFrom); // {==
         if (n.hlFrom < n.hlTo) {
           decos.push(

@@ -122,6 +122,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
       await item("italic", "Italic", "CmdOrCtrl+I"),
       await sep(),
       await item("insert-note", "Insert Note", "CmdOrCtrl+Shift+M"),
+      await item("insert-suggestion", "Insert Suggestion", "CmdOrCtrl+Shift+U"),
     ],
   });
 

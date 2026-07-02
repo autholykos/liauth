@@ -79,14 +79,17 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
-      title: "Notes",
+      title: "Notes & Suggestions",
       search:
-        "notes annotate select criticmarkup comment resolve panel pdf export strip",
+        "notes annotate select criticmarkup comment suggestion accept reject dismiss resolve panel pdf export strip",
       body: (
         <p>
-          Select text and press <kbd>⌘⇧M</kbd> to annotate it. Notes live in the
-          markdown itself (CriticMarkup), so they version and merge like any
-          edit. The Notes panel lists and resolves them; PDF export strips them.
+          Select text and press <kbd>⌘⇧M</kbd> to annotate it, or <kbd>⌘⇧U</kbd>{" "}
+          to suggest a rewording (the proposal is pre-selected — just type).
+          Both live in the markdown itself (CriticMarkup), so they version and
+          merge like any edit. The Notes panel dismisses comments and accepts or
+          rejects suggestions; PDF export strips comments and keeps the original
+          text of unaccepted suggestions.
         </p>
       ),
     },

@@ -84,6 +84,27 @@ function selectionTouches(
   return state.selection.ranges.some((r) => r.from <= to && r.to >= from);
 }
 
+/** GFM parses {~~old~>new~~} as strikethrough; those ranges belong to the
+ *  CriticMarkup notes plugin, so the preview must leave them alone. The
+ *  strikethrough node may start mid-run when the old text is empty
+ *  ({~~~>new~~} has a three-tilde run), so extend over the tilde runs
+ *  before testing for the enclosing braces. */
+function isCriticSuggestion(
+  state: EditorState,
+  from: number,
+  to: number,
+): boolean {
+  let s = from;
+  while (s > 0 && state.sliceDoc(s - 1, s) === "~") s--;
+  let e = to;
+  while (e < state.doc.length && state.sliceDoc(e, e + 1) === "~") e++;
+  return (
+    state.sliceDoc(s - 1, s) === "{" &&
+    state.sliceDoc(e, e + 1) === "}" &&
+    state.sliceDoc(s, e).includes("~>")
+  );
+}
+
 /** Does any selection range touch the line(s) covering [from, to]? */
 function selectionOnLine(
   state: EditorState,
@@ -149,6 +170,13 @@ function buildDecorations(view: EditorView): PreviewSets {
           case "CodeMark":
           case "StrikethroughMark": {
             const parent = node.node.parent;
+            if (
+              node.name === "StrikethroughMark" &&
+              parent &&
+              isCriticSuggestion(state, parent.from, parent.to)
+            ) {
+              return;
+            }
             if (parent && selectionTouches(state, parent.from, parent.to)) {
               decos.push(
                 Decoration.mark({ class: "lp-mark" }).range(node.from, node.to),
@@ -170,6 +198,7 @@ function buildDecorations(view: EditorView): PreviewSets {
             );
             return;
           case "Strikethrough":
+            if (isCriticSuggestion(state, node.from, node.to)) return;
             decos.push(
               Decoration.mark({ class: "lp-strike" }).range(node.from, node.to),
             );
