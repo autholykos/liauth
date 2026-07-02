@@ -171,6 +171,53 @@ export function insertSuggestion(view: EditorView): boolean {
   return true;
 }
 
+const CRITIC_TOKENS = /\{~~|~>|~~\}|\{>>|<<\}|\{==|==\}/;
+
+/** Insert a {~~find~>replace~~} suggestion at every match of each pair
+ *  that lies outside existing CriticMarkup, in ONE transaction so a single
+ *  undo reverts the whole drafted batch. Pairs whose text would corrupt
+ *  the markup, or that match nowhere, are counted as missed. */
+export function applyEditsAsSuggestions(
+  view: EditorView,
+  pairs: { find: string; replace: string }[],
+): { applied: number; missed: number } {
+  const doc = view.state.doc.toString();
+  const taken: [number, number][] = scanNotes(doc).map((n) => [n.from, n.to]);
+  const overlaps = (from: number, to: number) =>
+    taken.some(([f, t]) => from < t && to > f);
+  const changes: { from: number; to: number; insert: string }[] = [];
+  let missed = 0;
+  for (const p of pairs) {
+    if (
+      !p.find ||
+      p.find === p.replace ||
+      CRITIC_TOKENS.test(p.find + p.replace)
+    ) {
+      missed++;
+      continue;
+    }
+    let found = false;
+    for (
+      let idx = doc.indexOf(p.find);
+      idx !== -1;
+      idx = doc.indexOf(p.find, idx + p.find.length)
+    ) {
+      const end = idx + p.find.length;
+      if (overlaps(idx, end)) continue;
+      changes.push({
+        from: idx,
+        to: end,
+        insert: `{~~${p.find}~>${p.replace}~~}`,
+      });
+      taken.push([idx, end]);
+      found = true;
+    }
+    if (!found) missed++;
+  }
+  if (changes.length) view.dispatch({ changes });
+  return { applied: changes.length, missed };
+}
+
 class NoteWidget extends WidgetType {
   constructor(
     readonly comment: string,
