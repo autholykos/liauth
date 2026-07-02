@@ -668,13 +668,14 @@ function App() {
         diskDirtyRef.current = false;
         lastDiskRef.current = content;
         setEditorContent(content);
-        // A document carrying review notes will likely get Draft edits;
-        // pre-fill the model's KV cache so the first draft is fast.
-        if (scanNotes(content).some((n) => n.kind === "comment")) {
-          void api.warmNoteCache(content);
-        }
         setRecents((r) => [path, ...r.filter((p) => p !== path)].slice(0, 8));
         const info = await refreshGit(path);
+        // A document carrying review notes will likely get Draft edits;
+        // pre-fill the model's KV cache (voice guide + document) so the
+        // first draft is fast.
+        if (scanNotes(content).some((n) => n.kind === "comment")) {
+          void api.warmNoteCache(content, info.repo_root);
+        }
         if (!diskDirtyRef.current) setDirty(info.file_dirty);
         await watchFile(path);
       } catch (e) {
@@ -1192,6 +1193,7 @@ function App() {
           n.comment,
           n.highlighted ? n.excerpt : null,
           view.state.doc.toString(),
+          repo?.repo_root ?? null,
         );
         // Inference takes a while; don't apply to a different document or
         // to a read-only historical buffer opened meanwhile.
@@ -1218,7 +1220,7 @@ function App() {
         setDrafting(null);
       }
     },
-    [viewing, drafting, refreshNotes, flash],
+    [viewing, drafting, repo?.repo_root, refreshNotes, flash],
   );
 
   const toggleNotesPanel = useCallback(() => {

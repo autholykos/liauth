@@ -98,17 +98,21 @@ export interface EditPair {
   replace: string;
 }
 
-/** Ask the local model to turn one review note into find→replace edits. */
+/** Ask the local model to turn one review note into find→replace edits.
+ *  `repoRoot` locates the project's voice/style guide, when one exists. */
 export const draftNoteEdits = (
   note: string,
   excerpt: string | null,
   document: string,
-) => invoke<EditPair[]>("draft_note_edits", { note, excerpt, document });
+  repoRoot: string | null,
+) =>
+  invoke<EditPair[]>("draft_note_edits", { note, excerpt, document, repoRoot });
 
-/** Fire-and-forget: pre-fill the model's KV cache with the document so the
- *  first Draft edits call skips the multi-minute prompt-processing cost. */
-export const warmNoteCache = (document: string) =>
-  invoke<void>("warm_note_cache", { document });
+/** Fire-and-forget: pre-fill the model's KV cache with the voice guide and
+ *  document so the first Draft edits call skips the multi-minute
+ *  prompt-processing cost. */
+export const warmNoteCache = (document: string, repoRoot: string | null) =>
+  invoke<void>("warm_note_cache", { document, repoRoot });
 
 export interface ProjectFile {
   path: string;
