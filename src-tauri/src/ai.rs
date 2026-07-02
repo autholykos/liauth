@@ -62,6 +62,15 @@ pub async fn draft_note_edits(
         "temperature": 0,
         "max_tokens": 4096,
     });
+    // reqwest's rustls-no-provider build panics (stranding the invoke
+    // promise) unless a process-level CryptoProvider exists; the updater
+    // plugin may have installed one already, hence the ignored error.
+    static INIT_TLS: std::sync::Once = std::sync::Once::new();
+    INIT_TLS.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+    });
     // Prompt processing on the local model is slow (~50 tok/s), so a long
     // document legitimately takes minutes.
     let resp = reqwest::Client::new()
