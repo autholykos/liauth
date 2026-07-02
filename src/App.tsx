@@ -31,6 +31,7 @@ import {
   insertNote,
   insertSuggestion,
   stripCriticMarkup,
+  applyEditsAsSuggestions,
   CommentNote,
   NoteMatch,
   SuggestionNote,
@@ -1171,6 +1172,48 @@ function App() {
     [replaceNoteSpan],
   );
 
+  // note.from of the comment whose inference is running; one at a time.
+  const [drafting, setDrafting] = useState<number | null>(null);
+
+  const draftEdits = useCallback(
+    async (n: CommentNote) => {
+      const view = viewRef.current;
+      if (!view || viewing || drafting !== null) return;
+      const startPath = filePathRef.current;
+      setDrafting(n.from);
+      try {
+        const pairs = await api.draftNoteEdits(
+          n.comment,
+          n.highlighted ? n.excerpt : null,
+          view.state.doc.toString(),
+        );
+        // Inference takes a while; don't apply to a different document or
+        // to a read-only historical buffer opened meanwhile.
+        if (filePathRef.current !== startPath || viewingRef.current) {
+          flash("Draft discarded — the document changed");
+          return;
+        }
+        // The applier matches against the document as it is NOW, so edits
+        // made while the model ran simply reduce to missed pairs.
+        const live = viewRef.current;
+        if (!live) return;
+        const { applied, missed } = applyEditsAsSuggestions(live, pairs);
+        refreshNotes();
+        flash(
+          applied === 0
+            ? "The model proposed no applicable edits"
+            : `${applied} suggestion${applied === 1 ? "" : "s"} drafted` +
+                (missed ? ` (${missed} not matched)` : ""),
+        );
+      } catch (e) {
+        flash(`Draft failed: ${e}`);
+      } finally {
+        setDrafting(null);
+      }
+    },
+    [viewing, drafting, refreshNotes, flash],
+  );
+
   const toggleNotesPanel = useCallback(() => {
     setPanel((p) => {
       if (p === "notes") return "none";
@@ -1695,6 +1738,16 @@ function App() {
                           }}
                         >
                           Dismiss
+                        </button>
+                        <button
+                          disabled={!!viewing || drafting !== null}
+                          title="Ask the model to turn this note into suggestions"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void draftEdits(n);
+                          }}
+                        >
+                          {drafting === n.from ? "Drafting…" : "Draft edits"}
                         </button>
                       </span>
                     </>

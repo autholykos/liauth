@@ -27,6 +27,13 @@ tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
 diffy = "0.5.0"
 tauri-plugin-process = "2"
+# Mirror the updater plugin's TLS stack (rustls-no-provider + the ring
+# provider already in the tree); reqwest's own "rustls" feature would drag
+# in the aws-lc-sys native build instead.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls-no-provider",
+] }
 
 # Native print with real page margins; tauri's Webview::print() hardcodes
 # zero margins. Versions/features match what wry already pulls in, so this

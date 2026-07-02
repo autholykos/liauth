@@ -1,3 +1,4 @@
+mod ai;
 mod config;
 mod git;
 
@@ -174,6 +175,7 @@ pub fn run() {
             git::merge_contents,
             config::read_vim_config,
             config::write_vim_config,
+            ai::draft_note_edits,
             take_pending_open,
             list_project_files,
         ])

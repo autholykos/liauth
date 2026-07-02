@@ -93,6 +93,18 @@ export const writeVimConfig = (content: string) =>
 
 export const takePendingOpen = () => invoke<string | null>("take_pending_open");
 
+export interface EditPair {
+  find: string;
+  replace: string;
+}
+
+/** Ask the local model to turn one review note into find→replace edits. */
+export const draftNoteEdits = (
+  note: string,
+  excerpt: string | null,
+  document: string,
+) => invoke<EditPair[]>("draft_note_edits", { note, excerpt, document });
+
 export interface ProjectFile {
   path: string;
   rel: string;
