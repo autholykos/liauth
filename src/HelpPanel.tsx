@@ -81,16 +81,17 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Notes & Suggestions",
       search:
-        "notes annotate select criticmarkup comment suggestion accept reject dismiss resolve draft edits ai model panel pdf export strip",
+        "notes annotate select criticmarkup comment suggestion accept reject dismiss resolve draft edits ai model panel next cycle jump navigate pdf export strip",
       body: (
         <p>
           Select text and press <kbd>⌘⇧M</kbd> to annotate it, or <kbd>⌘⇧U</kbd>{" "}
           to suggest a rewording (the proposal is pre-selected — just type).
           Both live in the markdown itself (CriticMarkup), so they version and
-          merge like any edit. The Notes panel dismisses comments and accepts or
-          rejects suggestions; “Draft edits” asks the model to turn a prose note
-          into suggestions to accept or reject — one undo reverts the whole
-          batch. PDF export strips comments and keeps the original text of
+          merge like any edit. <kbd>⌘⇧J</kbd> cycles through them; clicking an
+          entry in the Notes panel jumps to it. The panel dismisses comments and
+          accepts or rejects suggestions; “Draft edits” asks the model to turn a
+          prose note into suggestions to accept or reject — one undo reverts the
+          whole batch. PDF export strips comments and keeps the original text of
           unaccepted suggestions.
         </p>
       ),

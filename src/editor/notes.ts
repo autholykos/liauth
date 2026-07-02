@@ -214,8 +214,33 @@ export function applyEditsAsSuggestions(
     }
     if (!found) missed++;
   }
-  if (changes.length) view.dispatch({ changes });
+  if (changes.length) {
+    // Land on the earliest suggestion so the result is immediately visible;
+    // scroll positions are computed on the pre-change doc, and the earliest
+    // change's start is unaffected by the other insertions.
+    const first = Math.min(...changes.map((c) => c.from));
+    view.dispatch({
+      changes,
+      selection: { anchor: first },
+      effects: EditorView.scrollIntoView(first, { y: "center" }),
+    });
+  }
   return { applied: changes.length, missed };
+}
+
+/** Move the cursor to the next note or suggestion after it, wrapping to
+ *  the first — one key cycles through everything awaiting review. */
+export function gotoNextNote(view: EditorView): boolean {
+  const notes = scanNotes(view.state.doc.toString());
+  if (notes.length === 0) return false;
+  const head = view.state.selection.main.head;
+  const next = notes.find((n) => n.from > head) ?? notes[0];
+  view.dispatch({
+    selection: { anchor: next.from },
+    effects: EditorView.scrollIntoView(next.from, { y: "center" }),
+  });
+  view.focus();
+  return true;
 }
 
 class NoteWidget extends WidgetType {

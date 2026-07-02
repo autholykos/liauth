@@ -30,6 +30,7 @@ import {
   scanNotes,
   insertNote,
   insertSuggestion,
+  gotoNextNote,
   stripCriticMarkup,
   applyEditsAsSuggestions,
   CommentNote,
@@ -1203,7 +1204,8 @@ function App() {
           applied === 0
             ? "The model proposed no applicable edits"
             : `${applied} suggestion${applied === 1 ? "" : "s"} drafted` +
-                (missed ? ` (${missed} not matched)` : ""),
+                (missed ? ` (${missed} not matched)` : "") +
+                " — ⌘⇧J to review",
         );
       } catch (e) {
         flash(`Draft failed: ${e}`);
@@ -1286,6 +1288,9 @@ function App() {
           break;
         case "insert-suggestion":
           addSuggestion();
+          break;
+        case "next-note":
+          if (view) gotoNextNote(view);
           break;
         case "zoom-in":
           setZoom((z) => clampZoom(z + ZOOM_STEP));
@@ -1403,6 +1408,7 @@ function App() {
     { id: "italic", title: "Italic", shortcut: "⌘I" },
     { id: "insert-note", title: "Insert Note", shortcut: "⇧⌘M" },
     { id: "insert-suggestion", title: "Insert Suggestion", shortcut: "⇧⌘U" },
+    { id: "next-note", title: "Next Note/Suggestion", shortcut: "⇧⌘J" },
     {
       id: "toggle-room",
       title: room ? "Exit Writing Room" : "Enter Writing Room",
