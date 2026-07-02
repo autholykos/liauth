@@ -40,27 +40,37 @@ pub async fn draft_note_edits(
         .filter(|e| !e.trim().is_empty())
         .map(|e| format!("\n\nFOCUS (text the note is anchored to):\n{e}"))
         .unwrap_or_default();
+    // The document goes FIRST so sequential notes on the same document share
+    // a prompt prefix and hit the server's KV cache (minutes → seconds).
     let prompt = format!(
-        "You are an editor's assistant working on a markdown document. \
-         Apply ONE review note by proposing minimal text edits.\n\n\
+        "DOCUMENT:\n{document}\n\nREVIEW NOTE:\n{note}{focus}\n\n\
+         Apply the REVIEW NOTE above to the DOCUMENT by proposing concrete \
+         text edits.\n\n\
          Respond with ONLY a JSON array: [{{\"find\": \"...\", \"replace\": \"...\"}}, ...]\n\n\
          Rules:\n\
          - Copy each \"find\" VERBATIM from the document — exact characters, \
          punctuation, and whitespace.\n\
-         - Keep each \"find\" short but unambiguous; include neighboring words \
-         only when needed to target one spot. When the note asks for a \
-         pattern-wide change, emit one pair per occurrence.\n\
-         - Propose only edits this note asks for; ignore other flaws. \
-         If nothing is actionable, return [].\n\
-         - Never include text between {{>> and <<}}, {{== and ==}}, or \
-         {{~~ and ~~}} markers in a find or replace.\n\n\
-         REVIEW NOTE:\n{note}{focus}\n\nDOCUMENT:\n{document}"
+         - For mechanical fixes (typos, accents, quotes, punctuation) keep \
+         each \"find\" as short as possible while unambiguous; one pair per \
+         occurrence for pattern-wide asks.\n\
+         - For structural or stylistic notes (pacing, order, adding a beat, \
+         tone), work at the sentence or paragraph level: take the smallest \
+         complete passage that must change as \"find\" and give the fully \
+         rewritten passage as \"replace\". Write new prose in the document's \
+         language, voice, and tense.\n\
+         - To insert new text, use the sentence at the insertion point as \
+         \"find\" and return it with the new text in the right position as \
+         \"replace\".\n\
+         - Propose ONLY edits this note explicitly asks for; ignore other \
+         flaws. If the note is purely informational, return [].\n\
+         - Never include the {{>> <<}}, {{== ==}}, or {{~~ ~~}} annotation \
+         markers in a find or replace.",
     );
     let body = serde_json::json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
     });
     // reqwest's rustls-no-provider build panics (stranding the invoke
     // promise) unless a process-level CryptoProvider exists; the updater

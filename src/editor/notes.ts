@@ -173,19 +173,56 @@ export function insertSuggestion(view: EditorView): boolean {
 
 const CRITIC_TOKENS = /\{~~|~>|~~\}|\{>>|<<\}|\{==|==\}/;
 
-/** Insert a {~~find~>replace~~} suggestion at every match of each pair
- *  that lies outside existing CriticMarkup, in ONE transaction so a single
- *  undo reverts the whole drafted batch. Pairs whose text would corrupt
- *  the markup, or that match nowhere, are counted as missed. */
-export function applyEditsAsSuggestions(
-  view: EditorView,
+/** Typographic normalization for tolerant matching: models straighten curly
+ *  apostrophes/quotes, flatten ellipses, and collapse space runs when quoting
+ *  a document back, which breaks verbatim search. `map[i]` is the source
+ *  index of the char that produced `norm[i]`. */
+function normalize(text: string): { norm: string; map: number[] } {
+  const map: number[] = [];
+  let norm = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    let out: string;
+    if (c === "‘" || c === "’" || c === "‛") out = "'";
+    else if (c === "“" || c === "”" || c === "„") out = '"';
+    else if (c === "…") out = "...";
+    else if (c === " " || c === "\t") {
+      if (norm.endsWith(" ")) continue;
+      out = " ";
+    } else {
+      out = c;
+    }
+    for (const ch of out) {
+      norm += ch;
+      map.push(i);
+    }
+  }
+  return { norm, map };
+}
+
+/** Undo the model's typographic normalization in a replacement, but only
+ *  for character classes the matched original text proves the document
+ *  actually uses. */
+function repairReplace(replace: string, original: string): string {
+  let out = replace;
+  if (original.includes("’")) out = out.replace(/'/g, "’");
+  if (original.includes("…")) out = out.replace(/\.\.\./g, "…");
+  return out;
+}
+
+/** Resolve model find→replace pairs against the document: exact matches
+ *  first, then typographically normalized ones. Matches inside existing
+ *  CriticMarkup, no-op pairs, and pairs whose text would corrupt the
+ *  markup are skipped. Exported for headless verification. */
+export function matchEditPairs(
+  doc: string,
   pairs: { find: string; replace: string }[],
-): { applied: number; missed: number } {
-  const doc = view.state.doc.toString();
+): { changes: { from: number; to: number; insert: string }[]; missed: number } {
   const taken: [number, number][] = scanNotes(doc).map((n) => [n.from, n.to]);
   const overlaps = (from: number, to: number) =>
     taken.some(([f, t]) => from < t && to > f);
   const changes: { from: number; to: number; insert: string }[] = [];
+  let ndoc: { norm: string; map: number[] } | null = null;
   let missed = 0;
   for (const p of pairs) {
     if (
@@ -197,23 +234,54 @@ export function applyEditsAsSuggestions(
       continue;
     }
     let found = false;
+    const push = (
+      from: number,
+      to: number,
+      original: string,
+      replace: string,
+    ) => {
+      if (overlaps(from, to) || original === replace) return;
+      changes.push({ from, to, insert: `{~~${original}~>${replace}~~}` });
+      taken.push([from, to]);
+      found = true;
+    };
+    // Exact occurrences take the model's replacement verbatim — matching
+    // typography proves the model was not normalizing, and a note may
+    // intentionally change quotes or ellipses.
     for (
       let idx = doc.indexOf(p.find);
       idx !== -1;
       idx = doc.indexOf(p.find, idx + p.find.length)
     ) {
-      const end = idx + p.find.length;
-      if (overlaps(idx, end)) continue;
-      changes.push({
-        from: idx,
-        to: end,
-        insert: `{~~${p.find}~>${p.replace}~~}`,
-      });
-      taken.push([idx, end]);
-      found = true;
+      push(idx, idx + p.find.length, p.find, p.replace);
+    }
+    // Always also scan normalized: a document can mix straight and curly
+    // forms, and `taken` already skips the spans the exact pass claimed.
+    ndoc ??= normalize(doc);
+    const nfind = normalize(p.find).norm;
+    for (
+      let nidx = nfind ? ndoc.norm.indexOf(nfind) : -1;
+      nidx !== -1;
+      nidx = ndoc.norm.indexOf(nfind, nidx + nfind.length)
+    ) {
+      const from = ndoc.map[nidx];
+      const to = ndoc.map[nidx + nfind.length - 1] + 1;
+      const original = doc.slice(from, to);
+      push(from, to, original, repairReplace(p.replace, original));
     }
     if (!found) missed++;
   }
+  return { changes, missed };
+}
+
+/** Insert a {~~find~>replace~~} suggestion at every match of each pair
+ *  that lies outside existing CriticMarkup, in ONE transaction so a single
+ *  undo reverts the whole drafted batch. */
+export function applyEditsAsSuggestions(
+  view: EditorView,
+  pairs: { find: string; replace: string }[],
+): { applied: number; missed: number } {
+  const { changes, missed } = matchEditPairs(view.state.doc.toString(), pairs);
   if (changes.length) {
     // Land on the earliest suggestion so the result is immediately visible;
     // scroll positions are computed on the pre-change doc, and the earliest
