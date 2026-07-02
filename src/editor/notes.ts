@@ -184,7 +184,8 @@ function normalize(text: string): { norm: string; map: number[] } {
     const c = text[i];
     let out: string;
     if (c === "‘" || c === "’" || c === "‛") out = "'";
-    else if (c === "“" || c === "”" || c === "„") out = '"';
+    else if (c === "“" || c === "”" || c === "„" || c === "«" || c === "»")
+      out = '"';
     else if (c === "…") out = "...";
     else if (c === " " || c === "\t") {
       if (norm.endsWith(" ")) continue;
@@ -207,23 +208,77 @@ function repairReplace(replace: string, original: string): string {
   let out = replace;
   if (original.includes("’")) out = out.replace(/'/g, "’");
   if (original.includes("…")) out = out.replace(/\.\.\./g, "…");
+  // Models restyle dialogue quotes toward the document's dominant form;
+  // «» ↔ “” is directional (open/close), so the swap is unambiguous.
+  if (
+    (original.includes("“") || original.includes("”")) &&
+    !original.includes("«")
+  ) {
+    out = out.replace(/«/g, "“").replace(/»/g, "”");
+  } else if (
+    (original.includes("«") || original.includes("»")) &&
+    !original.includes("“")
+  ) {
+    out = out.replace(/“/g, "«").replace(/”/g, "»");
+  }
+  return out;
+}
+
+/** Match one find string in `text`, exact first then normalized; returns
+ *  original-coordinate spans plus the repaired replacement for each. */
+function matchIn(
+  text: string,
+  find: string,
+  replace: string,
+): { from: number; to: number; original: string; replace: string }[] {
+  const out: { from: number; to: number; original: string; replace: string }[] =
+    [];
+  for (
+    let idx = text.indexOf(find);
+    idx !== -1;
+    idx = text.indexOf(find, idx + find.length)
+  ) {
+    out.push({ from: idx, to: idx + find.length, original: find, replace });
+  }
+  const ntext = normalize(text);
+  const nfind = normalize(find).norm;
+  for (
+    let nidx = nfind ? ntext.norm.indexOf(nfind) : -1;
+    nidx !== -1;
+    nidx = ntext.norm.indexOf(nfind, nidx + nfind.length)
+  ) {
+    const from = ntext.map[nidx];
+    const to = ntext.map[nidx + nfind.length - 1] + 1;
+    const original = text.slice(from, to);
+    out.push({ from, to, original, replace: repairReplace(replace, original) });
+  }
   return out;
 }
 
 /** Resolve model find→replace pairs against the document: exact matches
  *  first, then typographically normalized ones. Matches inside existing
  *  CriticMarkup, no-op pairs, and pairs whose text would corrupt the
- *  markup are skipped. Exported for headless verification. */
+ *  markup are skipped — except inside `source`'s own highlighted excerpt,
+ *  where edits rewrite the whole annotation into a suggestion that keeps
+ *  the comment: {==old==}{>>note<<} → {~~old~>new~~}{>>note<<}.
+ *  Exported for headless verification. */
 export function matchEditPairs(
   doc: string,
   pairs: { find: string; replace: string }[],
+  source?: CommentNote,
 ): { changes: { from: number; to: number; insert: string }[]; missed: number } {
   const taken: [number, number][] = scanNotes(doc).map((n) => [n.from, n.to]);
   const overlaps = (from: number, to: number) =>
     taken.some(([f, t]) => from < t && to > f);
   const changes: { from: number; to: number; insert: string }[] = [];
-  let ndoc: { norm: string; map: number[] } | null = null;
   let missed = 0;
+  // The triggering note's own excerpt is a legal edit target — but only
+  // if the note is still where the caller saw it.
+  const src =
+    source?.highlighted && doc.slice(source.from, source.to) === source.raw
+      ? source
+      : undefined;
+  const excerptEdits: { from: number; to: number; replace: string }[] = [];
   for (const p of pairs) {
     if (
       !p.find ||
@@ -245,31 +300,40 @@ export function matchEditPairs(
       taken.push([from, to]);
       found = true;
     };
-    // Exact occurrences take the model's replacement verbatim — matching
-    // typography proves the model was not normalizing, and a note may
-    // intentionally change quotes or ellipses.
-    for (
-      let idx = doc.indexOf(p.find);
-      idx !== -1;
-      idx = doc.indexOf(p.find, idx + p.find.length)
-    ) {
-      push(idx, idx + p.find.length, p.find, p.replace);
+    // The anchored excerpt is the note's explicit target — try it first,
+    // so a duplicate of the excerpt elsewhere cannot steal the edit.
+    if (src) {
+      for (const m of matchIn(src.excerpt, p.find, p.replace)) {
+        if (m.original === m.replace) continue;
+        if (excerptEdits.some((e) => m.from < e.to && m.to > e.from)) continue;
+        excerptEdits.push({ from: m.from, to: m.to, replace: m.replace });
+        found = true;
+      }
     }
-    // Always also scan normalized: a document can mix straight and curly
-    // forms, and `taken` already skips the spans the exact pass claimed.
-    ndoc ??= normalize(doc);
-    const nfind = normalize(p.find).norm;
-    for (
-      let nidx = nfind ? ndoc.norm.indexOf(nfind) : -1;
-      nidx !== -1;
-      nidx = ndoc.norm.indexOf(nfind, nidx + nfind.length)
-    ) {
-      const from = ndoc.map[nidx];
-      const to = ndoc.map[nidx + nfind.length - 1] + 1;
-      const original = doc.slice(from, to);
-      push(from, to, original, repairReplace(p.replace, original));
+    // Document-wide pass still runs (pattern-wide asks reach every
+    // occurrence; the note's own span is excluded via `taken`). Exact
+    // occurrences take the model's replacement verbatim — matching
+    // typography proves the model was not normalizing, and a note may
+    // intentionally change quotes or ellipses. The normalized scan always
+    // runs too (documents mix forms); `taken` dedupes claimed spans.
+    for (const m of matchIn(doc, p.find, p.replace)) {
+      push(m.from, m.to, m.original, m.replace);
     }
     if (!found) missed++;
+  }
+  if (src && excerptEdits.length) {
+    let newExcerpt = src.excerpt;
+    for (const e of [...excerptEdits].sort((a, b) => b.from - a.from)) {
+      newExcerpt =
+        newExcerpt.slice(0, e.from) + e.replace + newExcerpt.slice(e.to);
+    }
+    // Keep the comment markup byte-for-byte: everything after ==}.
+    const tail = doc.slice(src.hlTo + 3, src.to);
+    changes.push({
+      from: src.from,
+      to: src.to,
+      insert: `{~~${src.excerpt}~>${newExcerpt}~~}${tail}`,
+    });
   }
   return { changes, missed };
 }
@@ -280,8 +344,13 @@ export function matchEditPairs(
 export function applyEditsAsSuggestions(
   view: EditorView,
   pairs: { find: string; replace: string }[],
+  source?: CommentNote,
 ): { applied: number; missed: number } {
-  const { changes, missed } = matchEditPairs(view.state.doc.toString(), pairs);
+  const { changes, missed } = matchEditPairs(
+    view.state.doc.toString(),
+    pairs,
+    source,
+  );
   if (changes.length) {
     // Land on the earliest suggestion so the result is immediately visible;
     // scroll positions are computed on the pre-change doc, and the earliest
