@@ -26,6 +26,47 @@ struct ChatMessage {
     content: String,
 }
 
+/// Shared start of every model prompt. The document goes FIRST so warmup
+/// and per-note requests on the same document share a prompt prefix and
+/// hit the server's KV cache (minutes → seconds).
+fn doc_prefix(document: &str) -> String {
+    format!("DOCUMENT:\n{document}\n\n")
+}
+
+/// reqwest's rustls-no-provider build panics (stranding the invoke
+/// promise) unless a process-level CryptoProvider exists; the updater
+/// plugin may have installed one already, hence the ignored error.
+fn ensure_tls() {
+    static INIT_TLS: std::sync::Once = std::sync::Once::new();
+    INIT_TLS.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+    });
+}
+
+/// Best-effort KV-cache warmup: run the shared document prefix through the
+/// model with a one-token reply so the first real draft on this document
+/// skips the multi-minute prompt-processing cost. Fired on document open;
+/// failures are irrelevant.
+#[tauri::command]
+pub async fn warm_note_cache(document: String) {
+    ensure_tls();
+    let prompt = format!("{}Reply with exactly: ok", doc_prefix(&document));
+    let body = serde_json::json!({
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 1,
+    });
+    let _ = reqwest::Client::new()
+        .post(ENDPOINT)
+        .timeout(std::time::Duration::from_secs(600))
+        .json(&body)
+        .send()
+        .await;
+}
+
 /// Turn one review note into concrete find→replace edits. The whole
 /// document travels as context; the instruction is the single note. The
 /// frontend applies the pairs as {~~find~>replace~~} suggestions, so the
@@ -40,10 +81,8 @@ pub async fn draft_note_edits(
         .filter(|e| !e.trim().is_empty())
         .map(|e| format!("\n\nFOCUS (text the note is anchored to):\n{e}"))
         .unwrap_or_default();
-    // The document goes FIRST so sequential notes on the same document share
-    // a prompt prefix and hit the server's KV cache (minutes → seconds).
     let prompt = format!(
-        "DOCUMENT:\n{document}\n\nREVIEW NOTE:\n{note}{focus}\n\n\
+        "{}REVIEW NOTE:\n{note}{focus}\n\n\
          Apply the REVIEW NOTE above to the DOCUMENT by proposing concrete \
          text edits.\n\n\
          Respond with ONLY a JSON array: [{{\"find\": \"...\", \"replace\": \"...\"}}, ...]\n\n\
@@ -65,6 +104,7 @@ pub async fn draft_note_edits(
          flaws. If the note is purely informational, return [].\n\
          - Never include the {{>> <<}}, {{== ==}}, or {{~~ ~~}} annotation \
          markers in a find or replace.",
+        doc_prefix(&document),
     );
     let body = serde_json::json!({
         "model": MODEL,
@@ -72,15 +112,7 @@ pub async fn draft_note_edits(
         "temperature": 0,
         "max_tokens": 8192,
     });
-    // reqwest's rustls-no-provider build panics (stranding the invoke
-    // promise) unless a process-level CryptoProvider exists; the updater
-    // plugin may have installed one already, hence the ignored error.
-    static INIT_TLS: std::sync::Once = std::sync::Once::new();
-    INIT_TLS.call_once(|| {
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .ok();
-    });
+    ensure_tls();
     // Prompt processing on the local model is slow (~50 tok/s), so a long
     // document legitimately takes minutes.
     let resp = reqwest::Client::new()

@@ -176,6 +176,7 @@ pub fn run() {
             config::read_vim_config,
             config::write_vim_config,
             ai::draft_note_edits,
+            ai::warm_note_cache,
             take_pending_open,
             list_project_files,
         ])
