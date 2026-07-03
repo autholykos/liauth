@@ -5,12 +5,12 @@ import {
   placeholder,
   lineNumbers,
 } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { EditorState, EditorSelection } from "@codemirror/state";
 import { history, historyKeymap, defaultKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
-import { vim, Vim, getCM } from "@replit/codemirror-vim";
+import { vim, Vim, getCM, CodeMirror } from "@replit/codemirror-vim";
 import { livePreview, tableRendering } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
 import {
@@ -29,6 +29,63 @@ function installWrappedLineVimNavigation(): void {
 
 installWrappedLineVimNavigation();
 
+/**
+ * Upstream findPosV builds its vertical-motion probe cursor with a
+ * hard-coded forward association. On a wrapped line, gk from the lower
+ * visual row lands exactly on the wrap boundary, re-enters as "start of
+ * the lower row", and every further gk recomputes the same spot — k gets
+ * stuck on wrapped paragraphs (gj never fights the forward bias). Same
+ * loop parks the cursor inside atomic (hidden-markup) spans. Rebuilt
+ * here with the motion's direction as the association.
+ */
+function installFindPosVFix(): void {
+  CodeMirror.prototype.findPosV = function (
+    this: CodeMirror,
+    start: { line: number; ch: number },
+    amount: number,
+    unit: string,
+    goalColumn?: number,
+  ) {
+    const cm6 = (this as unknown as { cm6: EditorView }).cm6;
+    const doc = cm6.state.doc;
+    const pixels = unit === "page" ? cm6.dom.clientHeight : undefined;
+    const startLine = doc.line(Math.min(start.line + 1, doc.lines));
+    const startOffset = startLine.from + Math.min(start.ch, startLine.length);
+    let range = EditorSelection.cursor(
+      startOffset,
+      amount < 0 ? -1 : 1,
+      undefined,
+      goalColumn,
+    );
+    const count = Math.round(Math.abs(amount));
+    for (let i = 0; i < count; i++) {
+      range = cm6.moveVertically(range, amount > 0, pixels);
+    }
+    const resLine = doc.lineAt(range.head);
+    const pos: { line: number; ch: number; hitSide?: boolean } = {
+      line: resLine.number - 1,
+      ch: range.head - resLine.from,
+    };
+    // hitSide flags a clipped move at the document edge (gj/gk need it).
+    if (
+      (amount < 0 &&
+        range.head === 0 &&
+        goalColumn !== 0 &&
+        start.line === 0 &&
+        start.ch !== 0) ||
+      (amount > 0 &&
+        range.head === doc.length &&
+        pos.ch !== goalColumn &&
+        start.line === pos.line)
+    ) {
+      pos.hitSide = true;
+    }
+    return pos;
+  } as unknown as typeof CodeMirror.prototype.findPosV;
+}
+
+installFindPosVFix();
+
 /** Subtle source-level colors for the bits that stay visible. */
 const mdHighlight = HighlightStyle.define([
   { tag: tags.monospace, fontFamily: "var(--font-mono)" },
@@ -38,23 +95,42 @@ const mdHighlight = HighlightStyle.define([
 ]);
 
 /**
- * Remove vim block-cursor layers that the live vim plugin doesn't own.
- * The plugin appends its layer to scrollDOM (which survives setState);
- * when its teardown is skipped or fails, the layer is orphaned and shows
- * up as a frozen ghost cursor at some past cursor position.
+ * Remove cursor artifacts the live plugins don't own. Layers append to
+ * scrollDOM (which survives setState); when a plugin's teardown is
+ * skipped or fails, its layer is orphaned and shows up as frozen ghost
+ * cursors at past positions. This hits both the vim block-cursor layer
+ * and drawSelection's cursor layer, and also drops stale extra cursors a
+ * live layer keeps painted after a multi-range selection collapses
+ * (e.g. leaving visual block mode) until its next repaint.
  */
 export function sweepGhostCursorLayers(view: EditorView): void {
-  const layers = view.scrollDOM.querySelectorAll(".cm-vimCursorLayer");
-  if (layers.length === 0) return;
-  // Internal plugin state; absent when vim mode is off (no layer is legit).
-  const live =
-    (
-      getCM(view) as {
-        state?: { vimPlugin?: { blockCursor?: { cursorLayer?: Element } } };
-      } | null
-    )?.state?.vimPlugin?.blockCursor?.cursorLayer ?? null;
-  layers.forEach((el) => {
-    if (el !== live) el.remove();
+  const vimLayers = view.scrollDOM.querySelectorAll(".cm-vimCursorLayer");
+  if (vimLayers.length > 0) {
+    // Internal plugin state; absent when vim mode is off (no layer is legit).
+    const live =
+      (
+        getCM(view) as {
+          state?: { vimPlugin?: { blockCursor?: { cursorLayer?: Element } } };
+        } | null
+      )?.state?.vimPlugin?.blockCursor?.cursorLayer ?? null;
+    vimLayers.forEach((el) => {
+      if (el !== live) el.remove();
+    });
+  }
+  // drawSelection's layer orphans the same way; the live one is always the
+  // most recently appended.
+  const cursorLayers = Array.from(
+    view.scrollDOM.querySelectorAll(".cm-cursorLayer:not(.cm-vimCursorLayer)"),
+  );
+  for (const el of cursorLayers.slice(0, -1)) el.remove();
+  // Stale children: more painted cursors than selection ranges means the
+  // layer missed a collapse; clear it and let its next repaint rebuild.
+  const ranges = view.state.selection.ranges.length;
+  const layers = view.scrollDOM.querySelectorAll(
+    ".cm-cursorLayer, .cm-vimCursorLayer",
+  );
+  layers.forEach((layer) => {
+    if (layer.children.length > ranges) layer.replaceChildren();
   });
 }
 
