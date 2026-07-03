@@ -5,6 +5,7 @@
  *   {>> standalone comment <<}
  *   {== highlighted text ==}{>> comment on it <<}
  *   {~~old text~>suggested replacement~~}
+ *   {++proposed insertion++}   {--proposed deletion--}
  *
  * The live view hides the syntax and renders a highlight plus a hoverable
  * note bubble — or, for suggestions, the old text struck through beside
@@ -39,7 +40,9 @@ export interface CommentNote extends NoteBase {
   commentTextPos: number; // caret position inside the comment text
 }
 
-/** A {~~old~>new~~} substitution the author can accept or reject. */
+/** A {~~old~>new~~} substitution the author can accept or reject.
+ *  {++new++} insertions and {--old--} deletions are the degenerate
+ *  cases with an empty old or new side. */
 export interface SuggestionNote extends NoteBase {
   kind: "suggestion";
   oldText: string;
@@ -53,7 +56,7 @@ export interface SuggestionNote extends NoteBase {
 export type NoteMatch = CommentNote | SuggestionNote;
 
 const CRITIC_RE =
-  /\{==([\s\S]*?)==\}(\s*\{>>([\s\S]*?)<<\})?|\{>>([\s\S]*?)<<\}|\{~~([\s\S]*?)~>([\s\S]*?)~~\}/g;
+  /\{==([\s\S]*?)==\}(\s*\{>>([\s\S]*?)<<\})?|\{>>([\s\S]*?)<<\}|\{~~([\s\S]*?)~>([\s\S]*?)~~\}|\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}/g;
 
 export function scanNotes(text: string, base = 0): NoteMatch[] {
   const out: NoteMatch[] = [];
@@ -98,6 +101,37 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
         newFrom,
         newTo: newFrom + m[6]!.length,
       });
+    } else if (m[7] !== undefined) {
+      // {++new++}: an insertion is a substitution with an empty old side.
+      const newFrom = from + 3;
+      out.push({
+        kind: "suggestion",
+        from,
+        to,
+        raw: m[0],
+        oldText: "",
+        newText: m[7],
+        oldFrom: newFrom,
+        oldTo: newFrom,
+        newFrom,
+        newTo: newFrom + m[7].length,
+      });
+    } else if (m[8] !== undefined) {
+      // {--old--}: a deletion is a substitution with an empty new side.
+      const oldFrom = from + 3;
+      const oldTo = oldFrom + m[8].length;
+      out.push({
+        kind: "suggestion",
+        from,
+        to,
+        raw: m[0],
+        oldText: m[8],
+        newText: "",
+        oldFrom,
+        oldTo,
+        newFrom: oldTo,
+        newTo: oldTo,
+      });
     } else {
       out.push({
         kind: "comment",
@@ -119,13 +153,16 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
 }
 
 /** Remove all notes for export: comments dropped, highlights unwrapped,
- *  unaccepted suggestions keep the original text. */
+ *  unaccepted suggestions keep the original text (so insertions drop
+ *  and deletions keep what they would remove). */
 export function stripCriticMarkup(text: string): string {
   return text
     .replace(/\{==([\s\S]*?)==\}\s*\{>>[\s\S]*?<<\}/g, "$1")
     .replace(/\{==([\s\S]*?)==\}/g, "$1")
     .replace(/ ?\{>>[\s\S]*?<<\}/g, "")
-    .replace(/\{~~([\s\S]*?)~>[\s\S]*?~~\}/g, "$1");
+    .replace(/\{~~([\s\S]*?)~>[\s\S]*?~~\}/g, "$1")
+    .replace(/ ?\{\+\+[\s\S]*?\+\+\}/g, "")
+    .replace(/\{--([\s\S]*?)--\}/g, "$1");
 }
 
 /** Wrap the selection in a note (or insert a standalone one) and place
@@ -171,7 +208,8 @@ export function insertSuggestion(view: EditorView): boolean {
   return true;
 }
 
-const CRITIC_TOKENS = /\{~~|~>|~~\}|\{>>|<<\}|\{==|==\}/;
+const CRITIC_TOKENS =
+  /\{~~|~>|~~\}|\{>>|<<\}|\{==|==\}|\{\+\+|\+\+\}|\{--|--\}/;
 
 /** Typographic normalization for tolerant matching: models straighten curly
  *  apostrophes/quotes, flatten ellipses, and collapse space runs when quoting
@@ -468,19 +506,21 @@ function buildDecorations(view: EditorView): NoteSets {
         continue;
       }
       if (n.kind === "suggestion") {
-        hide(n.from, n.oldFrom); // {~~
+        hide(n.from, n.oldFrom); // {~~ / {++ / {--
         if (n.oldFrom < n.oldTo) {
           decos.push(
             Decoration.mark({ class: "lp-sug-old" }).range(n.oldFrom, n.oldTo),
           );
         }
-        hide(n.oldTo, n.newFrom); // ~>
+        // ~> — absent (zero-length) in {++ ++} and {-- --} forms, and CM
+        // rejects empty replace ranges.
+        if (n.oldTo < n.newFrom) hide(n.oldTo, n.newFrom);
         if (n.newFrom < n.newTo) {
           decos.push(
             Decoration.mark({ class: "lp-sug-new" }).range(n.newFrom, n.newTo),
           );
         }
-        hide(n.newTo, n.to); // ~~}
+        hide(n.newTo, n.to); // ~~} / ++} / --}
       } else if (n.highlighted) {
         hide(n.from, n.hlFrom); // {==
         if (n.hlFrom < n.hlTo) {
