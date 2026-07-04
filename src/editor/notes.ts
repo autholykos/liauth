@@ -20,6 +20,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { EditorState, Range } from "@codemirror/state";
+import { getCM } from "@replit/codemirror-vim";
 
 interface NoteBase {
   from: number;
@@ -199,9 +200,16 @@ export function insertSuggestion(view: EditorView): boolean {
   } else {
     const sel = view.state.sliceDoc(from, to);
     const newFrom = from + 3 + sel.length + 2;
+    // Pre-selecting the proposal for overtyping is an external range
+    // selection, which flips codemirror-vim into visual mode — where a
+    // later mouse click EXTENDS from the stale anchor instead of placing
+    // the cursor (yanking the view back to it). Under vim, land a plain
+    // cursor at the proposal instead.
     view.dispatch({
       changes: { from, to, insert: `{~~${sel}~>${sel}~~}` },
-      selection: { anchor: newFrom, head: newFrom + sel.length },
+      selection: getCM(view)
+        ? { anchor: newFrom }
+        : { anchor: newFrom, head: newFrom + sel.length },
     });
   }
   view.focus();
