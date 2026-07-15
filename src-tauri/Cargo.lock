@@ -1981,11 +1981,12 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "liauth"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "diffy",
  "git2",
  "objc2-app-kit",
+ "objc2-foundation",
  "objc2-web-kit",
  "reqwest",
  "rustls",
