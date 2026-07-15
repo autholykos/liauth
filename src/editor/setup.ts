@@ -21,10 +21,12 @@ import {
 } from "./notes";
 
 function installWrappedLineVimNavigation(): void {
-  Vim.noremap("j", "gj", "normal");
-  Vim.noremap("k", "gk", "normal");
-  Vim.noremap("j", "gj", "visual");
-  Vim.noremap("k", "gk", "visual");
+  // Bind directly to the display-line motion instead of feeding `g` and
+  // the motion key back through Vim's key-sequence parser. Besides avoiding
+  // transient key-sequence feedback, this keeps counts and operators (e.g.
+  // `2dj`) on the same motion path as the built-in `gj`/`gk` commands.
+  Vim.mapCommand("j", "motion", "moveByDisplayLines", { forward: true }, {});
+  Vim.mapCommand("k", "motion", "moveByDisplayLines", { forward: false }, {});
 }
 
 installWrappedLineVimNavigation();
