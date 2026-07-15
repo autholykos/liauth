@@ -150,8 +150,21 @@ fn print_page(webview: tauri::Webview) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn disable_mac_press_and_hold() {
+    // Vim navigation uses held keys; the native accent picker otherwise
+    // appears over the editor instead of allowing key repeat.
+    use objc2_foundation::{ns_string, NSUserDefaults};
+
+    NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(false, ns_string!("ApplePressAndHoldEnabled"));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    disable_mac_press_and_hold();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
