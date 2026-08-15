@@ -360,6 +360,32 @@ button.wide {
   text-overflow: ellipsis;
 }
 
+.nav-list li.nav-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.nav-file-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-note-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #d33f49;
+  box-shadow: 0 0 0 1px var(--c-panel);
+}
+
+.nav-list li.nav-file.cut {
+  opacity: 0.5;
+}
+
 .nav-list li:hover {
   background: var(--c-bg);
 }

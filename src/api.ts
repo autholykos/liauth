@@ -117,6 +117,7 @@ export const warmNoteCache = (document: string, repoRoot: string | null) =>
 export interface ProjectFile {
   path: string;
   rel: string;
+  has_notes: boolean;
 }
 
 export interface ProjectFiles {
@@ -128,3 +129,16 @@ export interface ProjectFiles {
 
 export const listProjectFiles = (filePath: string) =>
   invoke<ProjectFiles | null>("list_project_files", { filePath });
+
+export const renameProjectFile = (filePath: string, newName: string) =>
+  invoke<string>("rename_project_file", { filePath, newName });
+
+export const pasteProjectFile = (
+  filePath: string,
+  destinationPath: string,
+  cut: boolean,
+) =>
+  invoke<string>("paste_project_file", { filePath, destinationPath, cut });
+
+export const deleteProjectFile = (filePath: string) =>
+  invoke<void>("delete_project_file", { filePath });
