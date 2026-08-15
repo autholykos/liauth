@@ -27,7 +27,44 @@ export interface MenuSnapshot {
 
 type Run = (id: string) => void;
 
+export type NavigatorFileAction =
+  | "rename"
+  | "cut"
+  | "copy"
+  | "paste"
+  | "delete";
+
 const sep = () => PredefinedMenuItem.new({ item: "Separator" });
+
+/** Native file menu for navigator rows. Cut/copy are app-level file
+ * operations, so they intentionally use regular menu items rather than the
+ * predefined text-editing commands. */
+export async function showNavigatorFileMenu(
+  run: (action: NavigatorFileAction) => void,
+  canPaste: boolean,
+): Promise<void> {
+  const item = (action: NavigatorFileAction, text: string) =>
+    MenuItem.new({
+      id: `navigator-${action}`,
+      text,
+      action: () => run(action),
+    });
+  const items = [
+    await item("rename", "Rename…"),
+    await sep(),
+    await item("cut", "Cut"),
+    await item("copy", "Copy"),
+  ];
+  if (canPaste) items.push(await item("paste", "Paste Here"));
+  items.push(await sep(), await item("delete", "Delete"));
+
+  const menu = await Menu.new({ items });
+  try {
+    await menu.popup();
+  } finally {
+    await menu.close().catch(() => {});
+  }
+}
 
 export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
   const item = (id: string, text: string, accelerator?: string) =>

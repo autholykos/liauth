@@ -22,7 +22,11 @@ import {
   sweepGhostCursorLayers,
   CursorStatus,
 } from "./editor/setup";
-import { buildAppMenu } from "./menu";
+import {
+  buildAppMenu,
+  showNavigatorFileMenu,
+  type NavigatorFileAction,
+} from "./menu";
 import { CommandPalette, PaletteCommand } from "./CommandPalette";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
 import { HelpPanel } from "./HelpPanel";
@@ -47,6 +51,7 @@ const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
 type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
+type FileClipboard = { path: string; mode: "cut" | "copy" };
 
 const THEMES: { id: Theme; label: string }[] = [
   { id: "paper", label: "Paper" },
@@ -117,6 +122,11 @@ function initialTheme(): Theme {
 }
 
 const clip = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
+const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
+const parentPath = (path: string) => {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut > 0 ? path.slice(0, cut) : null;
+};
 
 function fmtTime(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -189,6 +199,10 @@ function App() {
     () => localStorage.getItem("liauth.nav") === "1",
   );
   const [project, setProject] = useState<api.ProjectFiles | null>(null);
+  const projectRequestRef = useRef(0);
+  const [fileClipboard, setFileClipboard] = useState<FileClipboard | null>(
+    null,
+  );
   // A folder opened directly (File ▸ Open Folder…): anchors the navigator
   // while the buffer is still untitled, and is where ⌘S will default to.
   const [openFolder, setOpenFolder] = useState<string | null>(null);
@@ -199,7 +213,7 @@ function App() {
   const countsTimerRef = useRef<number | undefined>(undefined);
   const runRef = useRef<(id: string) => void>(() => {});
 
-  const fileName = filePath ? filePath.split("/").pop() : "Untitled";
+  const fileName = filePath ? baseName(filePath) : "Untitled";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
@@ -318,6 +332,9 @@ function App() {
 
   const setEditorContent = useCallback(
     (content: string, readOnly = false) => {
+      // Loads, reloads, history views, and branch switches all pass through
+      // here, so the Notes panel and navigator badge update in the same frame.
+      setNotes(scanNotes(content));
       const view = viewRef.current;
       if (!view) return;
       loadingRef.current = true;
@@ -331,11 +348,10 @@ function App() {
                 diskDirtyRef.current = true;
               }
               scheduleCounts();
-              // Keep the Notes panel in sync while typing, debounced.
-              if (panelRef.current === "notes") {
-                window.clearTimeout(notesTimerRef.current);
-                notesTimerRef.current = window.setTimeout(refreshNotes, 300);
-              }
+              // Notes also drive the navigator badge, so keep them current
+              // even while the Notes panel itself is closed.
+              window.clearTimeout(notesTimerRef.current);
+              notesTimerRef.current = window.setTimeout(refreshNotes, 300);
             },
             onSave: () => saveRef.current(),
             onToggleRoom: () => setRoom((r) => !r),
@@ -413,21 +429,30 @@ function App() {
     localStorage.setItem("liauth.nav", navOpen ? "1" : "0");
   }, [navOpen]);
 
+  const refreshProject = useCallback(
+    async (anchor: string | null) => {
+      const request = ++projectRequestRef.current;
+      if (!navOpen || !anchor) {
+        setProject(null);
+        return;
+      }
+      try {
+        const next = await api.listProjectFiles(anchor);
+        if (request === projectRequestRef.current) setProject(next);
+      } catch {
+        if (request === projectRequestRef.current) setProject(null);
+      }
+    },
+    [navOpen],
+  );
+
   // Navigator contents: the markdown files of the document's project
   // (its git repo, or just its folder when unversioned). Re-roots when
   // versioning is enabled, since that creates the repo. An explicitly
   // opened folder anchors it while no document is open.
   useEffect(() => {
-    const anchor = filePath ?? openFolder;
-    if (!navOpen || !anchor) {
-      setProject(null);
-      return;
-    }
-    api
-      .listProjectFiles(anchor)
-      .then(setProject)
-      .catch(() => setProject(null));
-  }, [navOpen, filePath, openFolder, repo?.repo_root]);
+    void refreshProject(filePath ?? openFolder);
+  }, [navOpen, filePath, openFolder, repo?.repo_root, refreshProject]);
 
   // Load the user's vimrc subset once at startup. Mappings register in the
   // vim engine's global registry, so this works regardless of when (or how
@@ -783,6 +808,213 @@ function App() {
     await loadFile(path);
     flash("Reloaded from disk");
   }, [loadFile, flash]);
+
+  const saveBeforeFileOperation = useCallback(
+    async (path: string, action: string): Promise<boolean> => {
+      if (path !== filePathRef.current) return true;
+      const saved = await autoSave();
+      if (saved === "blocked-conflict") {
+        flash(`Resolve the disk conflict before ${action}`);
+        return false;
+      }
+      if (saved === "failed") {
+        flash(`Autosave failed; ${action} canceled`);
+        return false;
+      }
+      return true;
+    },
+    [autoSave, flash],
+  );
+
+  const renameNavigatorFile = useCallback(
+    async (file: api.ProjectFile) => {
+      const oldName = baseName(file.path);
+      const newName = window.prompt("Rename file", oldName)?.trim();
+      if (!newName || newName === oldName) return;
+      if (!(await saveBeforeFileOperation(file.path, "renaming"))) return;
+      try {
+        const newPath = await api.renameProjectFile(file.path, newName);
+        setRecents((recent) => [
+          ...new Set(recent.map((path) => (path === file.path ? newPath : path))),
+        ]);
+        setFileClipboard((staged) =>
+          staged?.path === file.path ? { ...staged, path: newPath } : staged,
+        );
+        if (filePathRef.current === file.path) {
+          await loadFile(newPath);
+        } else {
+          await refreshProject(
+            filePathRef.current ?? project?.root ?? openFolder,
+          );
+        }
+        flash(`Renamed to ${baseName(newPath)}`);
+      } catch (e) {
+        flash(`Could not rename file: ${e}`);
+      }
+    },
+    [
+      saveBeforeFileOperation,
+      loadFile,
+      refreshProject,
+      project?.root,
+      openFolder,
+      flash,
+    ],
+  );
+
+  const stageNavigatorFile = useCallback(
+    (file: api.ProjectFile, mode: FileClipboard["mode"]) => {
+      setFileClipboard({ path: file.path, mode });
+      flash(
+        `${mode === "cut" ? "Cut" : "Copied"} ${baseName(file.path)} — ` +
+          "right-click a file in the destination folder and choose Paste Here",
+      );
+    },
+    [flash],
+  );
+
+  const pasteNavigatorFile = useCallback(
+    async (destination: api.ProjectFile) => {
+      const staged = fileClipboard;
+      if (!staged) return;
+      const action = staged.mode === "cut" ? "moving" : "copying";
+      if (!(await saveBeforeFileOperation(staged.path, action))) return;
+      try {
+        const newPath = await api.pasteProjectFile(
+          staged.path,
+          destination.path,
+          staged.mode === "cut",
+        );
+        const sourceIsCurrent = filePathRef.current === staged.path;
+        if (staged.mode === "cut") {
+          setFileClipboard(null);
+          if (newPath === staged.path) {
+            flash("The file is already in that folder");
+            return;
+          }
+          setRecents((recent) => [
+            ...new Set(
+              recent.map((path) =>
+                path === staged.path ? newPath : path,
+              ),
+            ),
+          ]);
+          if (sourceIsCurrent) await loadFile(newPath);
+        }
+        if (!(sourceIsCurrent && staged.mode === "cut")) {
+          await refreshProject(
+            filePathRef.current ?? project?.root ?? openFolder,
+          );
+        }
+        flash(
+          staged.mode === "cut"
+            ? `Moved ${baseName(newPath)}`
+            : `Copied as ${baseName(newPath)}`,
+        );
+      } catch (e) {
+        flash(
+          `Could not ${staged.mode === "cut" ? "move" : "copy"} file: ${e}`,
+        );
+      }
+    },
+    [
+      fileClipboard,
+      saveBeforeFileOperation,
+      loadFile,
+      refreshProject,
+      project?.root,
+      openFolder,
+      flash,
+    ],
+  );
+
+  const deleteNavigatorFile = useCallback(
+    async (file: api.ProjectFile) => {
+      const wasCurrent = file.path === filePathRef.current;
+      const ok = await ask(
+        `Delete “${file.rel}” permanently?` +
+          (wasCurrent && diskDirtyRef.current
+            ? " Unsaved edits will also be lost."
+            : " This cannot be undone."),
+        { title: "Delete File", kind: "warning" },
+      );
+      if (!ok) return;
+      try {
+        await api.deleteProjectFile(file.path);
+        const isCurrent = file.path === filePathRef.current;
+        setRecents((recent) => recent.filter((path) => path !== file.path));
+        setFileClipboard((staged) =>
+          staged?.path === file.path ? null : staged,
+        );
+        const anchor = project?.root ?? openFolder ?? parentPath(file.path);
+        if (isCurrent) {
+          unwatchRef.current?.();
+          unwatchRef.current = null;
+          localStorage.removeItem("liauth.lastFile");
+          setOpenFolder(anchor);
+          setFilePath(null);
+          setViewing(null);
+          setDirty(false);
+          setExtConflict(null);
+          diskDirtyRef.current = false;
+          lastDiskRef.current = "";
+          setEditorContent("");
+          setRepo(null);
+          setHistory([]);
+          setBranches([]);
+          setLastSave("");
+        }
+        if (!isCurrent) {
+          await refreshProject(
+            filePathRef.current ?? project?.root ?? openFolder,
+          );
+        }
+        flash(`Deleted ${baseName(file.path)}`);
+      } catch (e) {
+        flash(`Could not delete file: ${e}`);
+      }
+    },
+    [
+      project?.root,
+      openFolder,
+      setEditorContent,
+      refreshProject,
+      flash,
+    ],
+  );
+
+  const openNavigatorFileMenu = useCallback(
+    (file: api.ProjectFile) => {
+      void showNavigatorFileMenu(
+        (action: NavigatorFileAction) => {
+          switch (action) {
+            case "rename":
+              void renameNavigatorFile(file);
+              break;
+            case "cut":
+            case "copy":
+              stageNavigatorFile(file, action);
+              break;
+            case "paste":
+              void pasteNavigatorFile(file);
+              break;
+            case "delete":
+              void deleteNavigatorFile(file);
+              break;
+          }
+        },
+        fileClipboard !== null,
+      ).catch((e) => flash(`Could not open file menu: ${e}`));
+    },
+    [
+      fileClipboard,
+      renameNavigatorFile,
+      stageNavigatorFile,
+      pasteNavigatorFile,
+      deleteNavigatorFile,
+      flash,
+    ],
+  );
 
   const resolveExternal = useCallback(
     async (mode: "merge" | "mine" | "theirs") => {
@@ -1586,15 +1818,28 @@ function App() {
             ) : null}
             <ul className="nav-list">
               {(project?.files ?? []).map((f, i, all) => {
-                const cut = f.rel.lastIndexOf("/");
+                const cut = Math.max(
+                  f.rel.lastIndexOf("/"),
+                  f.rel.lastIndexOf("\\"),
+                );
                 const dir = cut >= 0 ? f.rel.slice(0, cut) : "";
                 const name = cut >= 0 ? f.rel.slice(cut + 1) : f.rel;
                 const prev = i > 0 ? all[i - 1].rel : "";
-                const prevCut = prev.lastIndexOf("/");
+                const prevCut = Math.max(
+                  prev.lastIndexOf("/"),
+                  prev.lastIndexOf("\\"),
+                );
                 const prevDir = prevCut >= 0 ? prev.slice(0, prevCut) : "";
+                const hasNotes =
+                  f.path === filePath ? notes.length > 0 : f.has_notes;
                 const cls = [
+                  "nav-file",
                   f.path === filePath ? "selected" : "",
                   dir ? "nested" : "",
+                  fileClipboard?.mode === "cut" &&
+                  fileClipboard.path === f.path
+                    ? "cut"
+                    : "",
                 ]
                   .filter(Boolean)
                   .join(" ");
@@ -1605,12 +1850,23 @@ function App() {
                     ) : null}
                     <li
                       className={cls}
-                      title={f.rel}
+                      title={`${f.rel}${hasNotes ? " — unresolved notes" : ""}`}
                       onClick={() => {
                         if (f.path !== filePath) void openPath(f.path);
                       }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        openNavigatorFileMenu(f);
+                      }}
                     >
-                      {name}
+                      <span className="nav-file-name">{name}</span>
+                      {hasNotes ? (
+                        <span
+                          className="nav-note-dot"
+                          title="Contains unresolved notes"
+                          aria-label="Contains unresolved notes"
+                        />
+                      ) : null}
                     </li>
                   </Fragment>
                 );
