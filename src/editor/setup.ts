@@ -31,6 +31,76 @@ function installWrappedLineVimNavigation(): void {
 
 installWrappedLineVimNavigation();
 
+type VimDialogClose = (newValue?: string) => void;
+type VimDialogKeyDown = (
+  event: KeyboardEvent,
+  value: string,
+  close: VimDialogClose,
+) => boolean | void;
+
+interface VimDialogOptions {
+  onKeyDown?: VimDialogKeyDown;
+  [key: string]: unknown;
+}
+
+/**
+ * The upstream dialog adapter recognizes prompt exits with legacy keyCode
+ * checks and closes only after the accept callback returns. Recognize modern
+ * Enter/Escape events for search prompts and always restore editor focus.
+ */
+function installVimSearchPromptExitFix(): void {
+  const openDialog = CodeMirror.prototype.openDialog;
+  CodeMirror.prototype.openDialog = function (
+    this: CodeMirror,
+    template: Element,
+    callback: Function | undefined,
+    options: VimDialogOptions | undefined,
+  ) {
+    const prefix = template.textContent?.trimStart()[0];
+    if (prefix !== "/" && prefix !== "?") {
+      return openDialog.call(this, template, callback, options);
+    }
+
+    const promptOptions = options ?? {};
+    const onKeyDown = promptOptions.onKeyDown;
+    return openDialog.call(this, template, callback, {
+      ...promptOptions,
+      onKeyDown: (
+        event: KeyboardEvent,
+        value: string,
+        close: VimDialogClose,
+      ): boolean | void => {
+        const accept =
+          event.key === "Enter" ||
+          event.key === "Return" ||
+          event.code === "Enter" ||
+          event.code === "NumpadEnter" ||
+          event.keyCode === 13;
+        const cancel =
+          event.key === "Escape" ||
+          event.key === "Esc" ||
+          event.code === "Escape" ||
+          event.keyCode === 27;
+        if (!accept && !cancel) {
+          return onKeyDown?.(event, value, close);
+        }
+
+        try {
+          if (accept) callback?.(value);
+          else onKeyDown?.(event, value, close);
+        } finally {
+          CodeMirror.e_stop(event);
+          close();
+          this.focus();
+        }
+        return true;
+      },
+    });
+  };
+}
+
+installVimSearchPromptExitFix();
+
 /**
  * Upstream findPosV builds its vertical-motion probe cursor with a
  * hard-coded forward association. On a wrapped line, gk from the lower
