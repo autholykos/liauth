@@ -44,9 +44,9 @@ interface VimDialogOptions {
 }
 
 /**
- * The upstream dialog adapter recognizes prompt exits with legacy keyCode
- * checks and closes only after the accept callback returns. Recognize modern
- * Enter/Escape events for search prompts and always restore editor focus.
+ * The upstream dialog adapter leaves autocomplete enabled and recognizes
+ * prompt exits with legacy keyCode checks. Disable browser completion,
+ * recognize modern Enter/Escape events, and always restore editor focus.
  */
 function installVimSearchPromptExitFix(): void {
   const openDialog = CodeMirror.prototype.openDialog;
@@ -61,6 +61,7 @@ function installVimSearchPromptExitFix(): void {
       return openDialog.call(this, template, callback, options);
     }
 
+    template.querySelector("input")?.setAttribute("autocomplete", "off");
     const promptOptions = options ?? {};
     const onKeyDown = promptOptions.onKeyDown;
     return openDialog.call(this, template, callback, {
