@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 // Local inference endpoint (OpenAI-compatible); making this configurable
 // is deliberately deferred.
 const ENDPOINT: &str = "https://models.nanto.org/v1/chat/completions";
-const MODEL: &str = "bart";
+const MODEL: &str = "toki";
 
 #[derive(Serialize, Deserialize)]
 pub struct EditPair {
@@ -71,6 +71,11 @@ mod tests {
     use super::find_voice;
 
     #[test]
+    fn note_requests_use_toki() {
+        assert_eq!(super::MODEL, "toki");
+    }
+
+    #[test]
     fn voice_symlink_escaping_repo_is_rejected() {
         let base = std::env::temp_dir().join(format!("liauth-voice-{}", std::process::id()));
         let repo = base.join("repo");
@@ -83,7 +88,10 @@ mod tests {
         // A real file (and an in-repo symlink) still resolve.
         std::fs::remove_file(repo.join("VOICE.md")).unwrap();
         std::fs::write(repo.join("VOICE.md"), "style guide").unwrap();
-        assert_eq!(find_voice(repo.to_str().unwrap()).as_deref(), Some("style guide"));
+        assert_eq!(
+            find_voice(repo.to_str().unwrap()).as_deref(),
+            Some("style guide")
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
@@ -186,7 +194,7 @@ pub async fn draft_note_edits(
         prompt_prefix(repo_root.as_deref(), &document),
     );
     // The server admits prompt + max_tokens against its KV budget
-    // (currently 16384), so an oversized generation ceiling gets whole
+    // (currently 32768), so an oversized generation ceiling gets whole
     // requests rejected on long chapters; observed replies stay well
     // under 2k tokens.
     let body = serde_json::json!({
@@ -196,8 +204,7 @@ pub async fn draft_note_edits(
         "max_tokens": 4096,
     });
     ensure_tls();
-    // Prompt processing on the local model is slow (~50 tok/s), so a long
-    // document legitimately takes minutes.
+    // Long-document prompt processing can legitimately take minutes.
     let resp = reqwest::Client::new()
         .post(ENDPOINT)
         .timeout(std::time::Duration::from_secs(600))
@@ -215,8 +222,7 @@ pub async fn draft_note_edits(
         .first()
         .map(|c| c.message.content.as_str())
         .unwrap_or("");
-    parse_edits(content)
-        .ok_or_else(|| "model reply contained no JSON edit list".to_string())
+    parse_edits(content).ok_or_else(|| "model reply contained no JSON edit list".to_string())
 }
 
 /// Extract the first JSON array from the reply, tolerating code fences
