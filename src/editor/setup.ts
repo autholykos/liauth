@@ -32,21 +32,22 @@ function installWrappedLineVimNavigation(): void {
 installWrappedLineVimNavigation();
 
 type VimDialogClose = (newValue?: string) => void;
-type VimDialogKeyDown = (
+type VimDialogKeyHandler = (
   event: KeyboardEvent,
   value: string,
   close: VimDialogClose,
 ) => boolean | void;
 
 interface VimDialogOptions {
-  onKeyDown?: VimDialogKeyDown;
+  onKeyDown?: VimDialogKeyHandler;
+  onKeyUp?: VimDialogKeyHandler;
   [key: string]: unknown;
 }
 
 /**
- * The upstream dialog adapter leaves autocomplete enabled and recognizes
- * prompt exits with legacy keyCode checks. Disable browser completion,
- * recognize modern Enter/Escape events, and always restore editor focus.
+ * Disable browser completion and let the dialog adapter own its normal
+ * keydown → accept → blur → close sequence. macOS completion can consume
+ * Enter's keydown, so keyup supplies the same accept sequence as a fallback.
  */
 function installVimSearchPromptExitFix(): void {
   const openDialog = CodeMirror.prototype.openDialog;
@@ -64,32 +65,49 @@ function installVimSearchPromptExitFix(): void {
     template.querySelector("input")?.setAttribute("autocomplete", "off");
     const promptOptions = options ?? {};
     const onKeyDown = promptOptions.onKeyDown;
-    return openDialog.call(this, template, callback, {
+    const onKeyUp = promptOptions.onKeyUp;
+    let finished = false;
+    const accept = (value: string) => {
+      if (finished) return;
+      finished = true;
+      callback?.(value);
+    };
+    return openDialog.call(this, template, accept, {
       ...promptOptions,
-      onKeyDown: (
+      onKeyUp: (
         event: KeyboardEvent,
         value: string,
         close: VimDialogClose,
       ): boolean | void => {
-        const accept =
+        const acceptKey =
           event.key === "Enter" ||
           event.key === "Return" ||
           event.code === "Enter" ||
           event.code === "NumpadEnter" ||
           event.keyCode === 13;
-        const cancel =
+        const cancelKey =
           event.key === "Escape" ||
           event.key === "Esc" ||
           event.code === "Escape" ||
           event.keyCode === 27;
-        if (!accept && !cancel) {
-          return onKeyDown?.(event, value, close);
+        if (!acceptKey && !cancelKey) {
+          return onKeyUp?.(event, value, close);
+        }
+        if (finished) return true;
+
+        if (cancelKey) {
+          finished = true;
+          if (onKeyDown) return onKeyDown(event, value, close) ?? true;
+          CodeMirror.e_stop(event);
+          close();
+          this.focus();
+          return true;
         }
 
         try {
-          if (accept) callback?.(value);
-          else onKeyDown?.(event, value, close);
+          accept(value);
         } finally {
+          (event.target as HTMLInputElement | null)?.blur();
           CodeMirror.e_stop(event);
           close();
           this.focus();
