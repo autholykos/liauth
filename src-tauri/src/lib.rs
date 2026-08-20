@@ -391,6 +391,8 @@ pub fn run() {
             config::write_vim_config,
             ai::draft_note_edits,
             ai::warm_note_cache,
+            ai::list_rephrase_skills,
+            ai::rephrase_selection,
             take_pending_open,
             list_project_files,
             rename_project_file,

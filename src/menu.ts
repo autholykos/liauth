@@ -66,6 +66,30 @@ export async function showNavigatorFileMenu(
   }
 }
 
+/** Native menu for a prose selection. Rephrase captures the range before the
+ * menu opens; the predefined items keep the expected text-editing actions. */
+export async function showEditorSelectionMenu(
+  rephrase: () => void,
+): Promise<void> {
+  const menu = await Menu.new({
+    items: [
+      await MenuItem.new({
+        id: "editor-rephrase",
+        text: "Rephrase with Toki…",
+        action: rephrase,
+      }),
+      await sep(),
+      await PredefinedMenuItem.new({ item: "Cut" }),
+      await PredefinedMenuItem.new({ item: "Copy" }),
+    ],
+  });
+  try {
+    await menu.popup();
+  } finally {
+    await menu.close().catch(() => {});
+  }
+}
+
 export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
   const item = (id: string, text: string, accelerator?: string) =>
     MenuItem.new({ id, text, accelerator, action: () => run(id) });

@@ -114,6 +114,33 @@ export const draftNoteEdits = (
 export const warmNoteCache = (document: string, repoRoot: string | null) =>
   invoke<void>("warm_note_cache", { document, repoRoot });
 
+export interface RephraseSkill {
+  id: string;
+  name: string;
+  estimated_tokens: number;
+  available: boolean;
+}
+
+export const listRephraseSkills = (repoRoot: string) =>
+  invoke<RephraseSkill[]>("list_rephrase_skills", { repoRoot });
+
+export const rephraseSelection = (
+  selection: string,
+  context: string,
+  direction: string,
+  preset: string,
+  skillId: string | null,
+  repoRoot: string | null,
+) =>
+  invoke<string>("rephrase_selection", {
+    selection,
+    context,
+    direction,
+    preset,
+    skillId,
+    repoRoot,
+  });
+
 export interface ProjectFile {
   path: string;
   rel: string;
