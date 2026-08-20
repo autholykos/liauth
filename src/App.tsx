@@ -1,4 +1,11 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { EditorView } from "@codemirror/view";
 import {
   open as openDialog,
@@ -24,10 +31,12 @@ import {
 } from "./editor/setup";
 import {
   buildAppMenu,
+  showEditorSelectionMenu,
   showNavigatorFileMenu,
   type NavigatorFileAction,
 } from "./menu";
 import { CommandPalette, PaletteCommand } from "./CommandPalette";
+import { RephraseDialog } from "./RephraseDialog";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
 import { HelpPanel } from "./HelpPanel";
 import {
@@ -37,6 +46,7 @@ import {
   gotoNextNote,
   stripCriticMarkup,
   applyEditsAsSuggestions,
+  applyReplacementAsSuggestion,
   CommentNote,
   NoteMatch,
   SuggestionNote,
@@ -52,6 +62,20 @@ type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
 type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
+type RephraseState = {
+  id: number;
+  from: number;
+  to: number;
+  selection: string;
+  context: string;
+  document: string;
+  path: string | null;
+  repoRoot: string | null;
+  skills: api.RephraseSkill[];
+  skillsLoading: boolean;
+  busy: boolean;
+  error: string | null;
+};
 
 const THEMES: { id: Theme; label: string }[] = [
   { id: "paper", label: "Paper" },
@@ -127,6 +151,12 @@ const parentPath = (path: string) => {
   const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return cut > 0 ? path.slice(0, cut) : null;
 };
+
+function selectionContext(text: string, from: number, to: number): string {
+  const before = text.lastIndexOf("\n\n", Math.max(0, from - 1));
+  const after = text.indexOf("\n\n", to);
+  return text.slice(before < 0 ? 0 : before + 2, after < 0 ? text.length : after);
+}
 
 function fmtTime(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString(undefined, {
@@ -207,6 +237,10 @@ function App() {
   // while the buffer is still untitled, and is where ⌘S will default to.
   const [openFolder, setOpenFolder] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [rephrase, setRephrase] = useState<RephraseState | null>(null);
+  const rephraseRef = useRef(rephrase);
+  rephraseRef.current = rephrase;
+  const rephraseIdRef = useRef(0);
   const [cursor, setCursor] = useState<CursorStatus>({ line: 1, col: 1 });
   const [counts, setCounts] = useState({ words: 0, chars: 0 });
   const [lastSave, setLastSave] = useState("");
@@ -334,6 +368,7 @@ function App() {
     (content: string, readOnly = false) => {
       // Loads, reloads, history views, and branch switches all pass through
       // here, so the Notes panel and navigator badge update in the same frame.
+      setRephrase(null);
       setNotes(scanNotes(content));
       const view = viewRef.current;
       if (!view) return;
@@ -1362,6 +1397,145 @@ function App() {
     refreshNotes();
   }, [viewing, refreshNotes]);
 
+  const startRephrase = useCallback(
+    (from: number, to: number, selection: string, document: string) => {
+      const id = ++rephraseIdRef.current;
+      const repoRoot = repo?.repo_root ?? null;
+      setRephrase({
+        id,
+        from,
+        to,
+        selection,
+        context: selectionContext(document, from, to),
+        document,
+        path: filePathRef.current,
+        repoRoot,
+        skills: [],
+        skillsLoading: repoRoot !== null,
+        busy: false,
+        error: null,
+      });
+      if (!repoRoot) return;
+      void api
+        .listRephraseSkills(repoRoot)
+        .then((skills) => {
+          setRephrase((current) =>
+            current?.id === id
+              ? { ...current, skills, skillsLoading: false }
+              : current,
+          );
+        })
+        .catch((error) => {
+          setRephrase((current) =>
+            current?.id === id
+              ? {
+                  ...current,
+                  skillsLoading: false,
+                  error: `Could not load rephrase skills: ${error}`,
+                }
+              : current,
+          );
+        });
+    },
+    [repo?.repo_root],
+  );
+
+  const openEditorContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      const view = viewRef.current;
+      if (!view || viewing || view.state.readOnly) return;
+      if (view.state.selection.ranges.length !== 1) return;
+      const { from, to } = view.state.selection.main;
+      if (from === to) return;
+      const clicked = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (clicked === null || clicked < from || clicked > to) return;
+      event.preventDefault();
+      const document = view.state.doc.toString();
+      const selection = view.state.sliceDoc(from, to);
+      const overlapsNote = scanNotes(document).some(
+        (note) => from < note.to && to > note.from,
+      );
+      void showEditorSelectionMenu(() => {
+        if (overlapsNote) {
+          flash("Rephrase cannot cross an existing note or suggestion");
+          return;
+        }
+        startRephrase(from, to, selection, document);
+      }).catch((error) => flash(`Could not open editor menu: ${error}`));
+    },
+    [viewing, startRephrase, flash],
+  );
+
+  const submitRephrase = useCallback(
+    async (preset: string, skillId: string | null, direction: string) => {
+      const request = rephraseRef.current;
+      if (!request || request.busy) return;
+      setRephrase((current) =>
+        current?.id === request.id
+          ? { ...current, busy: true, error: null }
+          : current,
+      );
+      try {
+        const replacement = await api.rephraseSelection(
+          request.selection,
+          request.context,
+          direction,
+          preset,
+          skillId,
+          request.repoRoot,
+        );
+        const live = viewRef.current;
+        if (rephraseRef.current?.id !== request.id) return;
+        if (
+          !live ||
+          viewingRef.current ||
+          filePathRef.current !== request.path ||
+          live.state.doc.toString() !== request.document
+        ) {
+          setRephrase(null);
+          flash("Rephrase discarded — the document changed");
+          return;
+        }
+        if (
+          !applyReplacementAsSuggestion(
+            live,
+            request.from,
+            request.to,
+            request.selection,
+            replacement,
+          )
+        ) {
+          setRephrase((current) =>
+            current?.id === request.id
+              ? {
+                  ...current,
+                  busy: false,
+                  error: "Toki returned a replacement that cannot be staged",
+                }
+              : current,
+          );
+          return;
+        }
+        refreshNotes();
+        setPanel("notes");
+        setRephrase(null);
+        flash("Rephrase staged as a suggestion");
+      } catch (error) {
+        setRephrase((current) =>
+          current?.id === request.id
+            ? { ...current, busy: false, error: String(error) }
+            : current,
+        );
+      }
+    },
+    [refreshNotes, flash],
+  );
+
+  const closeRephrase = useCallback(() => {
+    setRephrase(null);
+    requestAnimationFrame(() => viewRef.current?.focus());
+  }, []);
+
   const jumpToNote = useCallback((n: NoteMatch) => {
     const view = viewRef.current;
     if (!view) return;
@@ -1875,7 +2049,11 @@ function App() {
           </aside>
         ) : null}
 
-        <div className="editor-wrap" ref={editorHost} />
+        <div
+          className="editor-wrap"
+          ref={editorHost}
+          onContextMenu={openEditorContextMenu}
+        />
 
         {panel === "history" && versioned ? (
           <aside className="side-panel">
@@ -2078,6 +2256,20 @@ function App() {
       </footer>
 
       {status ? <div className="status-toast">{status}</div> : null}
+      {rephrase ? (
+        <RephraseDialog
+          key={rephrase.id}
+          selection={rephrase.selection}
+          skills={rephrase.skills}
+          skillsLoading={rephrase.skillsLoading}
+          busy={rephrase.busy}
+          error={rephrase.error}
+          onSubmit={(preset, skillId, direction) =>
+            void submitRephrase(preset, skillId, direction)
+          }
+          onClose={closeRephrase}
+        />
+      ) : null}
       {rsvp ? (
         <RsvpOverlay
           words={rsvp.words}

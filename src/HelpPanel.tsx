@@ -81,7 +81,7 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Notes & Suggestions",
       search:
-        "notes annotate select criticmarkup comment suggestion insertion deletion accept reject dismiss resolve draft edits ai model panel next cycle jump navigate pdf export strip",
+        "notes annotate select criticmarkup comment suggestion insertion deletion accept reject dismiss resolve draft edits ai model rephrase toki concise vivid simplify humanize synonyms skill panel next cycle jump navigate pdf export strip",
       body: (
         <p>
           Select text and press <kbd>⌘⇧M</kbd> to annotate it, or <kbd>⌘⇧U</kbd>{" "}
@@ -92,8 +92,14 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
           them; clicking an entry in the Notes panel jumps to it. The panel
           dismisses comments and accepts or rejects suggestions; “Draft edits”
           asks the model to turn a prose note into suggestions to accept or
-          reject — one undo reverts the whole batch. PDF export strips comments
-          and keeps the original text of unaccepted suggestions.
+          reject — one undo reverts the whole batch. To stage a directed Toki
+          rewrite, select prose, right-click it, and choose{" "}
+          <strong>Rephrase with Toki…</strong>; built-in and project-skill
+          presets produce the same accept/reject suggestions. Rephrase skills
+          live at <code>.liauth/skills/&lt;name&gt;/SKILL.md</code>, opt in with{" "}
+          <code>liauth-action: rephrase</code>, and have a 1,024-token-equivalent
+          limit. PDF export strips comments and keeps the original text of
+          unaccepted suggestions.
         </p>
       ),
     },

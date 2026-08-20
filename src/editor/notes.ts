@@ -219,6 +219,38 @@ export function insertSuggestion(view: EditorView): boolean {
 const CRITIC_TOKENS =
   /\{~~|~>|~~\}|\{>>|<<\}|\{==|==\}|\{\+\+|\+\+\}|\{--|--\}/;
 
+/** Stage one model replacement at an exact captured range. The source guard
+ * rejects stale inference results, and one transaction keeps Undo atomic. */
+export function applyReplacementAsSuggestion(
+  view: EditorView,
+  from: number,
+  to: number,
+  original: string,
+  replacement: string,
+): boolean {
+  if (
+    view.state.readOnly ||
+    from === to ||
+    replacement === original ||
+    view.state.sliceDoc(from, to) !== original ||
+    CRITIC_TOKENS.test(original) ||
+    CRITIC_TOKENS.test(replacement)
+  ) {
+    return false;
+  }
+  view.dispatch({
+    changes: {
+      from,
+      to,
+      insert: `{~~${original}~>${replacement}~~}`,
+    },
+    selection: { anchor: from },
+    effects: EditorView.scrollIntoView(from, { y: "center" }),
+  });
+  view.focus();
+  return true;
+}
+
 /** Typographic normalization for tolerant matching: models straighten curly
  *  apostrophes/quotes, flatten ellipses, and collapse space runs when quoting
  *  a document back, which breaks verbatim search. `map[i]` is the source
