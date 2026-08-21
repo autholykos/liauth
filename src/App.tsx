@@ -1504,7 +1504,7 @@ function App() {
   );
 
   const submitRephrase = useCallback(
-    async (preset: string, skillId: string | null, direction: string) => {
+    async (direction: string, synonymsOnly: boolean) => {
       const request = rephraseRef.current;
       if (!request || request.busy) return;
       setRephrase((current) =>
@@ -1517,8 +1517,7 @@ function App() {
           request.selection,
           request.context,
           direction,
-          preset,
-          skillId,
+          synonymsOnly,
           request.repoRoot,
         );
         const live = viewRef.current;
@@ -2328,8 +2327,8 @@ function App() {
           skillsLoading={rephrase.skillsLoading}
           busy={rephrase.busy}
           error={rephrase.error}
-          onSubmit={(preset, skillId, direction) =>
-            void submitRephrase(preset, skillId, direction)
+          onSubmit={(direction, synonymsOnly) =>
+            void submitRephrase(direction, synonymsOnly)
           }
           onClose={closeRephrase}
         />

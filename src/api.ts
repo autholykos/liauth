@@ -119,6 +119,7 @@ export interface RephraseSkill {
   name: string;
   estimated_tokens: number;
   available: boolean;
+  instructions: string;
 }
 
 export const listRephraseSkills = (repoRoot: string) =>
@@ -128,16 +129,14 @@ export const rephraseSelection = (
   selection: string,
   context: string,
   direction: string,
-  preset: string,
-  skillId: string | null,
+  synonymsOnly: boolean,
   repoRoot: string | null,
 ) =>
   invoke<string>("rephrase_selection", {
     selection,
     context,
     direction,
-    preset,
-    skillId,
+    synonymsOnly,
     repoRoot,
   });
 
