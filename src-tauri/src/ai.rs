@@ -418,19 +418,19 @@ pub async fn draft_note_edits(
 fn builtin_rephrase_instruction(preset: &str) -> Option<&'static str> {
     match preset {
         "more_concise" => Some(
-            "Remove redundancy and shorten the selection without losing information or tone.",
+            "Elimina le ridondanze e accorcia il testo senza perdere informazioni né tono.",
         ),
         "more_vivid" => Some(
-            "Prefer concrete nouns, active verbs, and sensory phrasing without inventing facts.",
+            "Preferisci sostantivi concreti, verbi attivi e immagini sensoriali, senza inventare fatti.",
         ),
         "simplify_syntax" => Some(
-            "Reduce syntactic complexity and subordinate clauses while preserving voice and meaning.",
+            "Riduci la complessità sintattica e le subordinate conservando voce e significato.",
         ),
         "humanize" => Some(
-            "Reduce formulaic or generic phrasing and improve natural rhythm and idiosyncrasy. Do not introduce errors or attempt to evade detection.",
+            "Togli le formule generiche e di maniera, migliora ritmo e idiosincrasia naturali. Non introdurre errori e non cercare di eludere rilevatori.",
         ),
         "synonyms_only" => Some(
-            "Substitute individual words only. Preserve word order, syntax, punctuation, whitespace, and sentence count.",
+            "Sostituisci soltanto singole parole. Conserva ordine delle parole, sintassi, punteggiatura, spazi e numero di frasi.",
         ),
         _ => None,
     }
@@ -522,16 +522,20 @@ pub async fn rephrase_selection(
         .map(|text| format!("VOICE GUIDE:\n{text}\n\n"))
         .unwrap_or_default();
     let direction = if direction.trim().is_empty() {
-        "No additional direction.".to_string()
+        "Nessuna istruzione aggiuntiva: applica la modalità di riformulazione.".to_string()
     } else {
         direction.trim().to_string()
     };
     let prompt = format!(
-        "{voice}REFORMULATION MODE:\n{mode}\n\n\
-         USER DIRECTION:\n{direction}\n\n\
-         SURROUNDING CONTEXT:\n{context}\n\n\
-         SELECTED TEXT:\n{selection}\n\n\
-         Rephrase only the SELECTED TEXT. The USER DIRECTION refines and, when they conflict, overrides the REFORMULATION MODE. Preserve the selection's language, tense, factual content, names, and quotation style. Follow the voice guide when supplied. Never add CriticMarkup. Reply with ONLY a JSON object of the form {{\"replacement\": \"<rephrased text>\"}} — no prose, no markdown fences."
+        "{voice}ISTRUZIONE DELL'AUTORE (ha la precedenza su tutto il resto):\n{direction}\n\n\
+         MODALITÀ DI RIFORMULAZIONE:\n{mode}\n\n\
+         CONTESTO CIRCOSTANTE (solo per orientarti, non riscriverlo):\n{context}\n\n\
+         TESTO SELEZIONATO:\n{selection}\n\n\
+         Riscrivi soltanto il TESTO SELEZIONATO seguendo l'istruzione dell'autore. \
+         Se l'istruzione chiede una riscrittura creativa, radicale o una struttura diversa, cambia davvero la costruzione della frase: non riutilizzare le stesse coppie verbo-oggetto, non ricalcare l'ordine delle proposizioni, non limitarti a sostituire una parola. \
+         Conserva il senso, i nomi, la lingua, il tempo verbale e lo stile delle citazioni; segui la guida di voce quando c'è. \
+         Non aggiungere CriticMarkup. \
+         Rispondi SOLO con un oggetto JSON della forma {{\"replacement\": \"<testo riscritto>\"}}, senza commenti né recinti markdown."
     );
     // No response_format: the raul lane (mlx_lm.server) has no grammar
     // decoding and the router fails closed on json_schema requests, so the
@@ -539,7 +543,11 @@ pub async fn rephrase_selection(
     let body = serde_json::json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        // 0.2 collapsed onto the most probable continuation, i.e. the
+        // original sentence with one synonym; 0.7 is where Raul actually
+        // restructures. Synonym-only edits keep a low temperature because
+        // their structure is checked after the fact.
+        "temperature": if preset == "synonyms_only" { 0.3 } else { 0.7 },
         "max_tokens": 4096,
     });
     ensure_tls();
