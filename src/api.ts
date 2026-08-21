@@ -154,8 +154,8 @@ export interface ProjectFiles {
   truncated: boolean;
 }
 
-export const listProjectFiles = (filePath: string) =>
-  invoke<ProjectFiles | null>("list_project_files", { filePath });
+export const listProjectFiles = (filePath: string, showHidden: boolean) =>
+  invoke<ProjectFiles | null>("list_project_files", { filePath, showHidden });
 
 export const renameProjectFile = (filePath: string, newName: string) =>
   invoke<string>("rename_project_file", { filePath, newName });

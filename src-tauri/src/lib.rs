@@ -57,6 +57,7 @@ fn collect_markdown(
     dir: &std::path::Path,
     root: &std::path::Path,
     depth: usize,
+    show_hidden: bool,
     out: &mut Vec<ProjectFile>,
 ) -> bool {
     // Bounded so a navigator rooted in an unexpectedly huge tree stays cheap.
@@ -73,12 +74,14 @@ fn collect_markdown(
         if out.len() >= 500 {
             return true;
         }
-        if e.file_name().to_string_lossy().starts_with('.') {
-            continue; // hidden files and .git
+        let file_name = e.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == ".git" || (!show_hidden && file_name.starts_with('.')) {
+            continue;
         }
         let p = e.path();
         if p.is_dir() {
-            if collect_markdown(&p, root, depth + 1, out) {
+            if collect_markdown(&p, root, depth + 1, show_hidden, out) {
                 return true;
             }
         } else if is_markdown(&p) {
@@ -101,7 +104,7 @@ fn collect_markdown(
 /// boundary versioning uses); without one, just the anchor's folder.
 /// The anchor may be a document path or a folder opened directly.
 #[tauri::command]
-fn list_project_files(file_path: String) -> Option<ProjectFiles> {
+fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFiles> {
     let anchor = std::path::Path::new(&file_path);
     let parent = if anchor.is_dir() {
         anchor
@@ -113,7 +116,7 @@ fn list_project_files(file_path: String) -> Option<ProjectFiles> {
         .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
         .unwrap_or_else(|| parent.to_path_buf());
     let mut files = Vec::new();
-    let truncated = collect_markdown(&root, &root, 0, &mut files);
+    let truncated = collect_markdown(&root, &root, 0, show_hidden, &mut files);
     // Root-level files first, then each subfolder as a group.
     files.sort_by(|a, b| {
         let dir = |f: &ProjectFile| {
@@ -449,7 +452,7 @@ mod tests {
         std::fs::write(&plain, "No review comments here.\n").unwrap();
         std::fs::write(&noted, "A {>>review comment<<} here.\n").unwrap();
 
-        let project = list_project_files(p(&plain)).unwrap();
+        let project = list_project_files(p(&plain), false).unwrap();
         assert!(
             !project
                 .files
@@ -466,6 +469,42 @@ mod tests {
                 .unwrap()
                 .has_notes
         );
+    }
+
+    #[test]
+    fn project_listing_hides_dot_entries_unless_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible = dir.path().join("visible.md");
+        let hidden = dir.path().join(".hidden.md");
+        let hidden_dir = dir.path().join(".drafts");
+        let nested = hidden_dir.join("nested.md");
+        let git_dir = dir.path().join(".git");
+        let git_metadata = git_dir.join("internal.md");
+        std::fs::write(&visible, "visible\n").unwrap();
+        std::fs::write(&hidden, "hidden\n").unwrap();
+        std::fs::create_dir(&hidden_dir).unwrap();
+        std::fs::write(&nested, "nested\n").unwrap();
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::write(&git_metadata, "metadata\n").unwrap();
+
+        let default_listing = list_project_files(p(&visible), false).unwrap();
+        assert_eq!(default_listing.files.len(), 1);
+        assert_eq!(default_listing.files[0].path, p(&visible));
+
+        let hidden_listing = list_project_files(p(&visible), true).unwrap();
+        assert_eq!(hidden_listing.files.len(), 3);
+        assert!(hidden_listing
+            .files
+            .iter()
+            .any(|file| file.path == p(&hidden)));
+        assert!(hidden_listing
+            .files
+            .iter()
+            .any(|file| file.path == p(&nested)));
+        assert!(!hidden_listing
+            .files
+            .iter()
+            .any(|file| file.path == p(&git_metadata)));
     }
 
     #[test]
