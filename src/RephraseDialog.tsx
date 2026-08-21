@@ -63,14 +63,14 @@ export function RephraseDialog({
         className="rephrase-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Rephrase with Toki"
+        aria-label="Rephrase with Raul"
         onMouseDown={(event) => event.stopPropagation()}
         onSubmit={(event) => {
           event.preventDefault();
           if (!busy) submit();
         }}
       >
-        <h3>Rephrase with Toki</h3>
+        <h3>Rephrase with Raul</h3>
         <p className="rephrase-selection">{selection}</p>
 
         <div className="rephrase-presets" aria-label="Rephrase preset">

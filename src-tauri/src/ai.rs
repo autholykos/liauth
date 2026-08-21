@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 // Local inference endpoint (OpenAI-compatible); making this configurable
 // is deliberately deferred.
 const ENDPOINT: &str = "https://models.nanto.org/v1/chat/completions";
-const MODEL: &str = "toki";
+const MODEL: &str = "raul";
 const MAX_REPHRASE_SKILL_TOKENS: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -185,8 +185,8 @@ mod tests {
     };
 
     #[test]
-    fn note_requests_use_toki() {
-        assert_eq!(super::MODEL, "toki");
+    fn note_requests_use_raul() {
+        assert_eq!(super::MODEL, "raul");
     }
 
     #[test]
