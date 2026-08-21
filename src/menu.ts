@@ -96,7 +96,7 @@ export async function showEditorSelectionMenu(
     items: [
       await MenuItem.new({
         id: "editor-rephrase",
-        text: "Rephrase with Toki…",
+        text: "Rephrase with Raul…",
         action: rephrase,
       }),
       await sep(),
