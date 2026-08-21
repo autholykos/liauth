@@ -119,7 +119,7 @@ fn parse_rephrase_skill(id: &str, content: String) -> Option<LoadedRephraseSkill
     if instructions.is_empty() {
         return None;
     }
-    // Toki exposes no tokenizer endpoint. Three UTF-8 bytes per token is a
+    // Raul exposes no tokenizer endpoint. Three UTF-8 bytes per token is a
     // deliberately conservative estimate for short Italian/English skills.
     let estimated_tokens = instructions.len().div_ceil(3);
     Some(LoadedRephraseSkill {
@@ -483,7 +483,7 @@ fn parse_rephrase_reply(content: &str) -> Option<String> {
 }
 
 /// Rephrase one selected passage. Liauth supplies only surrounding context;
-/// Toki returns one replacement that the frontend stages as CriticMarkup.
+/// Raul returns one replacement that the frontend stages as CriticMarkup.
 #[tauri::command]
 pub async fn rephrase_selection(
     selection: String,
@@ -531,26 +531,16 @@ pub async fn rephrase_selection(
          USER DIRECTION:\n{direction}\n\n\
          SURROUNDING CONTEXT:\n{context}\n\n\
          SELECTED TEXT:\n{selection}\n\n\
-         Rephrase only the SELECTED TEXT. The USER DIRECTION refines and, when they conflict, overrides the REFORMULATION MODE. Preserve the selection's language, tense, factual content, names, and quotation style. Follow the voice guide when supplied. Never add CriticMarkup. Return only the requested replacement in the response schema."
+         Rephrase only the SELECTED TEXT. The USER DIRECTION refines and, when they conflict, overrides the REFORMULATION MODE. Preserve the selection's language, tense, factual content, names, and quotation style. Follow the voice guide when supplied. Never add CriticMarkup. Reply with ONLY a JSON object of the form {{\"replacement\": \"<rephrased text>\"}} — no prose, no markdown fences."
     );
+    // No response_format: the raul lane (mlx_lm.server) has no grammar
+    // decoding and the router fails closed on json_schema requests, so the
+    // schema travels in the prompt and parse_rephrase_reply stays tolerant.
     let body = serde_json::json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
         "max_tokens": 4096,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "rephrase",
-                "strict": true,
-                "schema": {
-                    "type": "object",
-                    "properties": {"replacement": {"type": "string"}},
-                    "required": ["replacement"],
-                    "additionalProperties": false
-                }
-            }
-        }
     });
     ensure_tls();
     let response = reqwest::Client::new()
@@ -582,7 +572,7 @@ pub async fn rephrase_selection(
         return Err("model replacement contains CriticMarkup".to_string());
     }
     if preset == "synonyms_only" && lexical_layout(&replacement) != lexical_layout(&selection) {
-        return Err("Toki changed structure in Synonyms only mode".to_string());
+        return Err("Raul changed structure in Synonyms only mode".to_string());
     }
     Ok(replacement)
 }
