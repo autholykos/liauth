@@ -185,6 +185,26 @@ mod tests {
     };
 
     #[test]
+    fn similarity_flags_near_verbatim_replies() {
+        let src = "Perché era vera, quella parte. Ellen lo sapeva meglio di chiunque.";
+        assert!(super::similarity(src, src) > 0.999);
+        assert!(super::similarity(src, "Perché era vera, quella parte. Ellen lo sapeva meglio di chiunque altro.") > 0.95);
+        assert!(super::similarity(src, "Quella parte era vera, e nessuno lo sapeva quanto Ellen.") < 0.8);
+    }
+
+    #[test]
+    fn rephrase_reply_tolerates_unescaped_inner_quotes() {
+        let strict = r#"{"replacement": "Lui fa cose che non si imparano."}"#;
+        assert_eq!(super::parse_rephrase_reply(strict).as_deref(), Some("Lui fa cose che non si imparano."));
+        let sloppy = r#"Ecco: {"replacement": "Disse "basta" e uscì."}"#;
+        assert_eq!(super::parse_rephrase_reply(sloppy).as_deref(), Some(r#"Disse "basta" e uscì."#));
+        let escaped = r#"{"replacement": "Disse "basta".
+Poi uscì."}"#;
+        assert_eq!(super::parse_rephrase_reply(escaped).as_deref(), Some("Disse \"basta\".\nPoi uscì."));
+        assert!(super::parse_rephrase_reply("nessun json qui").is_none());
+    }
+
+    #[test]
     fn note_requests_use_raul() {
         assert_eq!(super::MODEL, "raul");
     }
@@ -477,9 +497,76 @@ fn contains_critic_markup(text: &str) -> bool {
 fn parse_rephrase_reply(content: &str) -> Option<String> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
-    serde_json::from_str::<RephraseReply>(&content[start..=end])
-        .ok()
-        .map(|reply| reply.replacement)
+    if let Ok(reply) = serde_json::from_str::<RephraseReply>(&content[start..=end]) {
+        return Some(reply.replacement);
+    }
+    // Raul occasionally leaves an inner double quote unescaped, which breaks
+    // strict JSON while the payload is still unambiguous: take everything
+    // between the opening quote after `"replacement":` and the last quote
+    // before the closing brace, then undo the JSON escapes it did apply.
+    let body = &content[start..=end];
+    let key = body.find("\"replacement\"")?;
+    let colon = key + body[key..].find(':')?;
+    let open = colon + body[colon..].find('"')?;
+    let close = body[..end - start].rfind('"')?;
+    if close <= open {
+        return None;
+    }
+    let raw = &body[open + 1..close];
+    Some(
+        raw.replace("\\\"", "\"")
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\\\", "\\"),
+    )
+}
+
+/// Character-level similarity in [0, 1]: 2·LCS / (|a| + |b|). Cheap enough
+/// for paragraph-sized selections and good at spotting a reply that merely
+/// echoes the source with a word or two swapped.
+fn similarity(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for &ca in &a {
+        for (j, &cb) in b.iter().enumerate() {
+            cur[j + 1] = if ca == cb { prev[j] + 1 } else { prev[j + 1].max(cur[j]) };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    2.0 * prev[b.len()] as f64 / (a.len() + b.len()) as f64
+}
+
+/// One chat call; returns the assistant text.
+async fn chat_once(prompt: &str, temperature: f64) -> Result<String, String> {
+    let body = serde_json::json!({
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": 4096,
+    });
+    ensure_tls();
+    let response = reqwest::Client::new()
+        .post(ENDPOINT)
+        .timeout(std::time::Duration::from_secs(600))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("model request failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("model request failed: {e}"))?
+        .json::<ChatResponse>()
+        .await
+        .map_err(|e| format!("bad model response: {e}"))?;
+    Ok(response
+        .choices
+        .first()
+        .map(|choice| choice.message.content.clone())
+        .unwrap_or_default())
 }
 
 /// Rephrase one selected passage. Liauth supplies only surrounding context;
@@ -534,48 +621,57 @@ pub async fn rephrase_selection(
          Riscrivi soltanto il TESTO SELEZIONATO seguendo l'istruzione dell'autore. \
          Se l'istruzione chiede una riscrittura creativa, radicale o una struttura diversa, cambia davvero la costruzione della frase: non riutilizzare le stesse coppie verbo-oggetto, non ricalcare l'ordine delle proposizioni, non limitarti a sostituire una parola. \
          Conserva il senso, i nomi, la lingua, il tempo verbale e lo stile delle citazioni; segui la guida di voce quando c'è. \
+         Il testo può provenire da un'opera che conosci: non riprodurlo a memoria, la riscrittura deve differire dall'originale. \
          Non aggiungere CriticMarkup. \
          Rispondi SOLO con un oggetto JSON della forma {{\"replacement\": \"<testo riscritto>\"}}, senza commenti né recinti markdown."
     );
     // No response_format: the raul lane (mlx_lm.server) has no grammar
     // decoding and the router fails closed on json_schema requests, so the
     // schema travels in the prompt and parse_rephrase_reply stays tolerant.
-    let body = serde_json::json!({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        // 0.2 collapsed onto the most probable continuation, i.e. the
-        // original sentence with one synonym; 0.7 is where Raul actually
-        // restructures. Synonym-only edits keep a low temperature because
-        // their structure is checked after the fact.
-        "temperature": if preset == "synonyms_only" { 0.3 } else { 0.7 },
-        "max_tokens": 4096,
-    });
-    ensure_tls();
-    let response = reqwest::Client::new()
-        .post(ENDPOINT)
-        .timeout(std::time::Duration::from_secs(600))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("model request failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("model request failed: {e}"))?
-        .json::<ChatResponse>()
-        .await
-        .map_err(|e| format!("bad model response: {e}"))?;
-    let content = response
-        .choices
-        .first()
-        .map(|choice| choice.message.content.as_str())
-        .unwrap_or("");
-    let replacement = parse_rephrase_reply(content)
-        .ok_or_else(|| "model reply contained no valid replacement".to_string())?;
-    if replacement.trim().is_empty() {
-        return Err("model returned an empty replacement".to_string());
+    //
+    // 0.2 collapsed onto the most probable continuation, i.e. the original
+    // sentence with one synonym; 0.7 is where Raul actually restructures.
+    // Synonym-only edits keep a low temperature because their structure is
+    // checked after the fact.
+    let base_temperature = if preset == "synonyms_only" { 0.3 } else { 0.7 };
+    // Raul was fine-tuned on the author's own corpus and, asked to rephrase
+    // a passage it has memorized, tends to hand it back verbatim. One retry
+    // at a higher temperature with an explicit "differ from the source"
+    // nudge recovers most of those; an unparsable reply gets the same retry.
+    let mut replacement: Option<String> = None;
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        let (prompt_now, temperature) = if attempt == 0 {
+            (prompt.clone(), base_temperature)
+        } else {
+            (
+                format!(
+                    "{prompt}\n\nLa proposta precedente coincideva con l'originale o non era leggibile. \
+                     Proponi ORA una versione sensibilmente diversa nella costruzione delle frasi, \
+                     con lo stesso senso e gli stessi nomi. Non ripetere l'originale."
+                ),
+                if preset == "synonyms_only" { 0.5 } else { 0.9 },
+            )
+        };
+        let content = chat_once(&prompt_now, temperature).await?;
+        let Some(candidate) = parse_rephrase_reply(&content) else {
+            last_err = "model reply contained no valid replacement".to_string();
+            continue;
+        };
+        if candidate.trim().is_empty() {
+            last_err = "model returned an empty replacement".to_string();
+            continue;
+        }
+        if candidate == selection
+            || (preset != "synonyms_only" && similarity(&candidate, &selection) > 0.95)
+        {
+            last_err = "model returned the original text unchanged".to_string();
+            continue;
+        }
+        replacement = Some(candidate);
+        break;
     }
-    if replacement == selection {
-        return Err("model returned the original text unchanged".to_string());
-    }
+    let replacement = replacement.ok_or(last_err)?;
     if contains_critic_markup(&replacement) {
         return Err("model replacement contains CriticMarkup".to_string());
     }
