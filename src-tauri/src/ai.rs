@@ -503,10 +503,12 @@ fn contains_critic_markup(text: &str) -> bool {
 
 fn parse_rephrase_reply(content: &str) -> Option<String> {
     let start = content.find('{')?;
-    if let Some(end) = content.rfind('}')
-        && let Ok(reply) = serde_json::from_str::<RephraseReply>(&content[start..=end])
-    {
-        return Some(reply.replacement);
+    if let Some(end) = content.rfind('}') {
+        if end > start {
+            if let Ok(reply) = serde_json::from_str::<RephraseReply>(&content[start..=end]) {
+                return Some(reply.replacement);
+            }
+        }
     }
     // Raul occasionally leaves an inner double quote unescaped, or — when it
     // samples an early end-of-turn — stops before the closing `"}`. Both
