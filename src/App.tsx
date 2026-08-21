@@ -33,6 +33,7 @@ import {
   buildAppMenu,
   showEditorSelectionMenu,
   showNavigatorFileMenu,
+  showNavigatorFolderMenu,
   type NavigatorFileAction,
 } from "./menu";
 import { CommandPalette, PaletteCommand } from "./CommandPalette";
@@ -228,7 +229,13 @@ function App() {
   const [navOpen, setNavOpen] = useState(
     () => localStorage.getItem("liauth.nav") === "1",
   );
+  const [showHiddenFiles, setShowHiddenFiles] = useState(
+    () => localStorage.getItem("liauth.hiddenFiles") === "1",
+  );
   const [project, setProject] = useState<api.ProjectFiles | null>(null);
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(
+    () => new Set(),
+  );
   const projectRequestRef = useRef(0);
   const [fileClipboard, setFileClipboard] = useState<FileClipboard | null>(
     null,
@@ -464,6 +471,13 @@ function App() {
     localStorage.setItem("liauth.nav", navOpen ? "1" : "0");
   }, [navOpen]);
 
+  useEffect(() => {
+    localStorage.setItem(
+      "liauth.hiddenFiles",
+      showHiddenFiles ? "1" : "0",
+    );
+  }, [showHiddenFiles]);
+
   const refreshProject = useCallback(
     async (anchor: string | null) => {
       const request = ++projectRequestRef.current;
@@ -472,14 +486,18 @@ function App() {
         return;
       }
       try {
-        const next = await api.listProjectFiles(anchor);
+        const next = await api.listProjectFiles(anchor, showHiddenFiles);
         if (request === projectRequestRef.current) setProject(next);
       } catch {
         if (request === projectRequestRef.current) setProject(null);
       }
     },
-    [navOpen],
+    [navOpen, showHiddenFiles],
   );
+
+  useEffect(() => {
+    setCollapsedDirs(new Set());
+  }, [project?.root]);
 
   // Navigator contents: the markdown files of the document's project
   // (its git repo, or just its folder when unversioned). Re-roots when
@@ -1049,6 +1067,25 @@ function App() {
       deleteNavigatorFile,
       flash,
     ],
+  );
+
+  const toggleNavigatorFolder = useCallback((dir: string) => {
+    setCollapsedDirs((current) => {
+      const next = new Set(current);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+  }, []);
+
+  const openNavigatorFolderMenu = useCallback(
+    (dir: string) => {
+      void showNavigatorFolderMenu(
+        () => toggleNavigatorFolder(dir),
+        collapsedDirs.has(dir),
+      ).catch((e) => flash(`Could not open folder menu: ${e}`));
+    },
+    [collapsedDirs, toggleNavigatorFolder, flash],
   );
 
   const resolveExternal = useCallback(
@@ -1748,6 +1785,9 @@ function App() {
         case "toggle-nav":
           setNavOpen((v) => !v);
           break;
+        case "toggle-hidden-files":
+          setShowHiddenFiles((visible) => !visible);
+          break;
         case "enable-versioning":
           void enableVersioning();
           break;
@@ -1792,6 +1832,7 @@ function App() {
       pageLayout,
       room,
       navOpen,
+      showHiddenFiles,
       versioned,
       panel,
       recents,
@@ -1804,6 +1845,7 @@ function App() {
     pageLayout,
     room,
     navOpen,
+    showHiddenFiles,
     versioned,
     panel,
     recents,
@@ -1852,6 +1894,12 @@ function App() {
       id: "toggle-nav",
       title: navOpen ? "Hide Files Sidebar" : "Show Files Sidebar",
       shortcut: "⇧⌘B",
+    },
+    {
+      id: "toggle-hidden-files",
+      title: showHiddenFiles
+        ? "Hide Hidden Files and Folders"
+        : "Show Hidden Files and Folders",
     },
     { id: "panel-notes", title: "Toggle Notes Panel" },
     { id: "panel-help", title: "Help" },
@@ -1992,18 +2040,18 @@ function App() {
             ) : null}
             <ul className="nav-list">
               {(project?.files ?? []).map((f, i, all) => {
-                const cut = Math.max(
-                  f.rel.lastIndexOf("/"),
-                  f.rel.lastIndexOf("\\"),
-                );
-                const dir = cut >= 0 ? f.rel.slice(0, cut) : "";
-                const name = cut >= 0 ? f.rel.slice(cut + 1) : f.rel;
-                const prev = i > 0 ? all[i - 1].rel : "";
-                const prevCut = Math.max(
-                  prev.lastIndexOf("/"),
-                  prev.lastIndexOf("\\"),
-                );
+                const rel = f.rel.replace(/\\/g, "/");
+                const cut = rel.lastIndexOf("/");
+                const dir = cut >= 0 ? rel.slice(0, cut) : "";
+                const name = cut >= 0 ? rel.slice(cut + 1) : rel;
+                const prev = i > 0 ? all[i - 1].rel.replace(/\\/g, "/") : "";
+                const prevCut = prev.lastIndexOf("/");
                 const prevDir = prevCut >= 0 ? prev.slice(0, prevCut) : "";
+                const hiddenByCollapsedParent = [...collapsedDirs].some(
+                  (parent) => dir.startsWith(`${parent}/`),
+                );
+                if (hiddenByCollapsedParent) return null;
+                const collapsed = collapsedDirs.has(dir);
                 const hasNotes =
                   f.path === filePath ? notes.length > 0 : f.has_notes;
                 const cls = [
@@ -2020,28 +2068,44 @@ function App() {
                 return (
                   <Fragment key={f.path}>
                     {dir && dir !== prevDir ? (
-                      <li className="nav-dir">{dir}/</li>
+                      <li
+                        className="nav-dir"
+                        title={`${collapsed ? "Expand" : "Collapse"} ${dir}`}
+                        aria-expanded={!collapsed}
+                        onClick={() => toggleNavigatorFolder(dir)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          openNavigatorFolderMenu(dir);
+                        }}
+                      >
+                        <span className="nav-dir-chevron" aria-hidden="true">
+                          {collapsed ? "▸" : "▾"}
+                        </span>
+                        {dir}/
+                      </li>
                     ) : null}
-                    <li
-                      className={cls}
-                      title={`${f.rel}${hasNotes ? " — unresolved notes" : ""}`}
-                      onClick={() => {
-                        if (f.path !== filePath) void openPath(f.path);
-                      }}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        openNavigatorFileMenu(f);
-                      }}
-                    >
-                      <span className="nav-file-name">{name}</span>
-                      {hasNotes ? (
-                        <span
-                          className="nav-note-dot"
-                          title="Contains unresolved notes"
-                          aria-label="Contains unresolved notes"
-                        />
-                      ) : null}
-                    </li>
+                    {!collapsed ? (
+                      <li
+                        className={cls}
+                        title={`${f.rel}${hasNotes ? " — unresolved notes" : ""}`}
+                        onClick={() => {
+                          if (f.path !== filePath) void openPath(f.path);
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          openNavigatorFileMenu(f);
+                        }}
+                      >
+                        <span className="nav-file-name">{name}</span>
+                        {hasNotes ? (
+                          <span
+                            className="nav-note-dot"
+                            title="Contains unresolved notes"
+                            aria-label="Contains unresolved notes"
+                          />
+                        ) : null}
+                      </li>
+                    ) : null}
                   </Fragment>
                 );
               })}

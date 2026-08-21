@@ -400,14 +400,19 @@ button.wide {
 }
 
 .nav-list li.nav-dir {
-  cursor: default;
   color: var(--c-muted);
   font-size: 11.5px;
   padding: 8px 4px 2px;
+  user-select: none;
 }
 
 .nav-list li.nav-dir:hover {
-  background: none;
+  background: var(--c-bg);
+}
+
+.nav-dir-chevron {
+  display: inline-block;
+  width: 13px;
 }
 
 .side-panel h3 {

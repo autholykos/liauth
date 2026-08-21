@@ -20,6 +20,7 @@ export interface MenuSnapshot {
   pageLayout: boolean;
   room: boolean;
   navOpen: boolean;
+  showHiddenFiles: boolean;
   versioned: boolean;
   panel: string;
   recents: string[];
@@ -59,6 +60,26 @@ export async function showNavigatorFileMenu(
   items.push(await sep(), await item("delete", "Delete"));
 
   const menu = await Menu.new({ items });
+  try {
+    await menu.popup();
+  } finally {
+    await menu.close().catch(() => {});
+  }
+}
+
+export async function showNavigatorFolderMenu(
+  toggle: () => void,
+  collapsed: boolean,
+): Promise<void> {
+  const menu = await Menu.new({
+    items: [
+      await MenuItem.new({
+        id: "navigator-toggle-folder",
+        text: collapsed ? "Expand Folder" : "Collapse Folder",
+        action: toggle,
+      }),
+    ],
+  });
   try {
     await menu.popup();
   } finally {
@@ -226,6 +247,11 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
         "Files Sidebar",
         s.navOpen,
         "CmdOrCtrl+Shift+B",
+      ),
+      await check(
+        "toggle-hidden-files",
+        "Show Hidden Files and Folders",
+        s.showHiddenFiles,
       ),
       await check(
         "toggle-lines",
