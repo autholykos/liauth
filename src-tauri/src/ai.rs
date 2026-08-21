@@ -33,11 +33,8 @@ pub struct RephraseSkill {
     pub name: String,
     pub estimated_tokens: usize,
     pub available: bool,
-}
-
-struct LoadedRephraseSkill {
-    info: RephraseSkill,
-    instructions: String,
+    /// The skill body, which the dialog prefills as the rephrase direction.
+    pub instructions: String,
 }
 
 #[derive(Deserialize)]
@@ -86,11 +83,7 @@ fn find_voice(repo_root: &str) -> Option<String> {
     None
 }
 
-fn valid_skill_id(id: &str) -> bool {
-    !id.is_empty() && id != "." && id != ".." && !id.contains('/') && !id.contains('\\')
-}
-
-fn parse_rephrase_skill(id: &str, content: String) -> Option<LoadedRephraseSkill> {
+fn parse_rephrase_skill(id: &str, content: String) -> Option<RephraseSkill> {
     let normalized = content.replace("\r\n", "\n");
     let rest = normalized.strip_prefix("---\n")?;
     let boundary = rest.find("\n---")?;
@@ -122,35 +115,13 @@ fn parse_rephrase_skill(id: &str, content: String) -> Option<LoadedRephraseSkill
     // Raul exposes no tokenizer endpoint. Three UTF-8 bytes per token is a
     // deliberately conservative estimate for short Italian/English skills.
     let estimated_tokens = instructions.len().div_ceil(3);
-    Some(LoadedRephraseSkill {
-        info: RephraseSkill {
-            id: id.to_string(),
-            name,
-            estimated_tokens,
-            available: estimated_tokens <= MAX_REPHRASE_SKILL_TOKENS,
-        },
+    Some(RephraseSkill {
+        id: id.to_string(),
+        name,
+        estimated_tokens,
+        available: estimated_tokens <= MAX_REPHRASE_SKILL_TOKENS,
         instructions,
     })
-}
-
-fn load_rephrase_skill_from_root(
-    root: &std::path::Path,
-    id: &str,
-) -> Result<LoadedRephraseSkill, String> {
-    if !valid_skill_id(id) {
-        return Err("invalid rephrase skill id".to_string());
-    }
-    let path = root.join(".liauth/skills").join(id).join("SKILL.md");
-    let content =
-        read_contained(root, &path).ok_or_else(|| format!("rephrase skill not found: {id}"))?;
-    let skill =
-        parse_rephrase_skill(id, content).ok_or_else(|| format!("{id} is not a rephrase skill"))?;
-    if !skill.info.available {
-        return Err(format!(
-            "rephrase skill {id} exceeds {MAX_REPHRASE_SKILL_TOKENS} estimated tokens"
-        ));
-    }
-    Ok(skill)
 }
 
 #[tauri::command]
@@ -169,7 +140,6 @@ pub fn list_rephrase_skills(repo_root: String) -> Result<Vec<RephraseSkill>, Str
             let path = root.join(".liauth/skills").join(&id).join("SKILL.md");
             read_contained(&root, &path)
                 .and_then(|text| parse_rephrase_skill(&id, text))
-                .map(|skill| skill.info)
         })
         .collect::<Vec<_>>();
     skills.sort_by_key(|skill| skill.name.to_lowercase());
@@ -179,9 +149,8 @@ pub fn list_rephrase_skills(repo_root: String) -> Result<Vec<RephraseSkill>, Str
 #[cfg(test)]
 mod tests {
     use super::{
-        builtin_rephrase_instruction, find_voice, lexical_layout, list_rephrase_skills,
-        load_rephrase_skill_from_root, parse_rephrase_reply, parse_rephrase_skill,
-        MAX_REPHRASE_SKILL_TOKENS,
+        find_voice, lexical_layout, list_rephrase_skills, parse_rephrase_reply,
+        parse_rephrase_skill, MAX_REPHRASE_SKILL_TOKENS,
     };
 
     #[test]
@@ -224,16 +193,7 @@ Poi uscì."}"#;
     }
 
     #[test]
-    fn built_in_rephrase_presets_and_reply_shape_are_stable() {
-        for preset in [
-            "more_concise",
-            "more_vivid",
-            "simplify_syntax",
-            "humanize",
-            "synonyms_only",
-        ] {
-            assert!(builtin_rephrase_instruction(preset).is_some());
-        }
+    fn rephrase_reply_shape_is_stable() {
         assert_eq!(
             parse_rephrase_reply("```json\n{\"replacement\":\"Più nitido.\"}\n```"),
             Some("Più nitido.".to_string())
@@ -248,8 +208,9 @@ Poi uscì."}"#;
                 .to_string(),
         )
         .unwrap();
-        assert_eq!(skill.info.name, "More subtext");
-        assert!(skill.info.available);
+        assert_eq!(skill.name, "More subtext");
+        assert!(skill.available);
+        assert_eq!(skill.instructions, "Imply more than the dialogue states.");
 
         let oversized = parse_rephrase_skill(
             "long",
@@ -259,7 +220,7 @@ Poi uscì."}"#;
             ),
         )
         .unwrap();
-        assert!(!oversized.info.available);
+        assert!(!oversized.available);
     }
 
     #[test]
@@ -291,8 +252,6 @@ Poi uscì."}"#;
         )
         .unwrap();
         std::os::unix::fs::symlink(&outside, repo.join(".liauth/skills/escape")).unwrap();
-        let root = std::fs::canonicalize(&repo).unwrap();
-        assert!(load_rephrase_skill_from_root(&root, "escape").is_err());
         assert!(list_rephrase_skills(repo.display().to_string())
             .unwrap()
             .is_empty());
@@ -447,27 +406,6 @@ pub async fn draft_note_edits(
         .map(|c| c.message.content.as_str())
         .unwrap_or("");
     parse_edits(content).ok_or_else(|| "model reply contained no JSON edit list".to_string())
-}
-
-fn builtin_rephrase_instruction(preset: &str) -> Option<&'static str> {
-    match preset {
-        "more_concise" => Some(
-            "Elimina le ridondanze e accorcia il testo senza perdere informazioni né tono.",
-        ),
-        "more_vivid" => Some(
-            "Preferisci sostantivi concreti, verbi attivi e immagini sensoriali, senza inventare fatti.",
-        ),
-        "simplify_syntax" => Some(
-            "Riduci la complessità sintattica e le subordinate conservando voce e significato.",
-        ),
-        "humanize" => Some(
-            "Togli le formule generiche e di maniera, migliora ritmo e idiosincrasia naturali. Non introdurre errori e non cercare di eludere rilevatori.",
-        ),
-        "synonyms_only" => Some(
-            "Sostituisci soltanto singole parole. Conserva ordine delle parole, sintassi, punteggiatura, spazi e numero di frasi.",
-        ),
-        _ => None,
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -634,13 +572,16 @@ async fn chat_once(prompt: &str, temperature: f64) -> Result<String, String> {
 
 /// Rephrase one selected passage. Liauth supplies only surrounding context;
 /// Raul returns one replacement that the frontend stages as CriticMarkup.
+/// The direction is the whole instruction: presets and project skills are
+/// prefilled into it by the dialog, so the author always sees and can edit
+/// exactly what the model receives. `synonyms_only` only tightens sampling
+/// and enables the structural check; it carries no extra prompt text.
 #[tauri::command]
 pub async fn rephrase_selection(
     selection: String,
     context: String,
     direction: String,
-    preset: String,
-    skill_id: Option<String>,
+    synonyms_only: bool,
     repo_root: Option<String>,
 ) -> Result<String, String> {
     if selection.trim().is_empty() {
@@ -652,33 +593,17 @@ pub async fn rephrase_selection(
     if direction.len() > 4096 {
         return Err("rephrase direction is too long".to_string());
     }
-    let mode = if preset == "skill" {
-        let root = repo_root
-            .as_deref()
-            .ok_or_else(|| "custom rephrase skills require a project".to_string())?;
-        let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-        let id = skill_id
-            .as_deref()
-            .ok_or_else(|| "choose a rephrase skill".to_string())?;
-        load_rephrase_skill_from_root(&root, id)?.instructions
-    } else {
-        builtin_rephrase_instruction(&preset)
-            .ok_or_else(|| format!("unknown rephrase preset: {preset}"))?
-            .to_string()
-    };
+    let direction = direction.trim().to_string();
+    if direction.is_empty() {
+        return Err("write a rephrase direction or pick a preset".to_string());
+    }
     let voice = repo_root
         .as_deref()
         .and_then(find_voice)
         .map(|text| format!("VOICE GUIDE:\n{text}\n\n"))
         .unwrap_or_default();
-    let direction = if direction.trim().is_empty() {
-        "Nessuna istruzione aggiuntiva: applica la modalità di riformulazione.".to_string()
-    } else {
-        direction.trim().to_string()
-    };
     let prompt = format!(
-        "{voice}ISTRUZIONE DELL'AUTORE (ha la precedenza su tutto il resto):\n{direction}\n\n\
-         MODALITÀ DI RIFORMULAZIONE:\n{mode}\n\n\
+        "{voice}ISTRUZIONE DELL'AUTORE:\n{direction}\n\n\
          CONTESTO CIRCOSTANTE (solo per orientarti, non riscriverlo):\n{context}\n\n\
          TESTO SELEZIONATO:\n{selection}\n\n\
          Riscrivi soltanto il TESTO SELEZIONATO seguendo l'istruzione dell'autore. \
@@ -696,7 +621,7 @@ pub async fn rephrase_selection(
     // sentence with one synonym; 0.7 is where Raul actually restructures.
     // Synonym-only edits keep a low temperature because their structure is
     // checked after the fact.
-    let base_temperature = if preset == "synonyms_only" { 0.3 } else { 0.7 };
+    let base_temperature = if synonyms_only { 0.3 } else { 0.7 };
     // Raul was fine-tuned on the author's own corpus and, asked to rephrase
     // a passage it has memorized, tends to hand it back verbatim. One retry
     // at a higher temperature with an explicit "differ from the source"
@@ -713,7 +638,7 @@ pub async fn rephrase_selection(
                      Proponi ORA una versione sensibilmente diversa nella costruzione delle frasi, \
                      con lo stesso senso e gli stessi nomi. Non ripetere l'originale."
                 ),
-                if preset == "synonyms_only" { 0.5 } else { 0.8 },
+                if synonyms_only { 0.5 } else { 0.8 },
             )
         };
         let content = chat_once(&prompt_now, temperature).await?;
@@ -730,7 +655,7 @@ pub async fn rephrase_selection(
             continue;
         }
         if candidate == selection
-            || (preset != "synonyms_only" && similarity(&candidate, &selection) > 0.95)
+            || (!synonyms_only && similarity(&candidate, &selection) > 0.95)
         {
             last_err = "model returned the original text unchanged".to_string();
             continue;
@@ -742,7 +667,7 @@ pub async fn rephrase_selection(
     if contains_critic_markup(&replacement) {
         return Err("model replacement contains CriticMarkup".to_string());
     }
-    if preset == "synonyms_only" && lexical_layout(&replacement) != lexical_layout(&selection) {
+    if synonyms_only && lexical_layout(&replacement) != lexical_layout(&selection) {
         return Err("Raul changed structure in Synonyms only mode".to_string());
     }
     Ok(replacement)

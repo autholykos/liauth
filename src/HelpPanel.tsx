@@ -94,8 +94,9 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
           asks the model to turn a prose note into suggestions to accept or
           reject — one undo reverts the whole batch. To stage a directed Raul
           rewrite, select prose, right-click it, and choose{" "}
-          <strong>Rephrase with Raul…</strong>; built-in and project-skill
-          presets produce the same accept/reject suggestions. Rephrase skills
+          <strong>Rephrase with Raul…</strong>. Presets and project skills
+          prefill the direction, which you can edit before sending; the model
+          receives exactly that text. Rephrase skills
           live at <code>.liauth/skills/&lt;name&gt;/SKILL.md</code>, opt in with{" "}
           <code>liauth-action: rephrase</code>, and have a 1,024-token-equivalent
           limit. PDF export strips comments and keeps the original text of
