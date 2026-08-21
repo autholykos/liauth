@@ -207,6 +207,13 @@ Poi uscì."}"#;
             super::parse_rephrase_reply(truncated).as_deref(),
             Some("Perché era la verità. Quella era la parte vera, mentre lui si lasciava andare:")
         );
+        let guillemets = "{\"replacement\": «Ellen lo guardò. Disse: “basta”. Poi uscì.»}";
+        assert_eq!(
+            super::parse_rephrase_reply(guillemets).as_deref(),
+            Some("Ellen lo guardò. Disse: “basta”. Poi uscì.")
+        );
+        let curly = "{\"replacement\": “Frase con «citazione» dentro.”}";
+        assert_eq!(super::parse_rephrase_reply(curly).as_deref(), Some("Frase con «citazione» dentro."));
         let dangling_quote = r#"{"replacement": "Finisce qui.""#;
         assert_eq!(super::parse_rephrase_reply(dangling_quote).as_deref(), Some("Finisce qui."));
     }
@@ -515,13 +522,24 @@ fn parse_rephrase_reply(content: &str) -> Option<String> {
     // leave the payload unambiguous: take everything after the opening quote
     // that follows `"replacement":`, drop whatever closing `"}` fragment is
     // present, and undo the JSON escapes it did apply.
+    // With a voice guide that prescribes Italian typographic quotes, Raul
+    // also applies them to the JSON value: `{"replacement": «testo»}`. Accept
+    // «…», “…” and "…" as the value delimiters.
     let body = &content[start..];
     let key = body.find("\"replacement\"")?;
     let colon = key + body[key..].find(':')?;
-    let open = colon + body[colon..].find('"')?;
-    let mut raw = body[open + 1..].trim_end();
+    let after = &body[colon + 1..];
+    let lead = after.len() - after.trim_start().len();
+    let (open_ch, close_ch) = match after.trim_start().chars().next()? {
+        '«' => ('«', '»'),
+        '“' => ('“', '”'),
+        '"' => ('"', '"'),
+        _ => return None,
+    };
+    let open = colon + 1 + lead + open_ch.len_utf8();
+    let mut raw = body[open..].trim_end();
     raw = raw.strip_suffix('}').unwrap_or(raw).trim_end();
-    raw = raw.strip_suffix('"').unwrap_or(raw);
+    raw = raw.strip_suffix(close_ch).unwrap_or(raw);
     if raw.trim().is_empty() {
         return None;
     }
@@ -557,6 +575,33 @@ fn similarity(a: &str, b: &str) -> f64 {
         std::mem::swap(&mut prev, &mut cur);
     }
     2.0 * prev[b.len()] as f64 / (a.len() + b.len()) as f64
+}
+
+/// Append an unparsable rephrase reply to a local log so the failure can be
+/// diagnosed from the real model output instead of a reconstruction. Best
+/// effort: logging must never turn a model failure into a different error.
+fn log_rephrase_failure(attempt: usize, temperature: f64, content: &str) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::PathBuf::from(home).join("Library/Logs/Liauth");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = format!(
+        "=== {ts} attempt={attempt} temperature={temperature} bytes={}\n{content}\n\n",
+        content.len()
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("rephrase-failures.log"))
+    {
+        use std::io::Write;
+        let _ = f.write_all(entry.as_bytes());
+    }
 }
 
 /// One chat call; returns the assistant text.
@@ -641,7 +686,7 @@ pub async fn rephrase_selection(
          Conserva il senso, i nomi, la lingua, il tempo verbale e lo stile delle citazioni; segui la guida di voce quando c'è. \
          Il testo può provenire da un'opera che conosci: non riprodurlo a memoria, la riscrittura deve differire dall'originale. \
          Non aggiungere CriticMarkup. \
-         Rispondi SOLO con un oggetto JSON della forma {{\"replacement\": \"<testo riscritto>\"}}, senza commenti né recinti markdown."
+         Rispondi SOLO con un oggetto JSON della forma {{\"replacement\": \"<testo riscritto>\"}}, con le virgolette dritte ASCII (\") come delimitatori JSON anche se il testo usa le virgolette basse; senza commenti né recinti markdown."
     );
     // No response_format: the raul lane (mlx_lm.server) has no grammar
     // decoding and the router fails closed on json_schema requests, so the
@@ -673,7 +718,11 @@ pub async fn rephrase_selection(
         };
         let content = chat_once(&prompt_now, temperature).await?;
         let Some(candidate) = parse_rephrase_reply(&content) else {
-            last_err = "model reply contained no valid replacement".to_string();
+            log_rephrase_failure(attempt, temperature, &content);
+            let snippet: String = content.chars().take(160).collect();
+            last_err = format!(
+                "model reply contained no valid replacement (raw reply logged to ~/Library/Logs/Liauth/rephrase-failures.log): {snippet}"
+            );
             continue;
         };
         if candidate.trim().is_empty() {
