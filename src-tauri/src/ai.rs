@@ -202,6 +202,13 @@ mod tests {
 Poi uscì."}"#;
         assert_eq!(super::parse_rephrase_reply(escaped).as_deref(), Some("Disse \"basta\".\nPoi uscì."));
         assert!(super::parse_rephrase_reply("nessun json qui").is_none());
+        let truncated = r#"{"replacement": "Perché era la verità. Quella era la parte vera, mentre lui si lasciava andare:"#;
+        assert_eq!(
+            super::parse_rephrase_reply(truncated).as_deref(),
+            Some("Perché era la verità. Quella era la parte vera, mentre lui si lasciava andare:")
+        );
+        let dangling_quote = r#"{"replacement": "Finisce qui.""#;
+        assert_eq!(super::parse_rephrase_reply(dangling_quote).as_deref(), Some("Finisce qui."));
     }
 
     #[test]
@@ -496,27 +503,36 @@ fn contains_critic_markup(text: &str) -> bool {
 
 fn parse_rephrase_reply(content: &str) -> Option<String> {
     let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    if let Ok(reply) = serde_json::from_str::<RephraseReply>(&content[start..=end]) {
+    if let Some(end) = content.rfind('}')
+        && let Ok(reply) = serde_json::from_str::<RephraseReply>(&content[start..=end])
+    {
         return Some(reply.replacement);
     }
-    // Raul occasionally leaves an inner double quote unescaped, which breaks
-    // strict JSON while the payload is still unambiguous: take everything
-    // between the opening quote after `"replacement":` and the last quote
-    // before the closing brace, then undo the JSON escapes it did apply.
-    let body = &content[start..=end];
+    // Raul occasionally leaves an inner double quote unescaped, or — when it
+    // samples an early end-of-turn — stops before the closing `"}`. Both
+    // leave the payload unambiguous: take everything after the opening quote
+    // that follows `"replacement":`, drop whatever closing `"}` fragment is
+    // present, and undo the JSON escapes it did apply.
+    let body = &content[start..];
     let key = body.find("\"replacement\"")?;
     let colon = key + body[key..].find(':')?;
     let open = colon + body[colon..].find('"')?;
-    let close = body[..end - start].rfind('"')?;
-    if close <= open {
+    let mut raw = body[open + 1..].trim_end();
+    raw = raw.strip_suffix('}').unwrap_or(raw).trim_end();
+    raw = raw.strip_suffix('"').unwrap_or(raw);
+    if raw.trim().is_empty() {
         return None;
     }
-    let raw = &body[open + 1..close];
     Some(
         raw.replace("\\\"", "\"")
             .replace("\\n", "\n")
             .replace("\\t", "\t")
+            .replace("\\u00f9", "ù")
+            .replace("\\u00e0", "à")
+            .replace("\\u00e8", "è")
+            .replace("\\u00e9", "é")
+            .replace("\\u00ec", "ì")
+            .replace("\\u00f2", "ò")
             .replace("\\\\", "\\"),
     )
 }
@@ -650,7 +666,7 @@ pub async fn rephrase_selection(
                      Proponi ORA una versione sensibilmente diversa nella costruzione delle frasi, \
                      con lo stesso senso e gli stessi nomi. Non ripetere l'originale."
                 ),
-                if preset == "synonyms_only" { 0.5 } else { 0.9 },
+                if preset == "synonyms_only" { 0.5 } else { 0.8 },
             )
         };
         let content = chat_once(&prompt_now, temperature).await?;
