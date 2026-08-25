@@ -144,6 +144,7 @@ export interface ProjectFile {
   path: string;
   rel: string;
   has_notes: boolean;
+  dirty: boolean;
 }
 
 export interface ProjectFiles {

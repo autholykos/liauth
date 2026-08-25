@@ -20,6 +20,7 @@ struct ProjectFile {
     path: String,
     rel: String,
     has_notes: bool,
+    dirty: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -93,6 +94,7 @@ fn collect_markdown(
                 path: p.display().to_string(),
                 rel,
                 has_notes,
+                dirty: false,
             });
         }
     }
@@ -111,12 +113,20 @@ fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFil
     } else {
         anchor.parent()?
     };
-    let root = git2::Repository::discover(parent)
-        .ok()
+    let repo = git2::Repository::discover(parent).ok();
+    let root = repo
+        .as_ref()
         .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
         .unwrap_or_else(|| parent.to_path_buf());
     let mut files = Vec::new();
     let truncated = collect_markdown(&root, &root, 0, show_hidden, &mut files);
+    if let Some(repo) = &repo {
+        for file in &mut files {
+            file.dirty = repo
+                .status_file(std::path::Path::new(&file.rel))
+                .is_ok_and(|status| status != git2::Status::CURRENT);
+        }
+    }
     // Root-level files first, then each subfolder as a group.
     files.sort_by(|a, b| {
         let dir = |f: &ProjectFile| {
@@ -469,6 +479,32 @@ mod tests {
                 .unwrap()
                 .has_notes
         );
+    }
+
+    #[test]
+    fn project_listing_marks_uncommitted_files_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let changed = dir.path().join("changed.md");
+        let clean = dir.path().join("clean.md");
+        let changed_path = p(&changed);
+        let clean_path = p(&clean);
+
+        git::init_repo(changed_path.clone()).unwrap();
+        git::save_document(changed_path.clone(), "committed\n".into(), None, true).unwrap();
+        git::save_document(clean_path.clone(), "clean\n".into(), None, true).unwrap();
+        git::save_document(changed_path.clone(), "autosaved\n".into(), None, false).unwrap();
+
+        let project = list_project_files(clean_path, false).unwrap();
+        let dirty = |rel: &str| {
+            project
+                .files
+                .iter()
+                .find(|file| file.rel == rel)
+                .unwrap()
+                .dirty
+        };
+        assert!(dirty("changed.md"));
+        assert!(!dirty("clean.md"));
     }
 
     #[test]
