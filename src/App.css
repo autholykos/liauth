@@ -373,6 +373,10 @@ button.wide {
   text-overflow: ellipsis;
 }
 
+.nav-file.dirty .nav-file-name {
+  font-style: italic;
+}
+
 .nav-note-dot {
   width: 7px;
   height: 7px;

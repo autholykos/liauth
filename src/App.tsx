@@ -822,11 +822,20 @@ function App() {
       );
       const info = await refreshGit(path);
       if (!diskDirtyRef.current) setDirty(info.file_dirty);
+      await refreshProject(path);
       if (!unwatchRef.current) await watchFile(path);
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
-  }, [filePath, viewing, openFolder, refreshGit, flash, watchFile]);
+  }, [
+    filePath,
+    viewing,
+    openFolder,
+    refreshGit,
+    refreshProject,
+    flash,
+    watchFile,
+  ]);
 
   const doSaveAs = useCallback(async () => {
     const view = viewRef.current;
@@ -2053,9 +2062,11 @@ function App() {
                 const collapsed = collapsedDirs.has(dir);
                 const hasNotes =
                   f.path === filePath ? notes.length > 0 : f.has_notes;
+                const isDirty = f.path === filePath ? dirty : f.dirty;
                 const cls = [
                   "nav-file",
                   f.path === filePath ? "selected" : "",
+                  isDirty ? "dirty" : "",
                   dir ? "nested" : "",
                   fileClipboard?.mode === "cut" &&
                   fileClipboard.path === f.path
@@ -2086,7 +2097,7 @@ function App() {
                     {!collapsed ? (
                       <li
                         className={cls}
-                        title={`${f.rel}${hasNotes ? " — unresolved notes" : ""}`}
+                        title={`${f.rel}${isDirty ? " — uncommitted changes" : ""}${hasNotes ? " — unresolved notes" : ""}`}
                         onClick={() => {
                           if (f.path !== filePath) void openPath(f.path);
                         }}
