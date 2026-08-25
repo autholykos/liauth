@@ -41,13 +41,16 @@ type VimDialogKeyHandler = (
 interface VimDialogOptions {
   onKeyDown?: VimDialogKeyHandler;
   onKeyUp?: VimDialogKeyHandler;
+  onClose?: (dialog: Element) => void;
+  closeOnBlur?: boolean;
   [key: string]: unknown;
 }
 
 /**
  * Disable browser completion and let the dialog adapter own its normal
  * keydown → accept → blur → close sequence. macOS completion can consume
- * Enter's keydown, so keyup supplies the same accept sequence as a fallback.
+ * Enter's keydown and move focus before keyup, so search prompts stay open on
+ * blur and a window-level keyup supplies the same accept sequence as fallback.
  */
 function installVimSearchPromptExitFix(): void {
   const openDialog = CodeMirror.prototype.openDialog;
@@ -62,59 +65,68 @@ function installVimSearchPromptExitFix(): void {
       return openDialog.call(this, template, callback, options);
     }
 
-    template.querySelector("input")?.setAttribute("autocomplete", "off");
+    const input = template.querySelector<HTMLInputElement>("input");
+    if (!input) return openDialog.call(this, template, callback, options);
+    input.setAttribute("autocomplete", "off");
     const promptOptions = options ?? {};
     const onKeyDown = promptOptions.onKeyDown;
-    const onKeyUp = promptOptions.onKeyUp;
+    const onClose = promptOptions.onClose;
     let finished = false;
     const accept = (value: string) => {
       if (finished) return;
       finished = true;
       callback?.(value);
     };
-    return openDialog.call(this, template, accept, {
+    let closeDialog: VimDialogClose = () => {};
+    const onWindowKeyUp = (event: KeyboardEvent) => {
+      if (!input.isConnected || !this.state.dialog?.contains(input)) {
+        window.removeEventListener("keyup", onWindowKeyUp, true);
+        return;
+      }
+      const acceptKey =
+        event.key === "Enter" ||
+        event.key === "Return" ||
+        event.code === "Enter" ||
+        event.code === "NumpadEnter" ||
+        event.keyCode === 13;
+      const cancelKey =
+        event.key === "Escape" ||
+        event.key === "Esc" ||
+        event.code === "Escape" ||
+        event.keyCode === 27;
+      if ((!acceptKey && !cancelKey) || finished) return;
+
+      if (cancelKey) {
+        finished = true;
+        if (onKeyDown) {
+          onKeyDown(event, input.value, closeDialog);
+        } else {
+          CodeMirror.e_stop(event);
+          closeDialog();
+          this.focus();
+        }
+        return;
+      }
+
+      try {
+        accept(input.value);
+      } finally {
+        input.blur();
+        CodeMirror.e_stop(event);
+        closeDialog();
+        this.focus();
+      }
+    };
+    closeDialog = openDialog.call(this, template, accept, {
       ...promptOptions,
-      onKeyUp: (
-        event: KeyboardEvent,
-        value: string,
-        close: VimDialogClose,
-      ): boolean | void => {
-        const acceptKey =
-          event.key === "Enter" ||
-          event.key === "Return" ||
-          event.code === "Enter" ||
-          event.code === "NumpadEnter" ||
-          event.keyCode === 13;
-        const cancelKey =
-          event.key === "Escape" ||
-          event.key === "Esc" ||
-          event.code === "Escape" ||
-          event.keyCode === 27;
-        if (!acceptKey && !cancelKey) {
-          return onKeyUp?.(event, value, close);
-        }
-        if (finished) return true;
-
-        if (cancelKey) {
-          finished = true;
-          if (onKeyDown) return onKeyDown(event, value, close) ?? true;
-          CodeMirror.e_stop(event);
-          close();
-          this.focus();
-          return true;
-        }
-
-        try {
-          accept(value);
-        } finally {
-          (event.target as HTMLInputElement | null)?.blur();
-          CodeMirror.e_stop(event);
-          close();
-          this.focus();
-        }
-        return true;
+      closeOnBlur: false,
+      onClose: (dialog: Element) => {
+        window.removeEventListener("keyup", onWindowKeyUp, true);
+        onClose?.(dialog);
       },
     });
+    window.addEventListener("keyup", onWindowKeyUp, true);
+    return closeDialog;
   };
 }
 
