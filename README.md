@@ -9,6 +9,10 @@ git engine for versioning and asynchronous review.
   markers (`#`, `**`, `` ` ``, `[]()`, `>`, `-`) render in place and reveal
   themselves only where your cursor is, Typora-style. Task-list checkboxes are
   clickable.
+- **Novel proofing** — **View > Novel Proof** replaces the editor with a
+  read-only fiction layout: first-line paragraph indents, flush openings after
+  headings and scene breaks, and centered scene-break ornaments. The source
+  stays unchanged, and PDF export uses the same layout while proofing is on.
 - **Versioning built in** — every save is a git commit (skipped when nothing
   changed). The History panel lists versions of the open file; any version can
   be viewed read-only or restored.

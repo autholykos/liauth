@@ -18,6 +18,7 @@ export interface MenuSnapshot {
   vim: boolean;
   lineNumbers: boolean;
   pageLayout: boolean;
+  novelProof: boolean;
   room: boolean;
   navOpen: boolean;
   showHiddenFiles: boolean;
@@ -185,7 +186,11 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
       await item("save-as", "Save As…", "CmdOrCtrl+Shift+S"),
       await item("reload", "Reload from Disk", "CmdOrCtrl+R"),
       await sep(),
-      await item("export-pdf", "Export as PDF…", "CmdOrCtrl+Shift+E"),
+      await item(
+        "export-pdf",
+        s.novelProof ? "Export Novel PDF…" : "Export as PDF…",
+        "CmdOrCtrl+Shift+E",
+      ),
     ],
   });
 
@@ -265,6 +270,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
         s.pageLayout,
         "CmdOrCtrl+Shift+P",
       ),
+      await check("toggle-novel-proof", "Novel Proof", s.novelProof),
       await check("toggle-vim", "Vim Keybindings", s.vim),
       await item("edit-vimrc", "Edit Vim Config…"),
       await sep(),
