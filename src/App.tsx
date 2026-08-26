@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -20,8 +21,6 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { watch, type UnwatchFn } from "@tauri-apps/plugin-fs";
 import { getCM } from "@replit/codemirror-vim";
-import MarkdownIt from "markdown-it";
-import DOMPurify from "dompurify";
 import {
   createEditorState,
   toggleBold,
@@ -45,7 +44,6 @@ import {
   insertNote,
   insertSuggestion,
   gotoNextNote,
-  stripCriticMarkup,
   applyEditsAsSuggestions,
   applyReplacementAsSuggestion,
   CommentNote,
@@ -54,10 +52,9 @@ import {
 } from "./editor/notes";
 import { buildRsvpWords, RsvpWord } from "./editor/rsvp";
 import { RsvpOverlay } from "./RsvpOverlay";
+import { renderMarkdown } from "./renderMarkdown";
 import * as api from "./api";
 import "./App.css";
-
-const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
@@ -193,6 +190,7 @@ function App() {
   const [pageLayout, setPageLayout] = useState(
     () => localStorage.getItem("liauth.page") === "1",
   );
+  const [novelProof, setNovelProof] = useState(false);
   const lineNumsRef = useRef(lineNums);
   const [notes, setNotes] = useState<NoteMatch[]>([]);
   const notesTimerRef = useRef<number | undefined>(undefined);
@@ -584,6 +582,12 @@ function App() {
     localStorage.setItem("liauth.page", pageLayout ? "1" : "0");
     document.documentElement.dataset.page = pageLayout ? "1" : "0";
   }, [pageLayout]);
+
+  useEffect(() => {
+    if (!novelProof) {
+      requestAnimationFrame(() => viewRef.current?.focus());
+    }
+  }, [novelProof]);
 
   // Room mode: fullscreen, chrome hidden, typewriter scrolling. Theme and
   // font stay as they are — the Room theme is just an option in the picker.
@@ -1418,16 +1422,18 @@ function App() {
     if (!view) return;
     const root = document.getElementById("print-root");
     if (!root) return;
-    root.innerHTML = DOMPurify.sanitize(
-      md.render(stripCriticMarkup(view.state.doc.toString())),
-    );
+    const rendered = renderMarkdown(view.state.doc.toString(), novelProof);
+    root.innerHTML = rendered.html;
+    root.classList.toggle("novel-proof", novelProof);
+    if (novelProof) root.lang = rendered.lang;
+    else root.removeAttribute("lang");
     document.title =
       fileName?.replace(/\.(md|markdown|txt)$/i, "") ?? "document";
     // Give the DOM a frame to flush #print-root before the native snapshot.
     requestAnimationFrame(() => {
       api.printPage().catch(() => window.print());
     });
-  }, [fileName]);
+  }, [fileName, novelProof]);
 
   const addNote = useCallback(() => {
     const view = viewRef.current;
@@ -1771,6 +1777,9 @@ function App() {
         case "toggle-page":
           setPageLayout((p) => !p);
           break;
+        case "toggle-novel-proof":
+          setNovelProof((proof) => !proof);
+          break;
         case "rsvp":
           startRsvp();
           break;
@@ -1838,6 +1847,7 @@ function App() {
       vim: vimMode,
       lineNumbers: lineNums,
       pageLayout,
+      novelProof,
       room,
       navOpen,
       showHiddenFiles,
@@ -1851,6 +1861,7 @@ function App() {
     vimMode,
     lineNums,
     pageLayout,
+    novelProof,
     room,
     navOpen,
     showHiddenFiles,
@@ -1865,7 +1876,11 @@ function App() {
     { id: "save", title: "Save (Commit)", shortcut: "⌘S" },
     { id: "save-as", title: "Save As…", shortcut: "⇧⌘S" },
     { id: "reload", title: "Reload from Disk", shortcut: "⌘R" },
-    { id: "export-pdf", title: "Export as PDF", shortcut: "⇧⌘E" },
+    {
+      id: "export-pdf",
+      title: novelProof ? "Export Novel PDF" : "Export as PDF",
+      shortcut: "⇧⌘E",
+    },
     { id: "check-updates", title: "Check for Updates…" },
     { id: "bold", title: "Bold", shortcut: "⌘B" },
     { id: "italic", title: "Italic", shortcut: "⌘I" },
@@ -1887,6 +1902,10 @@ function App() {
       id: "toggle-page",
       title: pageLayout ? "Exit Page Layout" : "Page Layout",
       shortcut: "⇧⌘P",
+    },
+    {
+      id: "toggle-novel-proof",
+      title: novelProof ? "Exit Novel Proof" : "Novel Proof",
     },
     {
       id: "toggle-vim",
@@ -1923,6 +1942,14 @@ function App() {
       title: `Open Recent: ${p.split("/").pop()}`,
     })),
   ];
+
+  const proofSource = novelProof
+    ? (viewRef.current?.state.doc.toString() ?? "")
+    : "";
+  const proofDocument = useMemo(
+    () => (novelProof ? renderMarkdown(proofSource, true) : null),
+    [novelProof, proofSource],
+  );
 
   return (
     <div className={`app${room ? " room" : ""}`}>
@@ -2123,10 +2150,21 @@ function App() {
           </aside>
         ) : null}
 
+        {proofDocument ? (
+          <div className="novel-proof-scroll">
+            <article
+              className="novel-proof novel-proof-screen"
+              lang={proofDocument.lang}
+              dangerouslySetInnerHTML={{ __html: proofDocument.html }}
+            />
+          </div>
+        ) : null}
+
         <div
-          className="editor-wrap"
+          className={`editor-wrap${novelProof ? " proof-hidden" : ""}`}
           ref={editorHost}
           onContextMenu={openEditorContextMenu}
+          inert={novelProof}
         />
 
         {panel === "history" && versioned ? (

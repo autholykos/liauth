@@ -118,6 +118,23 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
+      title: "Novel Proof",
+      search:
+        "novel proof fiction typography read only paragraphs indent scene break ornament page layout pdf export view",
+      body: (
+        <p>
+          Choose <strong>View ▸ Novel Proof</strong> to replace the editing
+          surface with a read-only fiction proof: adjacent paragraphs have no
+          vertical gap, narrative paragraphs use first-line indents, and
+          horizontal rules become scene-break ornaments. The Markdown source,
+          cursor selection, and editor scroll position stay unchanged. While
+          Novel Proof is on, <strong>Export Novel PDF…</strong> uses the same
+          rendered HTML and typography. Page Layout and generic PDF export
+          retain their behavior when Novel Proof is off.
+        </p>
+      ),
+    },
+    {
       title: "Vim",
       search:
         "vim modal editing motions registers visual mode ex commands write room rsvp " +
