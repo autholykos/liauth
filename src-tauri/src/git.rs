@@ -39,7 +39,8 @@ pub struct MergeResult {
 pub struct HistoryHunk {
     pub index: usize,
     pub current: String,
-    pub historical: String,
+    pub historical_start: usize,
+    pub historical_lines: usize,
 }
 
 pub struct SquashPlan {
@@ -322,11 +323,13 @@ pub fn history_diff(current: String, historical: String) -> Vec<HistoryHunk> {
         .iter()
         .enumerate()
         .map(|(index, hunk)| {
-            let (current, historical) = history_hunk_text(hunk);
+            let (current, _) = history_hunk_text(hunk);
+            let range = hunk.new_range();
             HistoryHunk {
                 index,
                 current,
-                historical,
+                historical_start: range.start(),
+                historical_lines: range.len(),
             }
         })
         .collect()
@@ -906,7 +909,10 @@ mod tests {
         let hunks = history_diff(current.into(), historical.into());
         assert_eq!(hunks.len(), 2);
         assert_eq!(hunks[0].current, "current alpha\n");
-        assert_eq!(hunks[0].historical, "historical alpha\n");
+        assert_eq!(hunks[0].historical_start, 2);
+        assert_eq!(hunks[0].historical_lines, 1);
+        assert_eq!(hunks[1].historical_start, 5);
+        assert_eq!(hunks[1].historical_lines, 1);
 
         let reinstated =
             reinstate_history_hunk(current.into(), historical.into(), hunks[0].index).unwrap();
@@ -918,18 +924,41 @@ mod tests {
 
     #[test]
     fn history_reinstate_handles_insertions_and_deletions() {
+        let deletion = history_diff("a\nextra\nb\n".into(), "a\nb\n".into());
+        assert_eq!(deletion[0].historical_start, 1);
+        assert_eq!(deletion[0].historical_lines, 0);
         assert_eq!(
             reinstate_history_hunk("a\nextra\nb\n".into(), "a\nb\n".into(), 0).unwrap(),
             "a\nb\n"
         );
+
+        let leading_deletion = history_diff("extra\nafter\n".into(), "after\n".into());
+        assert_eq!(leading_deletion[0].historical_start, 0);
+        assert_eq!(leading_deletion[0].historical_lines, 0);
+
+        let trailing_deletion = history_diff("a\nextra\n".into(), "a\n".into());
+        assert_eq!(trailing_deletion[0].historical_start, 1);
+        assert_eq!(trailing_deletion[0].historical_lines, 0);
+
+        let insertion = history_diff("a\nb".into(), "a\nold\nb".into());
+        assert_eq!(insertion[0].historical_start, 2);
+        assert_eq!(insertion[0].historical_lines, 1);
         assert_eq!(
             reinstate_history_hunk("a\nb".into(), "a\nold\nb".into(), 0).unwrap(),
             "a\nold\nb"
         );
+
+        let leading_insertion = history_diff("after\n".into(), "before\nafter\n".into());
+        assert_eq!(leading_insertion[0].historical_start, 1);
+        assert_eq!(leading_insertion[0].historical_lines, 1);
         assert_eq!(
             reinstate_history_hunk("after\n".into(), "before\nafter\n".into(), 0).unwrap(),
             "before\nafter\n"
         );
+
+        let trailing_insertion = history_diff("a\n".into(), "a\nold\n".into());
+        assert_eq!(trailing_insertion[0].historical_start, 2);
+        assert_eq!(trailing_insertion[0].historical_lines, 1);
     }
 
     #[test]

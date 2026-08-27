@@ -539,80 +539,6 @@ button.wide {
   color: var(--c-muted);
 }
 
-.history-diff {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid var(--c-border);
-}
-
-.history-diff h4 {
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--c-muted);
-}
-
-.history-hunk-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.history-hunk-list li {
-  padding: 8px;
-  border: 1px solid var(--c-border);
-  border-radius: 6px;
-}
-
-.history-hunk-list pre {
-  max-height: 160px;
-  margin: 0 0 6px;
-  padding: 6px 8px;
-  overflow: auto;
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.history-hunk-list pre::before {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--c-muted);
-  font-family: var(--font-ui);
-  font-size: 10.5px;
-}
-
-.history-hunk-list del,
-.history-hunk-list ins {
-  text-decoration: none;
-}
-
-.history-hunk-current {
-  background: color-mix(in srgb, #d33f49 14%, var(--c-bg));
-}
-
-.history-hunk-current::before {
-  content: "Current";
-}
-
-.history-hunk-historical {
-  background: color-mix(in srgb, #2e8b57 14%, var(--c-bg));
-}
-
-.history-hunk-historical::before {
-  content: "Historical";
-}
-
-.history-hunk-list button {
-  display: block;
-  margin-left: auto;
-}
-
 .branch-name {
   font-weight: 500;
 }
@@ -803,6 +729,77 @@ button.wide {
 
 .editor-wrap .cm-editor .cm-line {
   padding: 0;
+}
+
+/* History comparisons live in the document, beside the text they affect.
+   Red blocks are text from the current document; the actual historical
+   lines remain in CodeMirror and are marked green. */
+.history-inline-change {
+  width: 100%;
+  margin: 0.7em 0 0.25em;
+  overflow: hidden;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  background: var(--c-bg);
+  color: var(--c-text);
+  white-space: normal;
+}
+
+.history-inline-current {
+  padding: 0.5em 0.7em;
+  background: color-mix(in srgb, #d33f49 15%, var(--c-bg));
+  border-left: 3px solid #d33f49;
+}
+
+.history-inline-label,
+.history-inline-action {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  color: var(--c-muted);
+}
+
+.history-inline-label {
+  display: block;
+  margin-bottom: 0.2em;
+  text-transform: uppercase;
+}
+
+.history-inline-current pre {
+  margin: 0;
+  color: var(--c-text);
+  font-family: var(--font-prose);
+  font-size: 1em;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.history-inline-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  padding: 4px 7px 4px 10px;
+  background: color-mix(in srgb, #2e8b57 11%, var(--c-bg));
+  border-left: 3px solid #2e8b57;
+}
+
+.history-inline-action.history-inline-absent {
+  background: var(--c-panel);
+  border-left-color: var(--c-muted);
+}
+
+.history-inline-action button {
+  flex: 0 0 auto;
+}
+
+.editor-wrap .cm-editor .history-inline-historical-line {
+  padding-left: 0.55em !important;
+  padding-right: 0.55em !important;
+  background: color-mix(in srgb, #2e8b57 15%, var(--c-bg));
+  border-left: 3px solid #2e8b57;
 }
 
 .cm-cursor {
