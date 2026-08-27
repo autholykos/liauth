@@ -60,6 +60,11 @@ type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
 type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
+type ViewedVersion = api.CommitInfo & {
+  currentContent: string;
+  historicalContent: string;
+  hunks: api.HistoryHunk[];
+};
 type RephraseState = {
   id: number;
   from: number;
@@ -175,7 +180,9 @@ function App() {
   const [panel, setPanel] = useState<Panel>("none");
   const [history, setHistory] = useState<api.CommitInfo[]>([]);
   const [branches, setBranches] = useState<api.BranchInfo[]>([]);
-  const [viewing, setViewing] = useState<api.CommitInfo | null>(null);
+  const [viewing, setViewing] = useState<ViewedVersion | null>(null);
+  const [reinstating, setReinstating] = useState<number | null>(null);
+  const [squashing, setSquashing] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [vimMode, setVimMode] = useState(
     () => localStorage.getItem("liauth.vim") === "1",
@@ -1310,7 +1317,10 @@ function App() {
 
   const viewVersion = useCallback(
     async (commit: api.CommitInfo) => {
-      if (!filePath) return;
+      const view = viewRef.current;
+      if (!filePath || !view) return;
+      const currentContent =
+        viewingRef.current?.currentContent ?? view.state.doc.toString();
       const saved = await autoSave();
       if (saved === "blocked-conflict") {
         flash("Resolve the disk conflict before viewing history");
@@ -1320,9 +1330,15 @@ function App() {
         flash("Autosave failed; current version left open");
         return;
       }
-      const content = await api.fileAtCommit(filePath, commit.id);
-      setViewing(commit);
-      setEditorContent(content, true);
+      const historicalContent = await api.fileAtCommit(filePath, commit.id);
+      const hunks = await api.historyDiff(currentContent, historicalContent);
+      setViewing({
+        ...commit,
+        currentContent,
+        historicalContent,
+        hunks,
+      });
+      setEditorContent(historicalContent, true);
     },
     [filePath, autoSave, flash, setEditorContent],
   );
@@ -1332,17 +1348,57 @@ function App() {
     await loadFile(filePath);
   }, [filePath, loadFile]);
 
-  const restoreVersion = useCallback(async () => {
-    if (!filePath || !viewing) return;
-    const content = await api.fileAtCommit(filePath, viewing.id);
+  const restoreVersion = useCallback(() => {
+    if (!viewing) return;
     setViewing(null);
-    setEditorContent(content);
+    setEditorContent(viewing.historicalContent);
     diskDirtyRef.current = true;
     setDirty(true);
     flash(
       `Restored ${viewing.id.slice(0, 7)} into the editor — save to commit`,
     );
-  }, [filePath, viewing, setEditorContent, flash]);
+  }, [viewing, setEditorContent, flash]);
+
+  const reinstateHistoryChange = useCallback(
+    async (index: number) => {
+      if (!filePath || !viewing || reinstating !== null) return;
+      setReinstating(index);
+      try {
+        const comparisonIsCurrent = () =>
+          viewingRef.current?.id === viewing.id;
+        const currentIsUnchanged = async () =>
+          (await api.readDocument(filePath)) === viewing.currentContent;
+        if (!comparisonIsCurrent()) return;
+        if (!(await currentIsUnchanged())) {
+          flash("Current file changed — reopen History before reinstating");
+          return;
+        }
+        if (!comparisonIsCurrent()) return;
+        const content = await api.reinstateHistoryHunk(
+          viewing.currentContent,
+          viewing.historicalContent,
+          index,
+        );
+        if (!comparisonIsCurrent()) return;
+        if (!(await currentIsUnchanged())) {
+          flash("Current file changed — reopen History before reinstating");
+          return;
+        }
+        if (!comparisonIsCurrent()) return;
+        viewingRef.current = null;
+        setViewing(null);
+        setEditorContent(content);
+        diskDirtyRef.current = true;
+        setDirty(true);
+        flash("History change reinstated — save to commit");
+      } catch (e) {
+        flash(`Could not reinstate history change: ${e}`);
+      } finally {
+        setReinstating(null);
+      }
+    },
+    [filePath, viewing, reinstating, setEditorContent, flash],
+  );
 
   const newReviewBranch = useCallback(async () => {
     if (!filePath) return;
@@ -1561,7 +1617,7 @@ function App() {
               ? {
                   ...current,
                   busy: false,
-                  error: "Raul returned a replacement that cannot be staged",
+                  error: "Toki returned a replacement that cannot be staged",
                 }
               : current,
           );
@@ -1690,6 +1746,35 @@ function App() {
 
   const versioned = !!repo?.repo_root;
 
+  const squashRecentCommits = useCallback(async () => {
+    if (!filePath || squashing) return;
+    if (viewingRef.current) {
+      flash("Return to the current document before squashing");
+      return;
+    }
+    if (dirty || diskDirtyRef.current) {
+      flash("Commit current changes before squashing");
+      return;
+    }
+    if (repo?.merging) {
+      flash("Finish the merge before squashing");
+      return;
+    }
+    setSquashing(true);
+    flash("Toki is writing the squash commit message…");
+    try {
+      const commit = await api.squashRecentCommits(filePath);
+      const info = await refreshGit(filePath);
+      if (!diskDirtyRef.current) setDirty(info.file_dirty);
+      setLastSave(`squashed ${commit.id.slice(0, 7)} · ${timeNow()}`);
+      flash(`Squashed recent commits into ${commit.id.slice(0, 7)}`);
+    } catch (e) {
+      flash(`Could not squash commits: ${e}`);
+    } finally {
+      setSquashing(false);
+    }
+  }, [filePath, squashing, dirty, repo?.merging, refreshGit, flash]);
+
   // Central command runner: native menus, the command palette, and the
   // remaining toolbar buttons all route through here.
   const execCommand = useCallback(
@@ -1811,6 +1896,9 @@ function App() {
         case "new-review-branch":
           void newReviewBranch();
           break;
+        case "squash-recent":
+          void squashRecentCommits();
+          break;
         case "palette":
           setPaletteOpen(true);
           break;
@@ -1831,6 +1919,7 @@ function App() {
       toggleNotesPanel,
       enableVersioning,
       newReviewBranch,
+      squashRecentCommits,
       openVimrcPanel,
     ],
   );
@@ -1935,6 +2024,12 @@ function App() {
           { id: "panel-history", title: "Toggle History Panel" },
           { id: "panel-review", title: "Toggle Review Panel" },
           { id: "new-review-branch", title: "New Review Branch…" },
+          {
+            id: "squash-recent",
+            title: squashing
+              ? "Squashing Recent Commits with Toki…"
+              : "Squash Recent Commits",
+          },
         ]
       : [{ id: "enable-versioning", title: "Enable Versioning…" }]),
     ...recents.map((p) => ({
@@ -2056,10 +2151,18 @@ function App() {
         <div className="banner">
           Viewing version {viewing.id.slice(0, 7)} from {fmtTime(viewing.time)}{" "}
           (read-only)
-          <button onClick={() => void restoreVersion()}>
+          <button
+            onClick={() => void restoreVersion()}
+            disabled={reinstating !== null}
+          >
             Restore this version
           </button>
-          <button onClick={() => void backToCurrent()}>Back to current</button>
+          <button
+            onClick={() => void backToCurrent()}
+            disabled={reinstating !== null}
+          >
+            Back to current
+          </button>
         </div>
       ) : null}
 
@@ -2178,7 +2281,10 @@ function App() {
                 <li
                   key={c.id}
                   className={viewing?.id === c.id ? "selected" : ""}
-                  onClick={() => void viewVersion(c)}
+                  onClick={() => {
+                    if (reinstating === null) void viewVersion(c);
+                  }}
+                  aria-disabled={reinstating !== null}
                 >
                   <span className="commit-summary">{c.summary}</span>
                   <span className="commit-meta">
@@ -2187,6 +2293,39 @@ function App() {
                 </li>
               ))}
             </ul>
+            {viewing ? (
+              <section className="history-diff">
+                <h4>Changes from current</h4>
+                {viewing.hunks.length === 0 ? (
+                  <p className="muted">No differences.</p>
+                ) : (
+                  <ol className="history-hunk-list">
+                    {viewing.hunks.map((hunk) => (
+                      <li key={hunk.index}>
+                        {hunk.current ? (
+                          <pre className="history-hunk-current">
+                            <del>{hunk.current}</del>
+                          </pre>
+                        ) : null}
+                        {hunk.historical ? (
+                          <pre className="history-hunk-historical">
+                            <ins>{hunk.historical}</ins>
+                          </pre>
+                        ) : null}
+                        <button
+                          onClick={() =>
+                            void reinstateHistoryChange(hunk.index)
+                          }
+                          disabled={reinstating !== null}
+                        >
+                          Reinstate
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+            ) : null}
           </aside>
         ) : null}
 
@@ -2364,7 +2503,11 @@ function App() {
           words · {counts.chars.toLocaleString()} chars
           {zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}
         </span>
-        <span>{lastSave || (dirty ? "uncommitted changes" : "")}</span>
+        <span>
+          {squashing
+            ? "Toki is squashing commits…"
+            : lastSave || (dirty ? "uncommitted changes" : "")}
+        </span>
       </footer>
 
       {status ? <div className="status-toast">{status}</div> : null}

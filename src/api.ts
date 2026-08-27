@@ -49,11 +49,34 @@ export const saveDocument = (
     commit,
   });
 
+export const squashRecentCommits = (filePath: string) =>
+  invoke<CommitInfo>("squash_recent_commits", { filePath });
+
 export const fileHistory = (filePath: string, limit?: number) =>
   invoke<CommitInfo[]>("file_history", { filePath, limit: limit ?? null });
 
 export const fileAtCommit = (filePath: string, commitId: string) =>
   invoke<string>("file_at_commit", { filePath, commitId });
+
+export interface HistoryHunk {
+  index: number;
+  current: string;
+  historical: string;
+}
+
+export const historyDiff = (current: string, historical: string) =>
+  invoke<HistoryHunk[]>("history_diff", { current, historical });
+
+export const reinstateHistoryHunk = (
+  current: string,
+  historical: string,
+  index: number,
+) =>
+  invoke<string>("reinstate_history_hunk", {
+    current,
+    historical,
+    index,
+  });
 
 export const listBranches = (filePath: string) =>
   invoke<BranchInfo[]>("list_branches", { filePath });

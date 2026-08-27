@@ -60,7 +60,19 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
         <p>
           <em>Enable Versioning</em> creates a git repository in the document's
           folder. Every <kbd>⌘S</kbd> becomes a version in the History panel —
-          click one to view it, restore it if needed.
+          click one to compare it with the current document. Each change shows
+          current text in red and historical text in green; <strong>
+            Reinstate
+          </strong>{" "}
+          brings only that historical change back to the current buffer. Press
+          <kbd>⌘S</kbd> to commit it. <strong>
+            Squash Recent Commits
+          </strong>{" "}
+          combines every commit after the newer of the last squash and the
+          integrated upstream point. Toki writes the message automatically;
+          it receives the commit summaries and a capped aggregate diff. The
+          command requires a clean branch and keeps a recovery ref for the
+          previous HEAD.
         </p>
       ),
     },
@@ -81,7 +93,7 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Notes & Suggestions",
       search:
-        "notes annotate select criticmarkup comment suggestion insertion deletion accept reject dismiss resolve draft edits ai model rephrase raul concise vivid simplify humanize synonyms skill panel next cycle jump navigate pdf export strip",
+        "notes annotate select criticmarkup comment suggestion insertion deletion accept reject dismiss resolve draft edits ai model rephrase toki concise vivid simplify humanize synonyms skill panel next cycle jump navigate pdf export strip",
       body: (
         <p>
           Select text and press <kbd>⌘⇧M</kbd> to annotate it, or <kbd>⌘⇧U</kbd>{" "}
@@ -92,9 +104,9 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
           them; clicking an entry in the Notes panel jumps to it. The panel
           dismisses comments and accepts or rejects suggestions; “Draft edits”
           asks the model to turn a prose note into suggestions to accept or
-          reject — one undo reverts the whole batch. To stage a directed Raul
+          reject — one undo reverts the whole batch. To stage a directed Toki
           rewrite, select prose, right-click it, and choose{" "}
-          <strong>Rephrase with Raul…</strong>. Presets and project skills
+          <strong>Rephrase with Toki…</strong>. Presets and project skills
           prefill the direction, which you can edit before sending; the model
           receives exactly that text. Rephrase skills
           live at <code>.liauth/skills/&lt;name&gt;/SKILL.md</code>, opt in with{" "}
