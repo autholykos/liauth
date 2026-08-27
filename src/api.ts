@@ -61,7 +61,8 @@ export const fileAtCommit = (filePath: string, commitId: string) =>
 export interface HistoryHunk {
   index: number;
   current: string;
-  historical: string;
+  historical_start: number;
+  historical_lines: number;
 }
 
 export const historyDiff = (current: string, historical: string) =>

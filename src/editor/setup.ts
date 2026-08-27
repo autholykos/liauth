@@ -19,6 +19,7 @@ import {
   insertSuggestion,
   gotoNextNote,
 } from "./notes";
+import { historyDiff } from "./historyDiff";
 
 function installWrappedLineVimNavigation(): void {
   // Bind directly to the display-line motion instead of feeding `g` and
@@ -336,6 +337,7 @@ export function createEditorState(
       livePreview,
       tableRendering,
       criticMarkup,
+      historyDiff,
       keymap.of([
         {
           key: "Mod-s",

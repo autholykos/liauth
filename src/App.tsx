@@ -38,6 +38,7 @@ import {
 import { CommandPalette, PaletteCommand } from "./CommandPalette";
 import { RephraseDialog } from "./RephraseDialog";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
+import { setHistoryDiff } from "./editor/historyDiff";
 import { HelpPanel } from "./HelpPanel";
 import {
   scanNotes,
@@ -213,6 +214,9 @@ function App() {
   const roomMountedRef = useRef(false);
   const viewingRef = useRef(viewing);
   viewingRef.current = viewing;
+  const reinstatingRef = useRef(reinstating);
+  reinstatingRef.current = reinstating;
+  const reinstateHistoryRef = useRef<(index: number) => void>(() => {});
   const panelRef = useRef(panel);
   panelRef.current = panel;
   const filePathRef = useRef(filePath);
@@ -327,6 +331,23 @@ function App() {
     return () => window.removeEventListener("blur", onBlur);
   }, [autoSave]);
 
+  const displayHistoryDiff = useCallback(
+    (view: EditorView, comparison: ViewedVersion | null) => {
+      view.dispatch({
+        effects: setHistoryDiff.of(
+          comparison
+            ? {
+                hunks: comparison.hunks,
+                disabled: reinstatingRef.current !== null,
+                onReinstate: (index) => reinstateHistoryRef.current(index),
+              }
+            : null,
+        ),
+      });
+    },
+    [],
+  );
+
   // RSVP speed reading: starts at the cursor's word.
   const startRsvp = useCallback(() => {
     const view = viewRef.current;
@@ -377,7 +398,11 @@ function App() {
   }, []);
 
   const setEditorContent = useCallback(
-    (content: string, readOnly = false) => {
+    (
+      content: string,
+      readOnly = false,
+      comparison: ViewedVersion | null = null,
+    ) => {
       // Loads, reloads, history views, and branch switches all pass through
       // here, so the Notes panel and navigator badge update in the same frame.
       setRephrase(null);
@@ -413,6 +438,7 @@ function App() {
           },
         ),
       );
+      displayHistoryDiff(view, comparison);
       sweepGhostCursorLayers(view);
       // Autosave when leaving vim insert mode.
       if (vimRef.current) {
@@ -427,7 +453,7 @@ function App() {
       }
       loadingRef.current = false;
     },
-    [autoSave, refreshNotes, scheduleCounts],
+    [autoSave, displayHistoryDiff, refreshNotes, scheduleCounts],
   );
 
   useEffect(() => {
@@ -570,7 +596,11 @@ function App() {
     vimRef.current = vimMode;
     const view = viewRef.current;
     if (view) {
-      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+      setEditorContent(
+        view.state.doc.toString(),
+        viewingRef.current !== null,
+        viewingRef.current,
+      );
     }
   }, [vimMode, setEditorContent]);
 
@@ -580,7 +610,11 @@ function App() {
     lineNumsRef.current = lineNums;
     const view = viewRef.current;
     if (view) {
-      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+      setEditorContent(
+        view.state.doc.toString(),
+        viewingRef.current !== null,
+        viewingRef.current,
+      );
     }
   }, [lineNums, setEditorContent]);
 
@@ -612,7 +646,11 @@ function App() {
     }
     const view = viewRef.current;
     if (view) {
-      setEditorContent(view.state.doc.toString(), viewingRef.current !== null);
+      setEditorContent(
+        view.state.doc.toString(),
+        viewingRef.current !== null,
+        viewingRef.current,
+      );
       view.focus();
     }
   }, [room, setEditorContent]);
@@ -1332,13 +1370,15 @@ function App() {
       }
       const historicalContent = await api.fileAtCommit(filePath, commit.id);
       const hunks = await api.historyDiff(currentContent, historicalContent);
-      setViewing({
+      const selected = {
         ...commit,
         currentContent,
         historicalContent,
         hunks,
-      });
-      setEditorContent(historicalContent, true);
+      };
+      viewingRef.current = selected;
+      setViewing(selected);
+      setEditorContent(historicalContent, true, selected);
     },
     [filePath, autoSave, flash, setEditorContent],
   );
@@ -1361,13 +1401,16 @@ function App() {
 
   const reinstateHistoryChange = useCallback(
     async (index: number) => {
-      if (!filePath || !viewing || reinstating !== null) return;
+      const path = filePathRef.current;
+      const comparison = viewingRef.current;
+      if (!path || !comparison || reinstatingRef.current !== null) return;
+      reinstatingRef.current = index;
       setReinstating(index);
       try {
         const comparisonIsCurrent = () =>
-          viewingRef.current?.id === viewing.id;
+          viewingRef.current === comparison;
         const currentIsUnchanged = async () =>
-          (await api.readDocument(filePath)) === viewing.currentContent;
+          (await api.readDocument(path)) === comparison.currentContent;
         if (!comparisonIsCurrent()) return;
         if (!(await currentIsUnchanged())) {
           flash("Current file changed — reopen History before reinstating");
@@ -1375,8 +1418,8 @@ function App() {
         }
         if (!comparisonIsCurrent()) return;
         const content = await api.reinstateHistoryHunk(
-          viewing.currentContent,
-          viewing.historicalContent,
+          comparison.currentContent,
+          comparison.historicalContent,
           index,
         );
         if (!comparisonIsCurrent()) return;
@@ -1394,11 +1437,21 @@ function App() {
       } catch (e) {
         flash(`Could not reinstate history change: ${e}`);
       } finally {
+        reinstatingRef.current = null;
         setReinstating(null);
       }
     },
-    [filePath, viewing, reinstating, setEditorContent, flash],
+    [setEditorContent, flash],
   );
+
+  reinstateHistoryRef.current = (index) => {
+    void reinstateHistoryChange(index);
+  };
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view) displayHistoryDiff(view, viewing);
+  }, [viewing, reinstating, displayHistoryDiff]);
 
   const newReviewBranch = useCallback(async () => {
     if (!filePath) return;
@@ -2293,39 +2346,6 @@ function App() {
                 </li>
               ))}
             </ul>
-            {viewing ? (
-              <section className="history-diff">
-                <h4>Changes from current</h4>
-                {viewing.hunks.length === 0 ? (
-                  <p className="muted">No differences.</p>
-                ) : (
-                  <ol className="history-hunk-list">
-                    {viewing.hunks.map((hunk) => (
-                      <li key={hunk.index}>
-                        {hunk.current ? (
-                          <pre className="history-hunk-current">
-                            <del>{hunk.current}</del>
-                          </pre>
-                        ) : null}
-                        {hunk.historical ? (
-                          <pre className="history-hunk-historical">
-                            <ins>{hunk.historical}</ins>
-                          </pre>
-                        ) : null}
-                        <button
-                          onClick={() =>
-                            void reinstateHistoryChange(hunk.index)
-                          }
-                          disabled={reinstating !== null}
-                        >
-                          Reinstate
-                        </button>
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </section>
-            ) : null}
           </aside>
         ) : null}
 

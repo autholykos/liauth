@@ -60,12 +60,11 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
         <p>
           <em>Enable Versioning</em> creates a git repository in the document's
           folder. Every <kbd>⌘S</kbd> becomes a version in the History panel —
-          click one to compare it with the current document. Each change shows
-          current text in red and historical text in green; <strong>
-            Reinstate
-          </strong>{" "}
-          brings only that historical change back to the current buffer. Press
-          <kbd>⌘S</kbd> to commit it. <strong>
+          click one to compare it with the current document. Changes appear
+          directly in the historical text: current-only text is shown in red,
+          historical lines in green, and the <strong>Reinstate</strong> button
+          beside each change brings only that change back to the current
+          buffer. Press <kbd>⌘S</kbd> to commit it. <strong>
             Squash Recent Commits
           </strong>{" "}
           combines every commit after the newer of the last squash and the
