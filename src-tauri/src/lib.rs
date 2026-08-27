@@ -15,6 +15,13 @@ fn take_pending_open(state: tauri::State<PendingOpen>) -> Option<String> {
     state.0.lock().unwrap().take()
 }
 
+#[tauri::command]
+async fn squash_recent_commits(file_path: String) -> Result<git::CommitInfo, String> {
+    let plan = git::squash_plan(&file_path)?;
+    let message = ai::squash_commit_message(&plan.branch, &plan.summaries, &plan.diff).await?;
+    git::apply_squash(&file_path, &plan, &message)
+}
+
 #[derive(serde::Serialize)]
 struct ProjectFile {
     path: String,
@@ -394,6 +401,8 @@ pub fn run() {
             git::save_document,
             git::file_history,
             git::file_at_commit,
+            git::history_diff,
+            git::reinstate_history_hunk,
             git::list_branches,
             git::create_branch,
             git::checkout_branch,
@@ -406,6 +415,7 @@ pub fn run() {
             ai::warm_note_cache,
             ai::list_rephrase_skills,
             ai::rephrase_selection,
+            squash_recent_commits,
             take_pending_open,
             list_project_files,
             rename_project_file,

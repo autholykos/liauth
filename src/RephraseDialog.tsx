@@ -21,8 +21,7 @@ interface Props {
 // Presets are templates for the direction field, not hidden modes: clicking
 // one prefills the textarea and the author edits from there. The model sees
 // the direction alone, so what is on screen is exactly what it receives.
-// Texts stay in Italian, the language of the manuscripts and of Raul's
-// fine-tuning corpus.
+// Texts stay in Italian, the language of the manuscripts.
 const PRESETS = [
   {
     id: "more_concise",
@@ -105,14 +104,14 @@ export function RephraseDialog({
         className="rephrase-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Rephrase with Raul"
+        aria-label="Rephrase with Toki"
         onMouseDown={(event) => event.stopPropagation()}
         onSubmit={(event) => {
           event.preventDefault();
           if (!busy) submit();
         }}
       >
-        <h3>Rephrase with Raul</h3>
+        <h3>Rephrase with Toki</h3>
         <p className="rephrase-selection">{selection}</p>
 
         <div className="rephrase-presets" aria-label="Rephrase preset">

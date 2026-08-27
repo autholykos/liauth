@@ -97,7 +97,7 @@ export async function showEditorSelectionMenu(
     items: [
       await MenuItem.new({
         id: "editor-rephrase",
-        text: "Rephrase with Raul…",
+        text: "Rephrase with Toki…",
         action: rephrase,
       }),
       await sep(),
@@ -287,6 +287,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
             await check("panel-history", "History", s.panel === "history"),
             await check("panel-review", "Review", s.panel === "review"),
             await item("new-review-branch", "New Review Branch…"),
+            await item("squash-recent", "Squash Recent Commits"),
           ]
         : [await item("enable-versioning", "Enable Versioning…")]),
       await sep(),

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 // Local inference endpoint (OpenAI-compatible); making this configurable
 // is deliberately deferred.
 const ENDPOINT: &str = "https://models.nanto.org/v1/chat/completions";
-const MODEL: &str = "raul";
+const MODEL: &str = "toki";
 const MAX_REPHRASE_SKILL_TOKENS: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -40,6 +40,11 @@ pub struct RephraseSkill {
 #[derive(Deserialize)]
 struct RephraseReply {
     replacement: String,
+}
+
+#[derive(Deserialize)]
+struct SquashMessageReply {
+    message: String,
 }
 
 fn read_contained(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
@@ -112,7 +117,7 @@ fn parse_rephrase_skill(id: &str, content: String) -> Option<RephraseSkill> {
     if instructions.is_empty() {
         return None;
     }
-    // Raul exposes no tokenizer endpoint. Three UTF-8 bytes per token is a
+    // The endpoint exposes no tokenizer. Three UTF-8 bytes per token is a
     // deliberately conservative estimate for short Italian/English skills.
     let estimated_tokens = instructions.len().div_ceil(3);
     Some(RephraseSkill {
@@ -150,7 +155,7 @@ pub fn list_rephrase_skills(repo_root: String) -> Result<Vec<RephraseSkill>, Str
 mod tests {
     use super::{
         find_voice, lexical_layout, list_rephrase_skills, parse_rephrase_reply,
-        parse_rephrase_skill, MAX_REPHRASE_SKILL_TOKENS,
+        parse_rephrase_skill, parse_squash_message, MAX_REPHRASE_SKILL_TOKENS,
     };
 
     #[test]
@@ -188,8 +193,19 @@ Poi uscì."}"#;
     }
 
     #[test]
-    fn note_requests_use_raul() {
-        assert_eq!(super::MODEL, "raul");
+    fn all_requests_use_toki() {
+        assert_eq!(super::MODEL, "toki");
+    }
+
+    #[test]
+    fn squash_message_requires_nonempty_json() {
+        assert_eq!(
+            parse_squash_message("```json\n{\"message\":\"Consolidate chapter edits\"}\n```")
+                .as_deref(),
+            Some("Consolidate chapter edits")
+        );
+        assert!(parse_squash_message("{\"message\":\"  \"}").is_none());
+        assert!(parse_squash_message("plain text").is_none());
     }
 
     #[test]
@@ -455,12 +471,12 @@ fn parse_rephrase_reply(content: &str) -> Option<String> {
             }
         }
     }
-    // Raul occasionally leaves an inner double quote unescaped, or — when it
+    // The model occasionally leaves an inner double quote unescaped, or — when it
     // samples an early end-of-turn — stops before the closing `"}`. Both
     // leave the payload unambiguous: take everything after the opening quote
     // that follows `"replacement":`, drop whatever closing `"}` fragment is
     // present, and undo the JSON escapes it did apply.
-    // With a voice guide that prescribes Italian typographic quotes, Raul
+    // With a voice guide that prescribes Italian typographic quotes, the model
     // also applies them to the JSON value: `{"replacement": «testo»}`. Accept
     // «…», “…” and "…" as the value delimiters.
     let body = &content[start..];
@@ -543,12 +559,16 @@ fn log_rephrase_failure(attempt: usize, temperature: f64, content: &str) {
 }
 
 /// One chat call; returns the assistant text.
-async fn chat_once(prompt: &str, temperature: f64) -> Result<String, String> {
+async fn chat_once(
+    prompt: &str,
+    temperature: f64,
+    max_tokens: usize,
+) -> Result<String, String> {
     let body = serde_json::json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     });
     ensure_tls();
     let response = reqwest::Client::new()
@@ -570,8 +590,46 @@ async fn chat_once(prompt: &str, temperature: f64) -> Result<String, String> {
         .unwrap_or_default())
 }
 
+fn parse_squash_message(content: &str) -> Option<String> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    let message = serde_json::from_str::<SquashMessageReply>(content.get(start..=end)?)
+        .ok()?
+        .message
+        .trim()
+        .to_string();
+    (!message.is_empty() && message.len() <= 4096).then_some(message)
+}
+
+pub async fn squash_commit_message(
+    branch: &str,
+    summaries: &[String],
+    diff: &str,
+) -> Result<String, String> {
+    let summaries = summaries
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| format!("{}. {summary}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "Genera il messaggio Git per lo squash dei commit seguenti sul branch {branch}.\n\n\
+         REGOLE:\n\
+         - prima riga imperativa, concreta, massimo 72 caratteri;\n\
+         - corpo opzionale solo se aggiunge informazioni utili;\n\
+         - descrivi il risultato netto, non il processo di squash;\n\
+         - non inventare modifiche;\n\
+         - rispondi SOLO con JSON: {{\"message\": \"<messaggio>\"}}.\n\n\
+         COMMIT ORIGINALI:\n{summaries}\n\n\
+         DIFF AGGREGATO:\n{diff}"
+    );
+    let content = chat_once(&prompt, 0.2, 512).await?;
+    parse_squash_message(&content)
+        .ok_or_else(|| "Toki returned no valid squash commit message".to_string())
+}
+
 /// Rephrase one selected passage. Liauth supplies only surrounding context;
-/// Raul returns one replacement that the frontend stages as CriticMarkup.
+/// Toki returns one replacement that the frontend stages as CriticMarkup.
 /// The direction is the whole instruction: presets and project skills are
 /// prefilled into it by the dialog, so the author always sees and can edit
 /// exactly what the model receives. `synonyms_only` only tightens sampling
@@ -613,19 +671,14 @@ pub async fn rephrase_selection(
          Non aggiungere CriticMarkup. \
          Rispondi SOLO con un oggetto JSON della forma {{\"replacement\": \"<testo riscritto>\"}}, con le virgolette dritte ASCII (\") come delimitatori JSON anche se il testo usa le virgolette basse; senza commenti né recinti markdown."
     );
-    // No response_format: the raul lane (mlx_lm.server) has no grammar
-    // decoding and the router fails closed on json_schema requests, so the
-    // schema travels in the prompt and parse_rephrase_reply stays tolerant.
+    // The schema travels in the prompt and parse_rephrase_reply stays tolerant
+    // of non-strict JSON, so this path does not require response_format support.
     //
-    // 0.2 collapsed onto the most probable continuation, i.e. the original
-    // sentence with one synonym; 0.7 is where Raul actually restructures.
-    // Synonym-only edits keep a low temperature because their structure is
-    // checked after the fact.
+    // Creative rewrites use a higher temperature; synonym-only edits stay low
+    // because their structure is checked after the fact.
     let base_temperature = if synonyms_only { 0.3 } else { 0.7 };
-    // Raul was fine-tuned on the author's own corpus and, asked to rephrase
-    // a passage it has memorized, tends to hand it back verbatim. One retry
-    // at a higher temperature with an explicit "differ from the source"
-    // nudge recovers most of those; an unparsable reply gets the same retry.
+    // A verbatim or unparsable reply gets one higher-temperature retry with an
+    // explicit "differ from the source" nudge.
     let mut replacement: Option<String> = None;
     let mut last_err = String::new();
     for attempt in 0..2 {
@@ -641,7 +694,7 @@ pub async fn rephrase_selection(
                 if synonyms_only { 0.5 } else { 0.8 },
             )
         };
-        let content = chat_once(&prompt_now, temperature).await?;
+        let content = chat_once(&prompt_now, temperature, 4096).await?;
         let Some(candidate) = parse_rephrase_reply(&content) else {
             log_rephrase_failure(attempt, temperature, &content);
             let snippet: String = content.chars().take(160).collect();
@@ -668,7 +721,7 @@ pub async fn rephrase_selection(
         return Err("model replacement contains CriticMarkup".to_string());
     }
     if synonyms_only && lexical_layout(&replacement) != lexical_layout(&selection) {
-        return Err("Raul changed structure in Synonyms only mode".to_string());
+        return Err("Toki changed structure in Synonyms only mode".to_string());
     }
     Ok(replacement)
 }

@@ -1,6 +1,6 @@
 use git2::{
-    BranchType, Commit, ErrorCode, MergeOptions, Oid, Repository, RepositoryState, Signature,
-    Status,
+    BranchType, Commit, DiffFormat, ErrorCode, MergeOptions, Oid, Repository, RepositoryState,
+    Signature, Status, StatusOptions,
 };
 use serde::Serialize;
 use std::fs;
@@ -33,6 +33,21 @@ pub struct BranchInfo {
 pub struct MergeResult {
     pub status: String, // "up_to_date" | "fast_forward" | "merged" | "conflicts"
     pub conflicts: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct HistoryHunk {
+    pub index: usize,
+    pub current: String,
+    pub historical: String,
+}
+
+pub struct SquashPlan {
+    pub branch: String,
+    pub head: Oid,
+    pub base: Oid,
+    pub summaries: Vec<String>,
+    pub diff: String,
 }
 
 fn err(e: git2::Error) -> String {
@@ -276,6 +291,261 @@ pub fn file_at_commit(file_path: String, commit_id: String) -> Result<String, St
     let entry = tree.get_path(&rel).map_err(err)?;
     let blob = repo.find_blob(entry.id()).map_err(err)?;
     String::from_utf8(blob.content().to_vec()).map_err(|_| "file is not valid UTF-8".to_string())
+}
+
+fn history_patch<'a>(current: &'a str, historical: &'a str) -> diffy::Patch<'a, str> {
+    let mut options = diffy::DiffOptions::new();
+    options.set_context_len(0);
+    options.create_patch(current, historical)
+}
+
+fn history_hunk_text(hunk: &diffy::Hunk<'_, str>) -> (String, String) {
+    let mut current = String::new();
+    let mut historical = String::new();
+    for line in hunk.lines() {
+        match line {
+            diffy::Line::Context(text) => {
+                current.push_str(text);
+                historical.push_str(text);
+            }
+            diffy::Line::Delete(text) => current.push_str(text),
+            diffy::Line::Insert(text) => historical.push_str(text),
+        }
+    }
+    (current, historical)
+}
+
+#[tauri::command]
+pub fn history_diff(current: String, historical: String) -> Vec<HistoryHunk> {
+    history_patch(&current, &historical)
+        .hunks()
+        .iter()
+        .enumerate()
+        .map(|(index, hunk)| {
+            let (current, historical) = history_hunk_text(hunk);
+            HistoryHunk {
+                index,
+                current,
+                historical,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn reinstate_history_hunk(
+    current: String,
+    historical: String,
+    index: usize,
+) -> Result<String, String> {
+    let patch = history_patch(&current, &historical);
+    let hunk = patch
+        .hunks()
+        .get(index)
+        .ok_or_else(|| "history change no longer exists".to_string())?;
+    let (_, replacement) = history_hunk_text(hunk);
+    let range = hunk.old_range();
+    let mut starts = vec![0];
+    starts.extend(current.match_indices('\n').map(|(offset, _)| offset + 1));
+    let first_line = range.start().saturating_sub(1);
+    let from = if range.is_empty() {
+        starts.get(range.start()).copied().unwrap_or(current.len())
+    } else {
+        starts.get(first_line).copied().unwrap_or(current.len())
+    };
+    let to = if range.is_empty() {
+        from
+    } else {
+        starts
+            .get(first_line + range.len())
+            .copied()
+            .unwrap_or(current.len())
+    };
+    let mut result = current;
+    result.replace_range(from..to, &replacement);
+    Ok(result)
+}
+
+fn require_clean_repo(repo: &Repository) -> Result<(), String> {
+    if repo.state() != RepositoryState::Clean {
+        return Err("finish the current git operation before squashing".to_string());
+    }
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    if !repo.statuses(Some(&mut options)).map_err(err)?.is_empty() {
+        return Err("commit or discard all changes before squashing".to_string());
+    }
+    Ok(())
+}
+
+fn first_parent_distance(repo: &Repository, head: Oid, candidate: Oid) -> Option<usize> {
+    let mut oid = head;
+    for distance in 0.. {
+        if oid == candidate {
+            return Some(distance);
+        }
+        let commit = repo.find_commit(oid).ok()?;
+        if commit.parent_count() == 0 {
+            return None;
+        }
+        oid = commit.parent_id(0).ok()?;
+    }
+    unreachable!()
+}
+
+fn squash_marker(branch: &str) -> String {
+    format!("refs/liauth/last-squash/{branch}")
+}
+
+fn squash_backup(branch: &str) -> String {
+    format!("refs/liauth/pre-squash/{branch}")
+}
+
+pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
+    const MAX_DIFF_BYTES: usize = 64 * 1024;
+
+    let repo = discover(file_path)?;
+    require_clean_repo(&repo)?;
+    let head_ref = repo.head().map_err(err)?;
+    if !head_ref.is_branch() {
+        return Err("squash requires a checked-out local branch".to_string());
+    }
+    let branch = head_ref.shorthand().map_err(err)?.to_string();
+    let head = head_ref
+        .target()
+        .ok_or_else(|| "current branch has no commit".to_string())?;
+
+    let marker = repo
+        .find_reference(&squash_marker(&branch))
+        .ok()
+        .and_then(|reference| reference.target());
+    let upstream_base = repo
+        .find_branch(&branch, BranchType::Local)
+        .ok()
+        .and_then(|local| local.upstream().ok())
+        .and_then(|upstream| upstream.get().target())
+        .and_then(|upstream| repo.merge_base(head, upstream).ok());
+    let base = [marker, upstream_base]
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| {
+            first_parent_distance(&repo, head, candidate).map(|distance| (candidate, distance))
+        })
+        .min_by_key(|(_, distance)| *distance)
+        .map(|(candidate, _)| candidate)
+        .ok_or_else(|| {
+            "no squash boundary found; configure and pull a tracking branch first".to_string()
+        })?;
+
+    let mut summaries = Vec::new();
+    let mut oid = head;
+    while oid != base {
+        let commit = repo.find_commit(oid).map_err(err)?;
+        if commit.parent_count() != 1 {
+            return Err("cannot squash a range containing merge commits".to_string());
+        }
+        summaries.push(commit.summary().ok().flatten().unwrap_or("").to_string());
+        oid = commit.parent_id(0).map_err(err)?;
+    }
+    summaries.reverse();
+    if summaries.len() < 2 {
+        return Err("fewer than two commits since the last squash or pull".to_string());
+    }
+
+    let base_tree = repo.find_commit(base).map_err(err)?.tree().map_err(err)?;
+    let head_tree = repo.find_commit(head).map_err(err)?.tree().map_err(err)?;
+    if base_tree.id() == head_tree.id() {
+        return Err("the selected commits have no net changes".to_string());
+    }
+    let diff = repo
+        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .map_err(err)?;
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        let origin = line.origin();
+        let content = line.content();
+        let prefix = matches!(origin, '+' | '-' | ' ').then_some(origin as u8);
+        let needed = content.len() + usize::from(prefix.is_some());
+        if bytes.len() + needed > MAX_DIFF_BYTES {
+            truncated = true;
+            return false;
+        }
+        if let Some(prefix) = prefix {
+            bytes.push(prefix);
+        }
+        bytes.extend_from_slice(content);
+        true
+    })
+    .map_err(err)?;
+    let mut diff = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated {
+        diff.push_str("\n[diff truncated]\n");
+    }
+
+    Ok(SquashPlan {
+        branch,
+        head,
+        base,
+        summaries,
+        diff,
+    })
+}
+
+pub fn apply_squash(
+    file_path: &str,
+    plan: &SquashPlan,
+    message: &str,
+) -> Result<CommitInfo, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Toki returned an empty commit message".to_string());
+    }
+    if message.lines().next().unwrap_or("").chars().count() > 72 {
+        return Err("Toki returned a commit subject longer than 72 characters".to_string());
+    }
+    let latest = squash_plan(file_path)?;
+    if latest.branch != plan.branch || latest.head != plan.head || latest.base != plan.base {
+        return Err("squash boundary changed while Toki was generating the message".to_string());
+    }
+    let repo = discover(file_path)?;
+    require_clean_repo(&repo)?;
+    let mut head_ref = repo.head().map_err(err)?;
+    if head_ref.shorthand().map_err(err)? != plan.branch || head_ref.target() != Some(plan.head) {
+        return Err("branch changed while Toki was generating the message".to_string());
+    }
+
+    let head = repo.find_commit(plan.head).map_err(err)?;
+    let base = repo.find_commit(plan.base).map_err(err)?;
+    let tree = head.tree().map_err(err)?;
+    let sig = signature(&repo)?;
+    let oid = repo
+        .commit(None, &sig, &sig, message, &tree, &[&base])
+        .map_err(err)?;
+    repo.reference(
+        &squash_backup(&plan.branch),
+        plan.head,
+        true,
+        "liauth pre-squash checkpoint",
+    )
+    .map_err(err)?;
+    repo.reference(
+        &squash_marker(&plan.branch),
+        oid,
+        true,
+        "liauth squash boundary",
+    )
+    .map_err(err)?;
+    head_ref
+        .set_target(oid, "liauth squash recent commits")
+        .map_err(err)?;
+
+    Ok(CommitInfo {
+        id: oid.to_string(),
+        summary: message.lines().next().unwrap_or("").to_string(),
+        author: sig.name().unwrap_or("").to_string(),
+        time: sig.when().seconds(),
+    })
 }
 
 #[tauri::command]
@@ -627,5 +897,154 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!repo_info(doc_s).file_dirty);
+    }
+
+    #[test]
+    fn history_diff_reinstates_only_the_selected_change() {
+        let current = "one\ncurrent alpha\nmiddle one\nmiddle two\ncurrent omega\nlast\n";
+        let historical = "one\nhistorical alpha\nmiddle one\nmiddle two\nhistorical omega\nlast\n";
+        let hunks = history_diff(current.into(), historical.into());
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].current, "current alpha\n");
+        assert_eq!(hunks[0].historical, "historical alpha\n");
+
+        let reinstated =
+            reinstate_history_hunk(current.into(), historical.into(), hunks[0].index).unwrap();
+        assert_eq!(
+            reinstated,
+            "one\nhistorical alpha\nmiddle one\nmiddle two\ncurrent omega\nlast\n"
+        );
+    }
+
+    #[test]
+    fn history_reinstate_handles_insertions_and_deletions() {
+        assert_eq!(
+            reinstate_history_hunk("a\nextra\nb\n".into(), "a\nb\n".into(), 0).unwrap(),
+            "a\nb\n"
+        );
+        assert_eq!(
+            reinstate_history_hunk("a\nb".into(), "a\nold\nb".into(), 0).unwrap(),
+            "a\nold\nb"
+        );
+        assert_eq!(
+            reinstate_history_hunk("after\n".into(), "before\nafter\n".into(), 0).unwrap(),
+            "before\nafter\n"
+        );
+    }
+
+    #[test]
+    fn squash_plan_rewrites_only_commits_after_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "base\n".into(), Some("Base".into()), true)
+            .unwrap()
+            .unwrap();
+        let repo = Repository::discover(dir.path()).unwrap();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let base = repo.head().unwrap().target().unwrap();
+        repo.reference(&squash_marker(&branch), base, true, "test squash boundary")
+            .unwrap();
+
+        save_document(
+            doc_s.clone(),
+            "first\n".into(),
+            Some("First edit".into()),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        save_document(
+            doc_s.clone(),
+            "second\n".into(),
+            Some("Second edit".into()),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let old_head = repo.head().unwrap().target().unwrap();
+        let old_tree = repo.find_commit(old_head).unwrap().tree_id();
+
+        let plan = squash_plan(&doc_s).unwrap();
+        assert_eq!(plan.base, base);
+        assert_eq!(plan.head, old_head);
+        assert_eq!(plan.summaries, ["First edit", "Second edit"]);
+        assert!(plan.diff.contains("second"));
+
+        assert!(apply_squash(&doc_s, &plan, &"x".repeat(73)).is_err());
+        assert_eq!(repo.head().unwrap().target(), Some(old_head));
+
+        let squashed = apply_squash(&doc_s, &plan, "Consolidate manuscript edits").unwrap();
+        let new_head = Oid::from_str(&squashed.id).unwrap();
+        let commit = repo.find_commit(new_head).unwrap();
+        assert_eq!(commit.parent_id(0).unwrap(), base);
+        assert_eq!(commit.tree_id(), old_tree);
+        assert_eq!(repo.head().unwrap().target(), Some(new_head));
+        assert_eq!(
+            repo.find_reference(&squash_backup(&branch))
+                .unwrap()
+                .target(),
+            Some(old_head)
+        );
+        assert_eq!(
+            repo.find_reference(&squash_marker(&branch))
+                .unwrap()
+                .target(),
+            Some(new_head)
+        );
+        assert!(squash_plan(&doc_s).is_err());
+    }
+
+    #[test]
+    fn squash_requires_a_clean_worktree_including_untracked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s, "base\n".into(), Some("Base".into()), true)
+            .unwrap()
+            .unwrap();
+        std::fs::write(dir.path().join("untracked.md"), "draft\n").unwrap();
+        let repo = Repository::discover(dir.path()).unwrap();
+        assert!(require_clean_repo(&repo).is_err());
+    }
+
+    #[test]
+    fn squash_plan_uses_the_integrated_upstream_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "base\n".into(), Some("Base".into()), true)
+            .unwrap()
+            .unwrap();
+        let repo = Repository::discover(dir.path()).unwrap();
+        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        let base = repo.head().unwrap().target().unwrap();
+        repo.remote("origin", "https://example.invalid/repo.git")
+            .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{branch_name}"),
+            base,
+            true,
+            "test upstream",
+        )
+        .unwrap();
+        repo.find_branch(&branch_name, BranchType::Local)
+            .unwrap()
+            .set_upstream(Some(&format!("origin/{branch_name}")))
+            .unwrap();
+        save_document(doc_s.clone(), "one\n".into(), Some("One".into()), true)
+            .unwrap()
+            .unwrap();
+        save_document(doc_s.clone(), "two\n".into(), Some("Two".into()), true)
+            .unwrap()
+            .unwrap();
+
+        let plan = squash_plan(&doc_s).unwrap();
+        assert_eq!(plan.base, base);
+        assert_eq!(plan.summaries, ["One", "Two"]);
     }
 }
