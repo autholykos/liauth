@@ -1083,7 +1083,7 @@ function App() {
       setFileClipboard({ path: file.path, mode });
       flash(
         `${mode === "cut" ? "Cut" : "Copied"} ${baseName(file.path)} — ` +
-          "right-click the destination folder, or a file inside it, and choose Paste",
+          "choose Paste on the destination folder, or Paste Here on a file inside it",
       );
     },
     [flash],
