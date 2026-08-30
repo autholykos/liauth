@@ -38,6 +38,24 @@ struct ProjectFiles {
     truncated: bool,
 }
 
+#[derive(serde::Serialize)]
+struct ProjectSearchMatch {
+    path: String,
+    rel: String,
+    line: usize,
+    column: usize,
+    length: usize,
+    preview: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProjectSearch {
+    matches: Vec<ProjectSearchMatch>,
+    truncated: bool,
+}
+
+const PROJECT_SEARCH_LIMIT: usize = 250;
+
 fn is_markdown(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|x| x.to_str())
@@ -154,6 +172,81 @@ fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFil
         files,
         truncated,
     })
+}
+
+fn search_preview(line: &str, byte_column: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let match_column = line[..byte_column].chars().count();
+    let start = match_column.saturating_sub(60);
+    let end = (start + 180).min(chars.len());
+    let mut preview = String::new();
+    if start > 0 {
+        preview.push('…');
+    }
+    preview.extend(chars[start..end].iter());
+    if end < chars.len() {
+        preview.push('…');
+    }
+    preview
+}
+
+/// Case-insensitive (for ASCII) text search across every document shown by
+/// the project navigator. The open editor's buffer may replace its on-disk
+/// content so unsaved text participates in the same search.
+#[tauri::command]
+fn search_project_files(
+    file_path: String,
+    query: String,
+    show_hidden: bool,
+    current_file_path: Option<String>,
+    mut current_content: Option<String>,
+) -> Option<ProjectSearch> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Some(ProjectSearch {
+            matches: Vec::new(),
+            truncated: false,
+        });
+    }
+
+    let project = list_project_files(file_path, show_hidden)?;
+    let needle = query.to_ascii_lowercase();
+    let mut matches = Vec::new();
+    let mut truncated = project.truncated;
+
+    'files: for file in project.files {
+        let content = if current_file_path.as_deref() == Some(file.path.as_str()) {
+            current_content.take()
+        } else {
+            None
+        }
+        .or_else(|| std::fs::read_to_string(&file.path).ok());
+        let Some(content) = content else {
+            continue;
+        };
+
+        for (line_index, line) in content.lines().enumerate() {
+            let searchable = line.to_ascii_lowercase();
+            let Some(byte_column) = searchable.find(&needle) else {
+                continue;
+            };
+            let byte_end = byte_column + query.len();
+            matches.push(ProjectSearchMatch {
+                path: file.path.clone(),
+                rel: file.rel.clone(),
+                line: line_index + 1,
+                column: line[..byte_column].encode_utf16().count(),
+                length: line[byte_column..byte_end].encode_utf16().count(),
+                preview: search_preview(line, byte_column),
+            });
+            if matches.len() == PROJECT_SEARCH_LIMIT {
+                truncated = true;
+                break 'files;
+            }
+        }
+    }
+
+    Some(ProjectSearch { matches, truncated })
 }
 
 fn file_name(path: &std::path::Path) -> Result<&std::ffi::OsStr, String> {
@@ -418,6 +511,7 @@ pub fn run() {
             squash_recent_commits,
             take_pending_open,
             list_project_files,
+            search_project_files,
             rename_project_file,
             paste_project_file,
             delete_project_file,
@@ -551,6 +645,49 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == p(&git_metadata)));
+    }
+
+    #[test]
+    fn project_search_finds_lines_and_uses_the_open_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.md");
+        let second = dir.path().join("second.txt");
+        let ignored = dir.path().join("ignored.rs");
+        std::fs::write(&first, "On disk only\n").unwrap();
+        std::fs::write(&second, "Nothing here\nα 😀 Needle in line two\n").unwrap();
+        std::fs::write(&ignored, "needle outside a document\n").unwrap();
+
+        let search = search_project_files(
+            p(&first),
+            "needle".into(),
+            false,
+            Some(p(&first)),
+            Some("Needle from the editor\n".into()),
+        )
+        .unwrap();
+
+        assert_eq!(search.matches.len(), 2);
+        assert_eq!(search.matches[0].rel, "first.md");
+        assert_eq!(search.matches[0].line, 1);
+        assert_eq!(search.matches[0].column, 0);
+        assert_eq!(search.matches[1].rel, "second.txt");
+        assert_eq!(search.matches[1].line, 2);
+        // CodeMirror positions count UTF-16 code units, including two for 😀.
+        assert_eq!(search.matches[1].column, 5);
+        assert_eq!(search.matches[1].length, 6);
+        assert!(!search.truncated);
+    }
+
+    #[test]
+    fn project_search_caps_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = dir.path().join("many.md");
+        std::fs::write(&document, "match\n".repeat(PROJECT_SEARCH_LIMIT + 1)).unwrap();
+
+        let search = search_project_files(p(&document), "match".into(), false, None, None).unwrap();
+
+        assert_eq!(search.matches.len(), PROJECT_SEARCH_LIMIT);
+        assert!(search.truncated);
     }
 
     #[test]

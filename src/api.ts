@@ -181,6 +181,35 @@ export interface ProjectFiles {
 export const listProjectFiles = (filePath: string, showHidden: boolean) =>
   invoke<ProjectFiles | null>("list_project_files", { filePath, showHidden });
 
+export interface ProjectSearchMatch {
+  path: string;
+  rel: string;
+  line: number;
+  column: number;
+  length: number;
+  preview: string;
+}
+
+export interface ProjectSearch {
+  matches: ProjectSearchMatch[];
+  truncated: boolean;
+}
+
+export const searchProjectFiles = (
+  filePath: string,
+  query: string,
+  showHidden: boolean,
+  currentFilePath: string | null,
+  currentContent: string | null,
+) =>
+  invoke<ProjectSearch | null>("search_project_files", {
+    filePath,
+    query,
+    showHidden,
+    currentFilePath,
+    currentContent,
+  });
+
 export const renameProjectFile = (filePath: string, newName: string) =>
   invoke<string>("rename_project_file", { filePath, newName });
 

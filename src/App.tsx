@@ -59,6 +59,8 @@ import "./App.css";
 
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type Theme = "paper" | "sepia" | "dark" | "room";
+type NavigatorView = "files" | "search";
+type WorkspaceSearchState = api.ProjectSearch | "searching" | "error" | null;
 type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
 type ViewedVersion = api.CommitInfo & {
@@ -238,6 +240,7 @@ function App() {
   const [navOpen, setNavOpen] = useState(
     () => localStorage.getItem("liauth.nav") === "1",
   );
+  const [navigatorView, setNavigatorView] = useState<NavigatorView>("files");
   const [showHiddenFiles, setShowHiddenFiles] = useState(
     () => localStorage.getItem("liauth.hiddenFiles") === "1",
   );
@@ -246,6 +249,12 @@ function App() {
     () => new Set(),
   );
   const projectRequestRef = useRef(0);
+  const [workspaceQuery, setWorkspaceQuery] = useState("");
+  const [workspaceSearch, setWorkspaceSearch] =
+    useState<WorkspaceSearchState>(null);
+  const workspaceSearchRequestRef = useRef(0);
+  const workspaceSearchNavigationRef = useRef(0);
+  const workspaceSearchInputRef = useRef<HTMLInputElement>(null);
   const [fileClipboard, setFileClipboard] = useState<FileClipboard | null>(
     null,
   );
@@ -264,11 +273,22 @@ function App() {
   const runRef = useRef<(id: string) => void>(() => {});
 
   const fileName = filePath ? baseName(filePath) : "Untitled";
+  const filesNavigatorOpen = navOpen && navigatorView === "files";
+  const searchNavigatorOpen = navOpen && navigatorView === "search";
 
   const flash = useCallback((msg: string) => {
     setStatus(msg);
     window.setTimeout(() => setStatus(""), 4000);
   }, []);
+
+  const toggleNavigatorPanel = useCallback(
+    (next: NavigatorView) => {
+      const closing = navOpen && navigatorView === next;
+      setNavigatorView(next);
+      setNavOpen(!closing);
+    },
+    [navOpen, navigatorView],
+  );
 
   const refreshNotes = useCallback(() => {
     const view = viewRef.current;
@@ -538,6 +558,60 @@ function App() {
     void refreshProject(filePath ?? openFolder);
   }, [navOpen, filePath, openFolder, repo?.repo_root, refreshProject]);
 
+  useEffect(() => {
+    if (!navOpen || navigatorView !== "search") return;
+    const frame = requestAnimationFrame(() =>
+      workspaceSearchInputRef.current?.focus(),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [navOpen, navigatorView]);
+
+  useEffect(() => {
+    const request = ++workspaceSearchRequestRef.current;
+    const query = workspaceQuery.trim();
+    const anchor = filePath ?? openFolder;
+    if (!navOpen || navigatorView !== "search" || !anchor || !query) {
+      setWorkspaceSearch(null);
+      return;
+    }
+
+    setWorkspaceSearch("searching");
+    const timer = window.setTimeout(() => {
+      const currentFilePath = viewingRef.current
+        ? null
+        : filePathRef.current;
+      const currentContent = currentFilePath
+        ? (viewRef.current?.state.doc.toString() ?? null)
+        : null;
+      void api
+        .searchProjectFiles(
+          anchor,
+          query,
+          showHiddenFiles,
+          currentFilePath,
+          currentContent,
+        )
+        .then((result) => {
+          if (request !== workspaceSearchRequestRef.current) return;
+          setWorkspaceSearch(result ?? "error");
+        })
+        .catch(() => {
+          if (request !== workspaceSearchRequestRef.current) return;
+          setWorkspaceSearch("error");
+        });
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    navOpen,
+    navigatorView,
+    workspaceQuery,
+    filePath,
+    openFolder,
+    repo?.repo_root,
+    showHiddenFiles,
+  ]);
+
   // Load the user's vimrc subset once at startup. Mappings register in the
   // vim engine's global registry, so this works regardless of when (or how
   // often) vim mode is toggled.
@@ -805,8 +879,10 @@ function App() {
         }
         if (!diskDirtyRef.current) setDirty(info.file_dirty);
         await watchFile(path);
+        return true;
       } catch (e) {
         flash(`Could not open file: ${e}`);
+        return false;
       }
     },
     [setEditorContent, refreshGit, flash, watchFile],
@@ -838,10 +914,39 @@ function App() {
 
   const openPath = useCallback(
     async (path: string) => {
-      if (!(await leaveCurrentDocument("Open file"))) return;
-      await loadFile(path);
+      if (!(await leaveCurrentDocument("Open file"))) return false;
+      return loadFile(path);
     },
     [leaveCurrentDocument, loadFile],
+  );
+
+  const openWorkspaceSearchMatch = useCallback(
+    async (match: api.ProjectSearchMatch) => {
+      const navigation = ++workspaceSearchNavigationRef.current;
+      if (
+        filePathRef.current !== match.path ||
+        viewingRef.current !== null
+      ) {
+        if (!(await openPath(match.path))) return;
+      }
+      if (
+        navigation !== workspaceSearchNavigationRef.current ||
+        filePathRef.current !== match.path
+      ) {
+        return;
+      }
+      const view = viewRef.current;
+      if (!view || match.line > view.state.doc.lines) return;
+      const line = view.state.doc.line(match.line);
+      const from = Math.min(line.from + match.column, line.to);
+      const to = Math.min(from + match.length, line.to);
+      view.dispatch({
+        selection: { anchor: from, head: to },
+        effects: EditorView.scrollIntoView(from, { y: "center" }),
+      });
+      view.focus();
+    },
+    [openPath],
   );
 
   const doSave = useCallback(async () => {
@@ -978,7 +1083,7 @@ function App() {
       setFileClipboard({ path: file.path, mode });
       flash(
         `${mode === "cut" ? "Cut" : "Copied"} ${baseName(file.path)} — ` +
-          "right-click a file in the destination folder and choose Paste Here",
+          "choose Paste on the destination folder, or Paste Here on a file inside it",
       );
     },
     [flash],
@@ -1137,13 +1242,20 @@ function App() {
   }, []);
 
   const openNavigatorFolderMenu = useCallback(
-    (dir: string) => {
+    (dir: string, destination: api.ProjectFile) => {
       void showNavigatorFolderMenu(
         () => toggleNavigatorFolder(dir),
         collapsedDirs.has(dir),
+        fileClipboard ? () => void pasteNavigatorFile(destination) : null,
       ).catch((e) => flash(`Could not open folder menu: ${e}`));
     },
-    [collapsedDirs, toggleNavigatorFolder, flash],
+    [
+      collapsedDirs,
+      fileClipboard,
+      toggleNavigatorFolder,
+      pasteNavigatorFile,
+      flash,
+    ],
   );
 
   const resolveExternal = useCallback(
@@ -1938,7 +2050,7 @@ function App() {
           else void openVimrcPanel();
           break;
         case "toggle-nav":
-          setNavOpen((v) => !v);
+          toggleNavigatorPanel("files");
           break;
         case "toggle-hidden-files":
           setShowHiddenFiles((visible) => !visible);
@@ -1974,6 +2086,7 @@ function App() {
       newReviewBranch,
       squashRecentCommits,
       openVimrcPanel,
+      toggleNavigatorPanel,
     ],
   );
 
@@ -1991,7 +2104,7 @@ function App() {
       pageLayout,
       novelProof,
       room,
-      navOpen,
+      navOpen: filesNavigatorOpen,
       showHiddenFiles,
       versioned,
       panel,
@@ -2006,6 +2119,7 @@ function App() {
     novelProof,
     room,
     navOpen,
+    navigatorView,
     showHiddenFiles,
     versioned,
     panel,
@@ -2061,7 +2175,7 @@ function App() {
     ...FONTS.map((f) => ({ id: `font:${f.id}`, title: `Font: ${f.label}` })),
     {
       id: "toggle-nav",
-      title: navOpen ? "Hide Files Sidebar" : "Show Files Sidebar",
+      title: filesNavigatorOpen ? "Hide Files Sidebar" : "Show Files Sidebar",
       shortcut: "⇧⌘B",
     },
     {
@@ -2105,11 +2219,18 @@ function App() {
       <header className="toolbar">
         <div className="toolbar-left">
           <button
-            className={navOpen ? "active" : ""}
+            className={filesNavigatorOpen ? "active" : ""}
             title="Files sidebar (⌘⇧B)"
-            onClick={() => execCommand("toggle-nav")}
+            onClick={() => toggleNavigatorPanel("files")}
           >
             Files
+          </button>
+          <button
+            className={searchNavigatorOpen ? "active" : ""}
+            title="Search workspace contents"
+            onClick={() => toggleNavigatorPanel("search")}
+          >
+            Search
           </button>
           {/* Outside room mode the native title bar already shows the
               file name and edited state; repeat it only in room mode,
@@ -2220,7 +2341,62 @@ function App() {
       ) : null}
 
       <main className="content">
-        {navOpen && !room ? (
+        {searchNavigatorOpen && !room ? (
+          <aside className="nav-panel">
+            <h3 title={project?.root}>Search</h3>
+            <div className="nav-search">
+              <input
+                ref={workspaceSearchInputRef}
+                className="nav-search-input"
+                type="search"
+                value={workspaceQuery}
+                onChange={(e) => setWorkspaceQuery(e.target.value)}
+                placeholder="Search file contents…"
+                aria-label="Search workspace contents"
+                spellCheck={false}
+              />
+              {!filePath && !openFolder ? (
+                <p className="muted">Open a document or folder to search.</p>
+              ) : !workspaceQuery.trim() ? (
+                <p className="muted">Search all documents in the workspace.</p>
+              ) : workspaceSearch === "searching" ? (
+                <p className="muted">Searching…</p>
+              ) : workspaceSearch === "error" ? (
+                <p className="muted">Could not search this workspace.</p>
+              ) : workspaceSearch?.matches.length === 0 ? (
+                <p className="muted">No matches.</p>
+              ) : workspaceSearch ? (
+                <>
+                  <p className="nav-search-summary">
+                    {workspaceSearch.matches.length} result
+                    {workspaceSearch.matches.length === 1 ? "" : "s"}
+                    {workspaceSearch.truncated ? " (first matches)" : ""}
+                  </p>
+                  <ul className="nav-search-results">
+                    {workspaceSearch.matches.map((match) => (
+                      <li key={`${match.path}:${match.line}:${match.column}`}>
+                        <button
+                          className="nav-search-result"
+                          title={`${match.rel}:${match.line}`}
+                          onClick={() => void openWorkspaceSearchMatch(match)}
+                        >
+                          <span className="nav-search-path">
+                            {match.rel}:{match.line}
+                          </span>
+                          <span className="nav-search-preview">
+                            {match.preview}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : null}
+            </div>
+          </aside>
+        ) : null}
+
+        {filesNavigatorOpen && !room ? (
           <aside className="nav-panel">
             <h3 title={project?.root}>{project?.name ?? "Project"}</h3>
             {!filePath ? (
@@ -2268,7 +2444,7 @@ function App() {
                         onClick={() => toggleNavigatorFolder(dir)}
                         onContextMenu={(e) => {
                           e.preventDefault();
-                          openNavigatorFolderMenu(dir);
+                          openNavigatorFolderMenu(dir, f);
                         }}
                       >
                         <span className="nav-dir-chevron" aria-hidden="true">
