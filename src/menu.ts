@@ -71,6 +71,7 @@ export async function showNavigatorFileMenu(
 export async function showNavigatorFolderMenu(
   toggle: () => void,
   collapsed: boolean,
+  paste: (() => void) | null,
 ): Promise<void> {
   const menu = await Menu.new({
     items: [
@@ -78,6 +79,13 @@ export async function showNavigatorFolderMenu(
         id: "navigator-toggle-folder",
         text: collapsed ? "Expand Folder" : "Collapse Folder",
         action: toggle,
+      }),
+      await sep(),
+      await MenuItem.new({
+        id: "navigator-folder-paste",
+        text: "Paste",
+        enabled: paste !== null,
+        action: () => paste?.(),
       }),
     ],
   });
