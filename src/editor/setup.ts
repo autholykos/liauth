@@ -48,10 +48,11 @@ interface VimDialogOptions {
 }
 
 /**
- * Disable browser completion and let the dialog adapter own its normal
- * keydown → accept → blur → close sequence. macOS completion can consume
- * Enter's keydown and move focus before keyup, so search prompts stay open on
- * blur and a window-level keyup supplies the same accept sequence as fallback.
+ * Keep browser completion and macOS inline predictions out of Vim prompts,
+ * then let the dialog adapter own its normal keydown → accept → blur → close
+ * sequence. macOS completion can consume Enter's keydown and move focus before
+ * keyup, so search prompts stay open on blur and a window-level keyup supplies
+ * the same accept sequence as fallback.
  */
 function installVimSearchPromptExitFix(): void {
   const openDialog = CodeMirror.prototype.openDialog;
@@ -61,14 +62,13 @@ function installVimSearchPromptExitFix(): void {
     callback: Function | undefined,
     options: VimDialogOptions | undefined,
   ) {
+    const input = template.querySelector<HTMLInputElement>("input");
+    input?.setAttribute("autocomplete", "off");
+    input?.setAttribute("writingsuggestions", "false");
     const prefix = template.textContent?.trimStart()[0];
-    if (prefix !== "/" && prefix !== "?") {
+    if (!input || (prefix !== "/" && prefix !== "?")) {
       return openDialog.call(this, template, callback, options);
     }
-
-    const input = template.querySelector<HTMLInputElement>("input");
-    if (!input) return openDialog.call(this, template, callback, options);
-    input.setAttribute("autocomplete", "off");
     const promptOptions = options ?? {};
     const onKeyDown = promptOptions.onKeyDown;
     const onClose = promptOptions.onClose;
@@ -132,6 +132,32 @@ function installVimSearchPromptExitFix(): void {
 }
 
 installVimSearchPromptExitFix();
+
+/**
+ * WebKit text services can commit text into the editor without a keydown the
+ * Vim plugin ever saw (seen on macOS with the first key after a search prompt
+ * closes; dictation and autocorrect behave the same). In Normal and Visual
+ * mode that text is not an edit: replay a lone character as the key it stands
+ * for (in Visual mode WebKit reports it as replacing the selection) and
+ * discard anything else. Registered after vim() so the plugin keeps its own
+ * IME path.
+ */
+const strayTextGuard = EditorView.inputHandler.of((view, _from, _to, text) => {
+  const cm = getCM(view);
+  const vim = cm?.state.vim;
+  const plugin = cm?.state.vimPlugin;
+  if (!cm || !vim || !plugin || vim.insertMode || cm.curOp?.isVimOp) {
+    return false;
+  }
+  if (plugin.useNextTextInput || view.composing) return false;
+  if (text.length === 1) {
+    plugin.handleKey(
+      { key: text, preventDefault() {}, stopPropagation() {} },
+      view,
+    );
+  }
+  return true;
+});
 
 /**
  * Upstream findPosV builds its vertical-motion probe cursor with a
@@ -322,7 +348,7 @@ export function createEditorState(
     doc,
     extensions: [
       // vim() must precede other keymaps to take precedence.
-      useVim ? vim() : [],
+      useVim ? [vim(), strayTextGuard] : [],
       // Visual block mode emits one range per selected line.
       useVim ? EditorState.allowMultipleSelections.of(true) : [],
       useTypewriter ? typewriterScroll : [],
