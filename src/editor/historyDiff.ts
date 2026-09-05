@@ -154,3 +154,23 @@ export const historyDiff = StateField.define<DecorationSet>({
   },
   provide: (field) => EditorView.decorations.from(field),
 });
+
+/** Move the cursor to the next history change after it, wrapping around. */
+export function gotoNextHistoryChange(view: EditorView): boolean {
+  const anchors: number[] = [];
+  const changes = view.state.field(historyDiff).iter();
+  for (; changes.value; changes.next()) {
+    if (changes.value.spec.widget instanceof HistoryChangeWidget) {
+      anchors.push(changes.from);
+    }
+  }
+  if (anchors.length === 0) return false;
+  const head = view.state.selection.main.head;
+  const next = anchors.find((pos) => pos > head) ?? anchors[0];
+  view.dispatch({
+    selection: { anchor: next },
+    effects: EditorView.scrollIntoView(next, { y: "center" }),
+  });
+  view.focus();
+  return true;
+}

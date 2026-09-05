@@ -38,7 +38,7 @@ import {
 import { CommandPalette, PaletteCommand } from "./CommandPalette";
 import { RephraseDialog } from "./RephraseDialog";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
-import { setHistoryDiff } from "./editor/historyDiff";
+import { gotoNextHistoryChange, setHistoryDiff } from "./editor/historyDiff";
 import { HelpPanel } from "./HelpPanel";
 import {
   scanNotes,
@@ -2325,6 +2325,15 @@ function App() {
         <div className="banner">
           Viewing version {viewing.id.slice(0, 7)} from {fmtTime(viewing.time)}{" "}
           (read-only)
+          <button
+            onClick={() => {
+              const view = viewRef.current;
+              if (view) gotoNextHistoryChange(view);
+            }}
+            disabled={viewing.hunks.length === 0}
+          >
+            Next change
+          </button>
           <button
             onClick={() => void restoreVersion()}
             disabled={reinstating !== null}
