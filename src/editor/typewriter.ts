@@ -24,15 +24,21 @@ const centerOnChange = EditorState.transactionExtender.of((tr) => {
  * listener sits on the window so that it runs after CodeMirror's own
  * document-level mouseup, which may still move the selection. A release
  * outside the webview never reaches this window, so losing focus or a
- * mouse move with no button held ends the gesture as well.
+ * mouse move with no button held ends the gesture as well. The centering
+ * itself waits for the click sequence to end: a double or triple click
+ * must hit the same text as its first click, so nothing moves while
+ * another click may still follow.
  */
+const clickSequenceMs = 500; // macOS default double-click interval
 const centerAfterPointer = ViewPlugin.fromClass(
   class {
     private pending = false;
+    private timer = -1;
     private readonly win: Window;
 
     constructor(private readonly view: EditorView) {
       this.win = view.dom.ownerDocument.defaultView ?? window;
+      this.win.addEventListener("mousedown", this.cancel);
       this.win.addEventListener("mouseup", this.release);
       this.win.addEventListener("blur", this.release);
       this.win.addEventListener("mousemove", this.lostRelease);
@@ -47,7 +53,16 @@ const centerAfterPointer = ViewPlugin.fromClass(
     private release = () => {
       if (!this.pending) return;
       this.pending = false;
-      this.view.dispatch({ effects: centered(this.view.state.selection.main.head) });
+      this.cancel();
+      this.timer = this.win.setTimeout(() => {
+        this.timer = -1;
+        this.view.dispatch({ effects: centered(this.view.state.selection.main.head) });
+      }, clickSequenceMs);
+    };
+
+    private cancel = () => {
+      this.win.clearTimeout(this.timer);
+      this.timer = -1;
     };
 
     private lostRelease = (event: MouseEvent) => {
@@ -55,6 +70,8 @@ const centerAfterPointer = ViewPlugin.fromClass(
     };
 
     destroy() {
+      this.cancel();
+      this.win.removeEventListener("mousedown", this.cancel);
       this.win.removeEventListener("mouseup", this.release);
       this.win.removeEventListener("blur", this.release);
       this.win.removeEventListener("mousemove", this.lostRelease);
