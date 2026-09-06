@@ -2218,6 +2218,17 @@ function App() {
       <div className="toolbar-hotzone" />
       <header className="toolbar">
         <div className="toolbar-left">
+          {/* The sidebars and panels are hidden here; say so, or a missing
+              Files sidebar reads as a bug. */}
+          {room ? (
+            <button
+              className="room-badge"
+              title="Writing Room hides sidebars and panels. Click or press ⌘⇧F to leave."
+              onClick={() => setRoom(false)}
+            >
+              Writing Room · ⌘⇧F to exit
+            </button>
+          ) : null}
           <button
             className={filesNavigatorOpen ? "active" : ""}
             title="Files sidebar (⌘⇧B)"
