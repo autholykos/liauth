@@ -382,33 +382,15 @@ pub fn reinstate_history_hunk(
     Ok(result)
 }
 
-fn require_clean_repo(repo: &Repository) -> Result<(), String> {
+/// A squash only writes refs: the new commit carries HEAD's tree and the
+/// branch moves onto it, so the working tree and index end up exactly as
+/// they were. Local edits, tracked or not, therefore do not block it; an
+/// in-progress merge or rebase does.
+fn require_no_git_operation(repo: &Repository) -> Result<(), String> {
     if repo.state() != RepositoryState::Clean {
         return Err("finish the current git operation before squashing".to_string());
     }
-    // A squash never touches the working tree, so untracked files do not
-    // matter; modified tracked files would be left out of it.
-    let mut options = StatusOptions::new();
-    options.include_untracked(false);
-    let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
-    let changed = statuses
-        .iter()
-        .filter_map(|entry| entry.path().map(str::to_owned).ok())
-        .collect::<Vec<_>>();
-    if changed.is_empty() {
-        return Ok(());
-    }
-    let shown = changed
-        .iter()
-        .take(6)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut message = format!("commit or discard changes in {shown} before squashing");
-    if changed.len() > 6 {
-        message.push_str(&format!(" ({} more)", changed.len() - 6));
-    }
-    Err(message)
+    Ok(())
 }
 
 /// Commits reachable from `head` but not from `base`, oldest first; None
@@ -440,7 +422,7 @@ fn squash_backup(branch: &str) -> String {
 /// and the integrated upstream point.
 pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, String> {
     let repo = discover(file_path)?;
-    require_clean_repo(&repo)?;
+    require_no_git_operation(&repo)?;
     let head_ref = repo.head().map_err(err)?;
     if !head_ref.is_branch() {
         return Err("squash requires a checked-out local branch".to_string());
@@ -622,7 +604,7 @@ pub fn apply_squash(
         return Err("squash boundary changed while Toki was generating the message".to_string());
     }
     let repo = discover(file_path)?;
-    require_clean_repo(&repo)?;
+    require_no_git_operation(&repo)?;
     let mut head_ref = repo.head().map_err(err)?;
     if head_ref.shorthand().map_err(err)? != plan.branch || head_ref.target() != Some(plan.head) {
         return Err("branch changed while Toki was generating the message".to_string());
@@ -1311,20 +1293,27 @@ mod tests {
     }
 
     #[test]
-    fn squash_ignores_untracked_files_but_names_modified_ones() {
+    fn squash_leaves_local_edits_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let doc = dir.path().join("doc.md");
         let doc_s = p(&doc);
         init_repo(doc_s.clone()).unwrap();
-        save_document(doc_s, "base\n".into(), Some("Base".into()), true)
+        let first = save_document(doc_s.clone(), "v1\n".into(), Some("v1".into()), true)
             .unwrap()
             .unwrap();
-        std::fs::write(dir.path().join("untracked.md"), "draft\n").unwrap();
-        let repo = Repository::discover(dir.path()).unwrap();
-        assert!(require_clean_repo(&repo).is_ok());
+        save_document(doc_s.clone(), "v2\n".into(), Some("v2".into()), true).unwrap();
+        save_document(doc_s.clone(), "v3\n".into(), Some("v3".into()), true).unwrap();
         std::fs::write(&doc, "edited\n").unwrap();
-        let err = require_clean_repo(&repo).unwrap_err();
-        assert!(err.contains("doc.md"), "{err}");
+        std::fs::write(dir.path().join("untracked.md"), "draft\n").unwrap();
+
+        let plan = squash_plan(&doc_s, Some(Oid::from_str(&first.id).unwrap())).unwrap();
+        let squashed = apply_squash(&doc_s, &plan, "Rewrite the opening").unwrap();
+        assert_eq!(file_at_commit(doc_s.clone(), squashed.id).unwrap(), "v3\n");
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), "edited\n");
+        assert!(dir.path().join("untracked.md").exists());
+        let repo = Repository::open(dir.path()).unwrap();
+        let doc_status = repo.status_file(std::path::Path::new("doc.md")).unwrap();
+        assert!(doc_status.contains(Status::WT_MODIFIED), "{doc_status:?}");
     }
 
     #[test]
