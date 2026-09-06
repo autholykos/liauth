@@ -22,7 +22,9 @@ const centerOnChange = EditorState.transactionExtender.of((tr) => {
  * plain click selects from the clicked spot to a line far away. Pointer
  * selections are therefore centered once the button is released. The
  * listener sits on the window so that it runs after CodeMirror's own
- * document-level mouseup, which may still move the selection.
+ * document-level mouseup, which may still move the selection. A release
+ * outside the webview never reaches this window, so losing focus or a
+ * mouse move with no button held ends the gesture as well.
  */
 const centerAfterPointer = ViewPlugin.fromClass(
   class {
@@ -31,7 +33,9 @@ const centerAfterPointer = ViewPlugin.fromClass(
 
     constructor(private readonly view: EditorView) {
       this.win = view.dom.ownerDocument.defaultView ?? window;
-      this.win.addEventListener("mouseup", this.mouseup);
+      this.win.addEventListener("mouseup", this.release);
+      this.win.addEventListener("blur", this.release);
+      this.win.addEventListener("mousemove", this.lostRelease);
     }
 
     update(update: ViewUpdate) {
@@ -40,14 +44,20 @@ const centerAfterPointer = ViewPlugin.fromClass(
       }
     }
 
-    private mouseup = () => {
+    private release = () => {
       if (!this.pending) return;
       this.pending = false;
       this.view.dispatch({ effects: centered(this.view.state.selection.main.head) });
     };
 
+    private lostRelease = (event: MouseEvent) => {
+      if (event.buttons === 0) this.release();
+    };
+
     destroy() {
-      this.win.removeEventListener("mouseup", this.mouseup);
+      this.win.removeEventListener("mouseup", this.release);
+      this.win.removeEventListener("blur", this.release);
+      this.win.removeEventListener("mousemove", this.lostRelease);
     }
   },
 );
