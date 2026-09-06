@@ -20,6 +20,7 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: ChatMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -195,6 +196,26 @@ Poi uscì."}"#;
     #[test]
     fn all_requests_use_toki() {
         assert_eq!(super::MODEL, "toki");
+    }
+
+    #[test]
+    fn requests_ask_for_the_answer_without_reasoning() {
+        let body = super::request_body("ciao", 0.2, 64);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+    }
+
+    #[test]
+    fn empty_reply_cut_off_by_max_tokens_is_reported() {
+        let cut: super::ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"…"},"finish_reason":"length"}]}"#,
+        )
+        .unwrap();
+        assert!(super::reply_text(cut).unwrap_err().contains("ran out of output tokens"));
+        let done: super::ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"content":"{\"message\":\"ok\"}"},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(super::reply_text(done).unwrap(), "{\"message\":\"ok\"}");
     }
 
     #[test]
@@ -558,18 +579,38 @@ fn log_rephrase_failure(attempt: usize, temperature: f64, content: &str) {
     }
 }
 
+fn request_body(prompt: &str, temperature: f64, max_tokens: usize) -> serde_json::Value {
+    serde_json::json!({
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        // Toki is served by a reasoning model. Left on, its thinking shares
+        // `max_tokens` with the reply and can spend all of it, so the reply
+        // comes back empty. Every call here wants the answer only.
+        "chat_template_kwargs": {"enable_thinking": false},
+    })
+}
+
+/// The assistant text of the first choice. A reply cut off by `max_tokens`
+/// before any text is reported as such, not as a malformed answer.
+fn reply_text(response: ChatResponse) -> Result<String, String> {
+    let choice = response.choices.into_iter().next();
+    let cut_off = choice.as_ref().and_then(|c| c.finish_reason.as_deref()) == Some("length");
+    let content = choice.map(|c| c.message.content).unwrap_or_default();
+    if cut_off && content.trim().is_empty() {
+        return Err("Toki ran out of output tokens before answering".to_string());
+    }
+    Ok(content)
+}
+
 /// One chat call; returns the assistant text.
 async fn chat_once(
     prompt: &str,
     temperature: f64,
     max_tokens: usize,
 ) -> Result<String, String> {
-    let body = serde_json::json!({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    });
+    let body = request_body(prompt, temperature, max_tokens);
     ensure_tls();
     let response = reqwest::Client::new()
         .post(ENDPOINT)
@@ -583,11 +624,7 @@ async fn chat_once(
         .json::<ChatResponse>()
         .await
         .map_err(|e| format!("bad model response: {e}"))?;
-    Ok(response
-        .choices
-        .first()
-        .map(|choice| choice.message.content.clone())
-        .unwrap_or_default())
+    reply_text(response)
 }
 
 fn parse_squash_message(content: &str) -> Option<String> {
