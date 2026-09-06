@@ -624,7 +624,16 @@ pub fn list_worktrees(file_path: String) -> Result<Vec<WorktreeInfo>, String> {
 #[tauri::command]
 pub fn worktree_document(file_path: String, worktree_path: String) -> Option<String> {
     let repo = discover(&file_path).ok()?;
-    let rel = workdir_rel(&repo, &file_path).ok()?;
+    let workdir = fs::canonicalize(repo.workdir()?).ok()?;
+    // Canonicalize the folder only, so a symlinked document keeps its own
+    // name instead of mapping to whatever it points at.
+    let file = Path::new(&file_path);
+    let parent = fs::canonicalize(file.parent()?).ok()?;
+    let rel = parent
+        .join(file.file_name()?)
+        .strip_prefix(&workdir)
+        .ok()?
+        .to_path_buf();
     let target = Path::new(&worktree_path).join(rel);
     target.is_file().then(|| target.display().to_string())
 }
@@ -1269,7 +1278,15 @@ mod tests {
         );
         let only_here = dir.path().join("notes.md");
         fs::write(&only_here, "here\n").unwrap();
-        assert_eq!(worktree_document(p(&only_here), linked_dir), None);
+        assert_eq!(worktree_document(p(&only_here), linked_dir.clone()), None);
+        // A symlinked document maps by its own name, not by what it points at.
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink("doc.md", &link).unwrap();
+        std::os::unix::fs::symlink("doc.md", linked.join("link.md")).unwrap();
+        assert_eq!(
+            worktree_document(p(&link), linked_dir),
+            Some(p(&linked.canonicalize().unwrap().join("link.md")))
+        );
         assert!(delete_branch(doc_s, "review".into()).is_err());
     }
 
