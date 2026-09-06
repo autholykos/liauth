@@ -17,6 +17,17 @@ export interface CommitInfo {
 export interface BranchInfo {
   name: string;
   is_head: boolean;
+  last_commit_time: number; // unix seconds
+  /** Working directory of another checkout that has this branch as HEAD. */
+  checked_out_in: string | null;
+}
+
+export interface WorktreeInfo {
+  name: string;
+  path: string;
+  branch: string | null;
+  is_main: boolean;
+  is_current: boolean;
 }
 
 export interface MergeResult {
@@ -82,11 +93,17 @@ export const reinstateHistoryHunk = (
 export const listBranches = (filePath: string) =>
   invoke<BranchInfo[]>("list_branches", { filePath });
 
+export const listWorktrees = (filePath: string) =>
+  invoke<WorktreeInfo[]>("list_worktrees", { filePath });
+
 export const createBranch = (
   filePath: string,
   name: string,
   checkout: boolean,
 ) => invoke<void>("create_branch", { filePath, name, checkout });
+
+export const deleteBranch = (filePath: string, name: string) =>
+  invoke<void>("delete_branch", { filePath, name });
 
 export const checkoutBranch = (filePath: string, name: string) =>
   invoke<void>("checkout_branch", { filePath, name });

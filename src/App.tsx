@@ -171,6 +171,15 @@ function fmtTime(unixSeconds: number): string {
   });
 }
 
+function fmtAgo(unixSeconds: number): string {
+  const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86400);
+  if (days < 1) return "today";
+  if (days < 2) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  return fmtTime(unixSeconds);
+}
+
 function App() {
   const editorHost = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -183,6 +192,7 @@ function App() {
   const [panel, setPanel] = useState<Panel>("none");
   const [history, setHistory] = useState<api.CommitInfo[]>([]);
   const [branches, setBranches] = useState<api.BranchInfo[]>([]);
+  const [worktrees, setWorktrees] = useState<api.WorktreeInfo[]>([]);
   const [viewing, setViewing] = useState<ViewedVersion | null>(null);
   const [reinstating, setReinstating] = useState<number | null>(null);
   const [squashing, setSquashing] = useState(false);
@@ -751,9 +761,11 @@ function App() {
     if (info.repo_root) {
       setHistory(await api.fileHistory(path));
       setBranches(await api.listBranches(path));
+      setWorktrees(await api.listWorktrees(path));
     } else {
       setHistory([]);
       setBranches([]);
+      setWorktrees([]);
     }
     return info;
   }, []);
@@ -1178,6 +1190,7 @@ function App() {
           setRepo(null);
           setHistory([]);
           setBranches([]);
+          setWorktrees([]);
           setLastSave("");
         }
         if (!isCurrent) {
@@ -1421,9 +1434,7 @@ function App() {
   // Open Folder…: navigator rooted at the folder (or its repo), and a
   // fresh untitled buffer that will save into it. Untitled means no
   // autosave — nothing exists on disk until the user names the file.
-  const doOpenFolder = useCallback(async () => {
-    const dir = await openDialog({ directory: true });
-    if (typeof dir !== "string") return;
+  const openFolderPath = useCallback(async (dir: string) => {
     if (!(await leaveCurrentDocument("Open folder"))) return;
     unwatchRef.current?.();
     unwatchRef.current = null;
@@ -1437,9 +1448,15 @@ function App() {
     setRepo(null);
     setHistory([]);
     setBranches([]);
+    setWorktrees([]);
     setOpenFolder(dir);
     setNavOpen(true);
   }, [leaveCurrentDocument, setEditorContent]);
+
+  const doOpenFolder = useCallback(async () => {
+    const dir = await openDialog({ directory: true });
+    if (typeof dir === "string") await openFolderPath(dir);
+  }, [openFolderPath]);
 
   const enableVersioning = useCallback(async () => {
     if (!filePath) {
@@ -1567,15 +1584,18 @@ function App() {
 
   const newReviewBranch = useCallback(async () => {
     if (!filePath) return;
-    const name = window.prompt("Review branch name", "review/reviewer");
+    const name = window.prompt(
+      "Branch name",
+      `draft-${new Date().toISOString().slice(0, 10)}`,
+    );
     if (!name) return;
     const saved = await autoSave();
     if (saved === "blocked-conflict") {
-      flash("Resolve the disk conflict before creating a review branch");
+      flash("Resolve the disk conflict before creating a branch");
       return;
     }
     if (saved === "failed") {
-      flash("Autosave failed; review branch not created");
+      flash("Autosave failed; branch not created");
       return;
     }
     try {
@@ -1591,7 +1611,7 @@ function App() {
     async (name: string) => {
       if (!filePath) return;
       if (dirty) {
-        flash("Commit uncommitted changes before switching branches");
+        flash("Save (⌘S) to commit your changes before switching branches");
         return;
       }
       try {
@@ -1603,6 +1623,53 @@ function App() {
       }
     },
     [filePath, dirty, loadFile, flash],
+  );
+
+  const deleteBranch = useCallback(
+    async (name: string) => {
+      if (!filePath) return;
+      if (
+        !(await ask(`Delete branch ${name}? Commits only on it are lost.`, {
+          title: "Delete branch",
+          kind: "warning",
+        }))
+      ) {
+        return;
+      }
+      try {
+        await api.deleteBranch(filePath, name);
+        await refreshGit(filePath);
+        flash(`Deleted ${name}`);
+      } catch (e) {
+        flash(`Could not delete: ${e}`);
+      }
+    },
+    [filePath, refreshGit, flash],
+  );
+
+  // The same document in another worktree, or that worktree's folder when
+  // the document does not exist there.
+  const openInWorktree = useCallback(
+    async (dir: string) => {
+      const root = repo?.repo_root;
+      const rel =
+        filePath && root && filePath.startsWith(root)
+          ? filePath.slice(root.length).replace(/^\//, "")
+          : null;
+      if (rel) {
+        const target = `${dir.replace(/\/$/, "")}/${rel}`;
+        const exists = await api.readDocument(target).then(
+          () => true,
+          () => false,
+        );
+        if (exists) {
+          await openPath(target);
+          return;
+        }
+      }
+      await openFolderPath(dir);
+    },
+    [repo, filePath, openPath, openFolderPath],
   );
 
   const doMerge = useCallback(
@@ -1909,6 +1976,7 @@ function App() {
     });
   }, [refreshNotes]);
 
+  const currentWorktree = worktrees.find((w) => w.is_current);
   const versioned = !!repo?.repo_root;
 
   const squashRecentCommits = useCallback(async () => {
@@ -2189,8 +2257,8 @@ function App() {
     ...(versioned
       ? [
           { id: "panel-history", title: "Toggle History Panel" },
-          { id: "panel-review", title: "Toggle Review Panel" },
-          { id: "new-review-branch", title: "New Review Branch…" },
+          { id: "panel-review", title: "Toggle Branches Panel" },
+          { id: "new-review-branch", title: "New Branch…" },
           {
             id: "squash-recent",
             title: squashing
@@ -2288,7 +2356,7 @@ function App() {
                 className={panel === "review" ? "active" : ""}
                 onClick={() => execCommand("panel-review")}
               >
-                Review
+                Branches
               </button>
             </>
           ) : (
@@ -2547,9 +2615,15 @@ function App() {
 
         {panel === "review" && versioned ? (
           <aside className="side-panel">
-            <h3>Review</h3>
+            <h3>Branches</h3>
+            <p className="muted">
+              On <strong>{repo?.branch}</strong>
+              {currentWorktree && !currentWorktree.is_main
+                ? ` in worktree ${currentWorktree.name}`
+                : ""}
+            </p>
             <button className="wide" onClick={() => void newReviewBranch()}>
-              New review branch
+              New branch…
             </button>
             <ul className="branch-list">
               {branches.map((b) => (
@@ -2557,8 +2631,20 @@ function App() {
                   <span className="branch-name">
                     ⎇ {b.name}
                     {b.is_head ? " (current)" : ""}
+                    <span className="muted"> · {fmtAgo(b.last_commit_time)}</span>
                   </span>
-                  {!b.is_head ? (
+                  {b.is_head ? null : b.checked_out_in ? (
+                    <span className="branch-actions">
+                      <span className="muted">
+                        in {baseName(b.checked_out_in)}
+                      </span>
+                      <button
+                        onClick={() => void openInWorktree(b.checked_out_in!)}
+                      >
+                        Open there
+                      </button>
+                    </span>
+                  ) : (
                     <span className="branch-actions">
                       <button onClick={() => void switchBranch(b.name)}>
                         Switch
@@ -2566,16 +2652,40 @@ function App() {
                       <button onClick={() => void doMerge(b.name)}>
                         Merge in
                       </button>
+                      <button
+                        title="Delete branch"
+                        onClick={() => void deleteBranch(b.name)}
+                      >
+                        ×
+                      </button>
                     </span>
-                  ) : null}
+                  )}
                 </li>
               ))}
             </ul>
-            <p className="muted">
-              A reviewer works on their own branch; “Merge in” brings their
-              edits into the current branch. Conflicts appear inline and are
-              concluded by saving.
-            </p>
+            {worktrees.length > 1 ? (
+              <>
+                <h3>Worktrees</h3>
+                <ul className="branch-list">
+                  {worktrees.map((w) => (
+                    <li key={w.path} className={w.is_current ? "selected" : ""}>
+                      <span className="branch-name">
+                        {w.name}
+                        {w.branch ? ` · ${w.branch}` : ""}
+                        {w.is_current ? " (this one)" : ""}
+                      </span>
+                      {w.is_current ? null : (
+                        <span className="branch-actions">
+                          <button onClick={() => void openInWorktree(w.path)}>
+                            Open here
+                          </button>
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
           </aside>
         ) : null}
 
