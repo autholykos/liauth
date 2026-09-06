@@ -107,6 +107,12 @@ fn collect_markdown(
         }
         let p = e.path();
         if p.is_dir() {
+            // A nested repository or linked worktree is another versioning
+            // boundary; opening a file from it would silently move the
+            // project there.
+            if p.join(".git").exists() {
+                continue;
+            }
             if collect_markdown(&p, root, depth + 1, show_hidden, out) {
                 return true;
             }
@@ -645,6 +651,22 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == p(&git_metadata)));
+    }
+
+    #[test]
+    fn project_listing_skips_nested_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let nested = dir.path().join(".claude").join("worktrees").join("cycle");
+        let nested_doc = nested.join("doc.md");
+        std::fs::write(&doc, "root\n").unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(&nested_doc, "nested\n").unwrap();
+
+        let listing = list_project_files(p(&doc), true).unwrap();
+        assert_eq!(listing.files.len(), 1);
+        assert_eq!(listing.files[0].path, p(&doc));
     }
 
     #[test]

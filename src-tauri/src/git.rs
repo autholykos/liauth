@@ -577,10 +577,44 @@ pub fn create_branch(file_path: String, name: String, checkout: bool) -> Result<
     Ok(())
 }
 
+/// Working directory of another checkout, main or linked, whose HEAD is
+/// `refname`. libgit2 refuses to move HEAD onto such a branch, but only after
+/// checkout_tree has already rewritten the index and files, so ask first.
+fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<PathBuf> {
+    let here = repo.workdir().and_then(|dir| dir.canonicalize().ok());
+    let mut checkouts = Vec::new();
+    if let Ok(main) = Repository::open(repo.commondir()) {
+        checkouts.push(main);
+    }
+    if let Ok(names) = repo.worktrees() {
+        for name in names.iter().filter_map(|name| name.ok().flatten()) {
+            if let Ok(linked) = repo
+                .find_worktree(name)
+                .and_then(|wt| Repository::open_from_worktree(&wt))
+            {
+                checkouts.push(linked);
+            }
+        }
+    }
+    checkouts.into_iter().find_map(|checkout| {
+        let dir = checkout.workdir()?.canonicalize().ok()?;
+        if Some(&dir) == here.as_ref() {
+            return None;
+        }
+        (checkout.head().ok()?.name().ok()? == refname).then_some(dir)
+    })
+}
+
 #[tauri::command]
 pub fn checkout_branch(file_path: String, name: String) -> Result<(), String> {
     let repo = discover(&file_path)?;
     let refname = format!("refs/heads/{name}");
+    if let Some(dir) = checked_out_elsewhere(&repo, &refname) {
+        return Err(format!(
+            "{name} is checked out in another worktree ({})",
+            dir.display()
+        ));
+    }
     let obj = repo.revparse_single(&refname).map_err(err)?;
     let mut opts = git2::build::CheckoutBuilder::new();
     opts.safe();
@@ -1075,5 +1109,36 @@ mod tests {
         let plan = squash_plan(&doc_s).unwrap();
         assert_eq!(plan.base, base);
         assert_eq!(plan.summaries, ["One", "Two"]);
+    }
+
+    #[test]
+    fn switch_refuses_a_branch_checked_out_in_another_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        save_document(doc_s.clone(), "v1\n".into(), None, true).unwrap();
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "v1\n".into(), Some("v1".into()), true).unwrap();
+        create_branch(doc_s.clone(), "review".into(), false).unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let main_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let review = repo.find_branch("review", git2::BranchType::Local).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(review.get()));
+        let linked = dir.path().join("linked");
+        repo.worktree("linked", &linked, Some(&opts)).unwrap();
+
+        // The main checkout moves on, so switching the linked worktree to
+        // its branch would rewrite doc.md before HEAD could be refused.
+        save_document(doc_s, "v2\n".into(), Some("v2".into()), true).unwrap();
+
+        let linked_doc = linked.join("doc.md");
+        let err = checkout_branch(p(&linked_doc), main_branch).unwrap_err();
+        assert!(err.contains("another worktree"), "{err}");
+        assert_eq!(fs::read_to_string(&linked_doc).unwrap(), "v1\n");
+        let linked_repo = Repository::open(&linked).unwrap();
+        assert_eq!(linked_repo.head().unwrap().shorthand().unwrap(), "review");
+        assert!(linked_repo.statuses(None).unwrap().is_empty());
     }
 }
