@@ -1626,14 +1626,12 @@ function App() {
   );
 
   const deleteBranch = useCallback(
-    async (name: string) => {
+    async (name: string, worktree: string | null = null) => {
       if (!filePath) return;
-      if (
-        !(await ask(`Delete branch ${name}? Commits only on it are lost.`, {
-          title: "Delete branch",
-          kind: "warning",
-        }))
-      ) {
+      const question = worktree
+        ? `Delete branch ${name} and remove worktree ${baseName(worktree)}? Its folder is deleted; commits only on the branch are lost.`
+        : `Delete branch ${name}? Commits only on it are lost.`;
+      if (!(await ask(question, { title: "Delete branch", kind: "warning" }))) {
         return;
       }
       try {
@@ -2622,13 +2620,16 @@ function App() {
                   <span className="branch-name">
                     ⎇ {b.name}
                     {b.is_head ? " (current)" : ""}
-                    <span className="muted"> · {fmtAgo(b.last_commit_time)}</span>
+                    <span className="muted">
+                      {" "}
+                      · {fmtAgo(b.last_commit_time)}
+                      {b.checked_out_in
+                        ? ` · in ${baseName(b.checked_out_in)}`
+                        : ""}
+                    </span>
                   </span>
                   {b.is_head ? null : b.checked_out_in ? (
                     <span className="branch-actions">
-                      <span className="muted">
-                        in {baseName(b.checked_out_in)}
-                      </span>
                       <button onClick={() => void doMerge(b.name)}>
                         Merge in
                       </button>
@@ -2636,6 +2637,14 @@ function App() {
                         onClick={() => void openInWorktree(b.checked_out_in!)}
                       >
                         Open there
+                      </button>
+                      <button
+                        title="Delete branch and its worktree"
+                        onClick={() =>
+                          void deleteBranch(b.name, b.checked_out_in)
+                        }
+                      >
+                        ×
                       </button>
                     </span>
                   ) : (
