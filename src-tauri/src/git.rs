@@ -411,19 +411,21 @@ fn require_clean_repo(repo: &Repository) -> Result<(), String> {
     Err(message)
 }
 
-fn first_parent_distance(repo: &Repository, head: Oid, candidate: Oid) -> Option<usize> {
-    let mut oid = head;
-    for distance in 0.. {
-        if oid == candidate {
-            return Some(distance);
-        }
-        let commit = repo.find_commit(oid).ok()?;
-        if commit.parent_count() == 0 {
-            return None;
-        }
-        oid = commit.parent_id(0).ok()?;
+/// Commits reachable from `head` but not from `base`, oldest first; None
+/// when `base` is not an ancestor of `head`. Merges are part of the range.
+fn commits_after(repo: &Repository, head: Oid, base: Oid) -> Option<Vec<Oid>> {
+    if base == head {
+        return Some(Vec::new());
     }
-    unreachable!()
+    if !repo.graph_descendant_of(head, base).ok()? {
+        return None;
+    }
+    let mut walk = repo.revwalk().ok()?;
+    walk.push(head).ok()?;
+    walk.hide(base).ok()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)
+        .ok()?;
+    walk.collect::<Result<Vec<_>, _>>().ok()
 }
 
 fn squash_marker(branch: &str) -> String {
@@ -450,8 +452,9 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
 
     let base = match base {
         Some(base) => {
-            first_parent_distance(&repo, head, base)
-                .ok_or_else(|| "the chosen commit is not behind the current branch".to_string())?;
+            if commits_after(&repo, head, base).is_none() {
+                return Err("the chosen commit is not part of this branch".to_string());
+            }
             base
         }
         None => {
@@ -469,8 +472,7 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
                 .into_iter()
                 .flatten()
                 .filter_map(|candidate| {
-                    first_parent_distance(&repo, head, candidate)
-                        .map(|distance| (candidate, distance))
+                    commits_after(&repo, head, candidate).map(|range| (candidate, range.len()))
                 })
                 .min_by_key(|(_, distance)| *distance)
                 .map(|(candidate, _)| candidate)
@@ -481,19 +483,17 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
         }
     };
 
-    let mut summaries = Vec::new();
-    let mut oid = head;
-    while oid != base {
-        let commit = repo.find_commit(oid).map_err(err)?;
-        if commit.parent_count() != 1 {
-            return Err("cannot squash a range containing merge commits".to_string());
-        }
-        summaries.push(commit.summary().ok().flatten().unwrap_or("").to_string());
-        oid = commit.parent_id(0).map_err(err)?;
-    }
-    summaries.reverse();
-    if summaries.len() < 2 {
+    let range = commits_after(&repo, head, base).unwrap_or_default();
+    if range.len() < 2 {
         return Err("fewer than two commits to squash".to_string());
+    }
+    // Merge commits collapse into the result; their own subjects say nothing.
+    let mut summaries = Vec::new();
+    for oid in &range {
+        let commit = repo.find_commit(*oid).map_err(err)?;
+        if commit.parent_count() <= 1 {
+            summaries.push(commit.summary().ok().flatten().unwrap_or("").to_string());
+        }
     }
 
     let base_tree = repo.find_commit(base).map_err(err)?.tree().map_err(err)?;
@@ -1525,5 +1525,60 @@ mod tests {
         assert_eq!(read_document(doc_s).unwrap(), "v2\n");
         let marker = repo.find_reference(&squash_marker(&branch)).unwrap();
         assert_eq!(marker.target().unwrap().to_string(), reworded.id);
+    }
+
+    #[test]
+    fn squash_collapses_merged_branches_after_the_chosen_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        let base = save_document(doc_s.clone(), "v1\n".into(), Some("v1".into()), true)
+            .unwrap()
+            .unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let main_branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        create_branch(doc_s.clone(), "side".into(), true).unwrap();
+        save_document(
+            doc_s.clone(),
+            "v2\n".into(),
+            Some("v2 on side".into()),
+            true,
+        )
+        .unwrap();
+        checkout_branch(doc_s.clone(), main_branch).unwrap();
+        let notes = dir.path().join("notes.md");
+        save_document(p(&notes), "notes\n".into(), Some("notes".into()), true).unwrap();
+        let merged = merge_branch(doc_s.clone(), "side".into()).unwrap();
+        assert_eq!(merged.status, "merged");
+        save_document(
+            doc_s.clone(),
+            "v2\n".into(),
+            Some("Merge side".into()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            repo.head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .parent_count(),
+            2
+        );
+
+        let base_oid = Oid::from_str(&base.id).unwrap();
+        let plan = squash_plan(&doc_s, Some(base_oid)).unwrap();
+        let mut summaries = plan.summaries.clone();
+        summaries.sort();
+        assert_eq!(summaries, vec!["notes", "v2 on side"]);
+        let squashed = apply_squash(&doc_s, &plan, "Chapter one, second pass").unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.id().to_string(), squashed.id);
+        assert_eq!(head.parent_count(), 1);
+        assert_eq!(head.parent_id(0).unwrap(), base_oid);
+        assert_eq!(read_document(doc_s).unwrap(), "v2\n");
+        assert_eq!(read_document(p(&notes)).unwrap(), "notes\n");
     }
 }
