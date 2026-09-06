@@ -386,12 +386,29 @@ fn require_clean_repo(repo: &Repository) -> Result<(), String> {
     if repo.state() != RepositoryState::Clean {
         return Err("finish the current git operation before squashing".to_string());
     }
+    // A squash never touches the working tree, so untracked files do not
+    // matter; modified tracked files would be left out of it.
     let mut options = StatusOptions::new();
-    options.include_untracked(true).recurse_untracked_dirs(true);
-    if !repo.statuses(Some(&mut options)).map_err(err)?.is_empty() {
-        return Err("commit or discard all changes before squashing".to_string());
+    options.include_untracked(false);
+    let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
+    let changed = statuses
+        .iter()
+        .filter_map(|entry| entry.path().map(str::to_owned).ok())
+        .collect::<Vec<_>>();
+    if changed.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let shown = changed
+        .iter()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut message = format!("commit or discard changes in {shown} before squashing");
+    if changed.len() > 6 {
+        message.push_str(&format!(" ({} more)", changed.len() - 6));
+    }
+    Err(message)
 }
 
 fn first_parent_distance(repo: &Repository, head: Oid, candidate: Oid) -> Option<usize> {
@@ -1294,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn squash_requires_a_clean_worktree_including_untracked_files() {
+    fn squash_ignores_untracked_files_but_names_modified_ones() {
         let dir = tempfile::tempdir().unwrap();
         let doc = dir.path().join("doc.md");
         let doc_s = p(&doc);
@@ -1304,7 +1321,10 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("untracked.md"), "draft\n").unwrap();
         let repo = Repository::discover(dir.path()).unwrap();
-        assert!(require_clean_repo(&repo).is_err());
+        assert!(require_clean_repo(&repo).is_ok());
+        std::fs::write(&doc, "edited\n").unwrap();
+        let err = require_clean_repo(&repo).unwrap_err();
+        assert!(err.contains("doc.md"), "{err}");
     }
 
     #[test]
