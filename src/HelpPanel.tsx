@@ -86,8 +86,10 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
           checkout and <em>Merge in</em> brings a branch's edits into the
           current one. Conflicts appear as <code>&lt;&lt;&lt;</code> markers in
           the editor — fix them and save to conclude the merge. A branch open
-          in another worktree offers <em>Open there</em> instead of Switch, and
-          the worktree list jumps to the same document in another checkout.
+          in another worktree offers <em>Open there</em> instead of Switch;
+          deleting it removes that worktree as well, unless it has uncommitted
+          changes. The worktree list jumps to the same document in another
+          checkout.
         </p>
       ),
     },

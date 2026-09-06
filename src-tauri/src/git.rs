@@ -638,9 +638,42 @@ pub fn worktree_document(file_path: String, worktree_path: String) -> Option<Str
     target.is_file().then(|| target.display().to_string())
 }
 
+/// Remove the linked worktree rooted at `dir`: never the main checkout, a
+/// locked worktree, or one with uncommitted or untracked files.
+fn remove_worktree(repo: &Repository, dir: &Path) -> Result<(), String> {
+    let names = repo.worktrees().map_err(err)?;
+    for name in names.iter().filter_map(|name| name.ok().flatten()) {
+        let worktree = repo.find_worktree(name).map_err(err)?;
+        let dirty = {
+            let linked = Repository::open_from_worktree(&worktree).map_err(err)?;
+            if workdir(&linked).as_deref() != Some(dir) {
+                continue;
+            }
+            let mut status = StatusOptions::new();
+            status.include_untracked(true).include_ignored(false);
+            let statuses = linked.statuses(Some(&mut status)).map_err(err)?;
+            !statuses.is_empty()
+        };
+        if dirty {
+            return Err(format!("worktree {name} has uncommitted changes"));
+        }
+        if worktree.is_locked().map_err(err)? != git2::WorktreeLockStatus::Unlocked {
+            return Err(format!("worktree {name} is locked"));
+        }
+        let mut prune = git2::WorktreePruneOptions::new();
+        prune.valid(true).working_tree(true);
+        return worktree.prune(Some(&mut prune)).map_err(err);
+    }
+    Err(format!("{} is the main checkout", dir.display()))
+}
+
+/// Delete a branch; when another worktree holds it, that worktree goes too.
 #[tauri::command]
 pub fn delete_branch(file_path: String, name: String) -> Result<(), String> {
     let repo = discover(&file_path)?;
+    if let Some(dir) = checked_out_elsewhere(&repo, &format!("refs/heads/{name}")) {
+        remove_worktree(&repo, &dir)?;
+    }
     let mut branch = repo.find_branch(&name, BranchType::Local).map_err(err)?;
     branch.delete().map_err(err)
 }
@@ -1287,7 +1320,20 @@ mod tests {
             worktree_document(p(&link), linked_dir),
             Some(p(&linked.canonicalize().unwrap().join("link.md")))
         );
-        assert!(delete_branch(doc_s, "review".into()).is_err());
+        fs::remove_file(linked.join("link.md")).unwrap();
+
+        // Deleting a branch another checkout holds removes that worktree too,
+        // but never the main checkout and never a dirty worktree.
+        let err = delete_branch(p(&linked_doc), main_branch).unwrap_err();
+        assert!(err.contains("main checkout"), "{err}");
+        fs::write(linked.join("scratch.md"), "wip\n").unwrap();
+        let err = delete_branch(doc_s.clone(), "review".into()).unwrap_err();
+        assert!(err.contains("uncommitted"), "{err}");
+        fs::remove_file(linked.join("scratch.md")).unwrap();
+        delete_branch(doc_s.clone(), "review".into()).unwrap();
+        assert!(!linked.exists());
+        assert_eq!(list_worktrees(doc_s).unwrap().len(), 1);
+        assert!(repo.find_branch("review", git2::BranchType::Local).is_err());
     }
 
     #[test]
