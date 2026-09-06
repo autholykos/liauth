@@ -96,6 +96,10 @@ export const listBranches = (filePath: string) =>
 export const listWorktrees = (filePath: string) =>
   invoke<WorktreeInfo[]>("list_worktrees", { filePath });
 
+/** The open document's counterpart in another worktree, if it exists there. */
+export const worktreeDocument = (filePath: string, worktreePath: string) =>
+  invoke<string | null>("worktree_document", { filePath, worktreePath });
+
 export const createBranch = (
   filePath: string,
   name: string,

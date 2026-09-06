@@ -504,6 +504,7 @@ pub fn run() {
             git::reinstate_history_hunk,
             git::list_branches,
             git::list_worktrees,
+            git::worktree_document,
             git::create_branch,
             git::delete_branch,
             git::checkout_branch,

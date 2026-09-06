@@ -1651,25 +1651,16 @@ function App() {
   // the document does not exist there.
   const openInWorktree = useCallback(
     async (dir: string) => {
-      const root = repo?.repo_root;
-      const rel =
-        filePath && root && filePath.startsWith(root)
-          ? filePath.slice(root.length).replace(/^\//, "")
-          : null;
-      if (rel) {
-        const target = `${dir.replace(/\/$/, "")}/${rel}`;
-        const exists = await api.readDocument(target).then(
-          () => true,
-          () => false,
-        );
-        if (exists) {
-          await openPath(target);
-          return;
-        }
+      const target = filePath
+        ? await api.worktreeDocument(filePath, dir)
+        : null;
+      if (target) {
+        await openPath(target);
+      } else {
+        await openFolderPath(dir);
       }
-      await openFolderPath(dir);
     },
-    [repo, filePath, openPath, openFolderPath],
+    [filePath, openPath, openFolderPath],
   );
 
   const doMerge = useCallback(
@@ -2638,6 +2629,9 @@ function App() {
                       <span className="muted">
                         in {baseName(b.checked_out_in)}
                       </span>
+                      <button onClick={() => void doMerge(b.name)}>
+                        Merge in
+                      </button>
                       <button
                         onClick={() => void openInWorktree(b.checked_out_in!)}
                       >

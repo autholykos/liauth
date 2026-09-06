@@ -620,6 +620,15 @@ pub fn list_worktrees(file_path: String) -> Result<Vec<WorktreeInfo>, String> {
         .collect())
 }
 
+/// The open document's counterpart in another worktree, when it exists.
+#[tauri::command]
+pub fn worktree_document(file_path: String, worktree_path: String) -> Option<String> {
+    let repo = discover(&file_path).ok()?;
+    let rel = workdir_rel(&repo, &file_path).ok()?;
+    let target = Path::new(&worktree_path).join(rel);
+    target.is_file().then(|| target.display().to_string())
+}
+
 #[tauri::command]
 pub fn delete_branch(file_path: String, name: String) -> Result<(), String> {
     let repo = discover(&file_path)?;
@@ -1254,6 +1263,13 @@ mod tests {
         assert!(worktrees[0].is_main && !worktrees[0].is_current);
         assert!(worktrees[1].is_current && worktrees[1].name == "linked");
         assert_eq!(worktrees[1].branch.as_deref(), Some("review"));
+        assert_eq!(
+            worktree_document(doc_s.clone(), linked_dir.clone()),
+            Some(p(&linked.canonicalize().unwrap().join("doc.md")))
+        );
+        let only_here = dir.path().join("notes.md");
+        fs::write(&only_here, "here\n").unwrap();
+        assert_eq!(worktree_document(p(&only_here), linked_dir), None);
         assert!(delete_branch(doc_s, "review".into()).is_err());
     }
 
