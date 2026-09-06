@@ -286,9 +286,13 @@ function App() {
   const filesNavigatorOpen = navOpen && navigatorView === "files";
   const searchNavigatorOpen = navOpen && navigatorView === "search";
 
-  const flash = useCallback((msg: string) => {
+  // A newer toast must not be cleared by an older toast's timer: an error
+  // arriving a second after "Toki is writing…" would vanish almost at once.
+  const flashTimer = useRef<number | undefined>(undefined);
+  const flash = useCallback((msg: string, ms = 4000) => {
+    window.clearTimeout(flashTimer.current);
     setStatus(msg);
-    window.setTimeout(() => setStatus(""), 4000);
+    flashTimer.current = window.setTimeout(() => setStatus(""), ms);
   }, []);
 
   const toggleNavigatorPanel = useCallback(
@@ -2010,7 +2014,10 @@ function App() {
       setLastSave(`squashed ${commit.id.slice(0, 7)} · ${timeNow()}`);
       flash(`Squashed into ${commit.id.slice(0, 7)}: ${commit.summary}`);
     } catch (e) {
-      flash(`Could not squash commits: ${e}`);
+      // The failure ends a wait of up to minutes: keep it readable in the
+      // toast, and on record in the status bar until the next save.
+      setLastSave(`squash failed · ${e}`);
+      flash(`Could not squash commits: ${e}`, 15000);
     } finally {
       setSquashing(false);
     }
