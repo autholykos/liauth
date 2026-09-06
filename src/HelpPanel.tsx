@@ -76,16 +76,18 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
-      title: "Review",
+      title: "Branches",
       search:
-        "review branch merge conflicts markers reviewer second eyes edit outside",
+        "branches branch new switch merge conflicts markers worktree copy open there delete try experiment",
       body: (
         <p>
-          Create a review branch for a second pair of eyes. Both sides edit
-          independently; <em>Merge in</em> reconciles. Conflicts appear as{" "}
-          <code>&lt;&lt;&lt;</code> markers in the editor — fix them and save to
-          conclude the merge. Files edited outside Liauth merge the same way,
-          automatically.
+          <em>New branch</em> lets you try something without losing the
+          current text; <em>Switch</em> moves between branches of this
+          checkout and <em>Merge in</em> brings a branch's edits into the
+          current one. Conflicts appear as <code>&lt;&lt;&lt;</code> markers in
+          the editor — fix them and save to conclude the merge. A branch open
+          in another worktree offers <em>Open there</em> instead of Switch, and
+          the worktree list jumps to the same document in another checkout.
         </p>
       ),
     },

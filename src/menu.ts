@@ -293,8 +293,8 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
       ...(s.versioned
         ? [
             await check("panel-history", "History", s.panel === "history"),
-            await check("panel-review", "Review", s.panel === "review"),
-            await item("new-review-branch", "New Review Branch…"),
+            await check("panel-review", "Branches", s.panel === "review"),
+            await item("new-review-branch", "New Branch…"),
             await item("squash-recent", "Squash Recent Commits"),
           ]
         : [await item("enable-versioning", "Enable Versioning…")]),

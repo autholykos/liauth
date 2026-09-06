@@ -27,6 +27,19 @@ pub struct CommitInfo {
 pub struct BranchInfo {
     pub name: String,
     pub is_head: bool,
+    /// Unix timestamp in seconds of the branch tip.
+    pub last_commit_time: i64,
+    /// Working directory of another checkout that has this branch as HEAD.
+    pub checked_out_in: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct WorktreeInfo {
+    pub name: String,
+    pub path: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
+    pub is_current: bool,
 }
 
 #[derive(Serialize)]
@@ -554,16 +567,82 @@ pub fn apply_squash(
 #[tauri::command]
 pub fn list_branches(file_path: String) -> Result<Vec<BranchInfo>, String> {
     let repo = discover(&file_path)?;
+    let elsewhere = other_checkouts(&repo);
     let mut out = Vec::new();
     for branch in repo.branches(Some(BranchType::Local)).map_err(err)? {
         let (branch, _) = branch.map_err(err)?;
+        let refname = branch.get().name().map_err(err)?;
+        let checked_out_in = elsewhere
+            .iter()
+            .find(|(head, _)| head == refname)
+            .map(|(_, dir)| dir.display().to_string());
         out.push(BranchInfo {
             name: branch.name().map_err(err)?.unwrap_or("").to_string(),
             is_head: branch.is_head(),
+            last_commit_time: branch
+                .get()
+                .peel_to_commit()
+                .map(|commit| commit.time().seconds())
+                .unwrap_or(0),
+            checked_out_in,
         });
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    // Current branch first, then most recently touched.
+    out.sort_by(|a, b| {
+        b.is_head
+            .cmp(&a.is_head)
+            .then(b.last_commit_time.cmp(&a.last_commit_time))
+            .then(a.name.cmp(&b.name))
+    });
     Ok(out)
+}
+
+#[tauri::command]
+pub fn list_worktrees(file_path: String) -> Result<Vec<WorktreeInfo>, String> {
+    let repo = discover(&file_path)?;
+    let here = workdir(&repo);
+    Ok(checkouts(&repo)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, checkout)| {
+            let dir = workdir(checkout)?;
+            Some(WorktreeInfo {
+                name: dir.file_name()?.to_string_lossy().into_owned(),
+                path: dir.display().to_string(),
+                branch: checkout
+                    .head()
+                    .ok()
+                    .and_then(|head| head.shorthand().ok().map(str::to_owned)),
+                is_main: index == 0,
+                is_current: Some(&dir) == here.as_ref(),
+            })
+        })
+        .collect())
+}
+
+/// The open document's counterpart in another worktree, when it exists.
+#[tauri::command]
+pub fn worktree_document(file_path: String, worktree_path: String) -> Option<String> {
+    let repo = discover(&file_path).ok()?;
+    let workdir = fs::canonicalize(repo.workdir()?).ok()?;
+    // Canonicalize the folder only, so a symlinked document keeps its own
+    // name instead of mapping to whatever it points at.
+    let file = Path::new(&file_path);
+    let parent = fs::canonicalize(file.parent()?).ok()?;
+    let rel = parent
+        .join(file.file_name()?)
+        .strip_prefix(&workdir)
+        .ok()?
+        .to_path_buf();
+    let target = Path::new(&worktree_path).join(rel);
+    target.is_file().then(|| target.display().to_string())
+}
+
+#[tauri::command]
+pub fn delete_branch(file_path: String, name: String) -> Result<(), String> {
+    let repo = discover(&file_path)?;
+    let mut branch = repo.find_branch(&name, BranchType::Local).map_err(err)?;
+    branch.delete().map_err(err)
 }
 
 #[tauri::command]
@@ -577,14 +656,16 @@ pub fn create_branch(file_path: String, name: String, checkout: bool) -> Result<
     Ok(())
 }
 
-/// Working directory of another checkout, main or linked, whose HEAD is
-/// `refname`. libgit2 refuses to move HEAD onto such a branch, but only after
-/// checkout_tree has already rewritten the index and files, so ask first.
-fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<PathBuf> {
-    let here = repo.workdir().and_then(|dir| dir.canonicalize().ok());
-    let mut checkouts = Vec::new();
+fn workdir(repo: &Repository) -> Option<PathBuf> {
+    repo.workdir()?.canonicalize().ok()
+}
+
+/// Every checkout of the repository: the main working directory first,
+/// then the linked worktrees.
+fn checkouts(repo: &Repository) -> Vec<Repository> {
+    let mut out = Vec::new();
     if let Ok(main) = Repository::open(repo.commondir()) {
-        checkouts.push(main);
+        out.push(main);
     }
     if let Ok(names) = repo.worktrees() {
         for name in names.iter().filter_map(|name| name.ok().flatten()) {
@@ -592,17 +673,36 @@ fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<PathBuf> {
                 .find_worktree(name)
                 .and_then(|wt| Repository::open_from_worktree(&wt))
             {
-                checkouts.push(linked);
+                out.push(linked);
             }
         }
     }
-    checkouts.into_iter().find_map(|checkout| {
-        let dir = checkout.workdir()?.canonicalize().ok()?;
-        if Some(&dir) == here.as_ref() {
-            return None;
-        }
-        (checkout.head().ok()?.name().ok()? == refname).then_some(dir)
-    })
+    out
+}
+
+/// HEAD reference and working directory of every checkout other than `repo`.
+fn other_checkouts(repo: &Repository) -> Vec<(String, PathBuf)> {
+    let here = workdir(repo);
+    checkouts(repo)
+        .iter()
+        .filter_map(|checkout| {
+            let dir = workdir(checkout)?;
+            if Some(&dir) == here.as_ref() {
+                return None;
+            }
+            let head = checkout.head().ok()?.name().ok()?.to_owned();
+            Some((head, dir))
+        })
+        .collect()
+}
+
+/// libgit2 refuses to move HEAD onto a branch another checkout holds, but
+/// only after checkout_tree has already rewritten the index and files.
+fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<PathBuf> {
+    other_checkouts(repo)
+        .into_iter()
+        .find(|(head, _)| head == refname)
+        .map(|(_, dir)| dir)
 }
 
 #[tauri::command]
@@ -616,9 +716,29 @@ pub fn checkout_branch(file_path: String, name: String) -> Result<(), String> {
         ));
     }
     let obj = repo.revparse_single(&refname).map_err(err)?;
+    let blocked = std::cell::RefCell::new(Vec::new());
     let mut opts = git2::build::CheckoutBuilder::new();
-    opts.safe();
-    repo.checkout_tree(&obj, Some(&mut opts)).map_err(err)?;
+    opts.safe()
+        .notify_on(git2::CheckoutNotificationType::CONFLICT)
+        .notify(|_, path, _, _, _| {
+            if let Some(path) = path {
+                blocked.borrow_mut().push(path.display().to_string());
+            }
+            true
+        });
+    if let Err(e) = repo.checkout_tree(&obj, Some(&mut opts)) {
+        let blocked = blocked.borrow();
+        if blocked.is_empty() {
+            return Err(err(e));
+        }
+        let shown = blocked.iter().take(6).cloned().collect::<Vec<_>>();
+        let more = blocked.len() - shown.len();
+        let mut message = format!("uncommitted changes would be lost in {}", shown.join(", "));
+        if more > 0 {
+            message.push_str(&format!(" and {more} more"));
+        }
+        return Err(message);
+    }
     repo.set_head(&refname).map_err(err)?;
     Ok(())
 }
@@ -1131,14 +1251,67 @@ mod tests {
 
         // The main checkout moves on, so switching the linked worktree to
         // its branch would rewrite doc.md before HEAD could be refused.
-        save_document(doc_s, "v2\n".into(), Some("v2".into()), true).unwrap();
+        save_document(doc_s.clone(), "v2\n".into(), Some("v2".into()), true).unwrap();
 
         let linked_doc = linked.join("doc.md");
-        let err = checkout_branch(p(&linked_doc), main_branch).unwrap_err();
+        let err = checkout_branch(p(&linked_doc), main_branch.clone()).unwrap_err();
         assert!(err.contains("another worktree"), "{err}");
         assert_eq!(fs::read_to_string(&linked_doc).unwrap(), "v1\n");
         let linked_repo = Repository::open(&linked).unwrap();
         assert_eq!(linked_repo.head().unwrap().shorthand().unwrap(), "review");
         assert!(linked_repo.statuses(None).unwrap().is_empty());
+
+        // Each checkout sees where the other's branch lives.
+        let linked_dir = linked.canonicalize().unwrap().display().to_string();
+        let branches = list_branches(doc_s.clone()).unwrap();
+        let review = branches.iter().find(|b| b.name == "review").unwrap();
+        assert_eq!(review.checked_out_in.as_deref(), Some(linked_dir.as_str()));
+        assert!(branches[0].is_head, "current branch listed first");
+        let worktrees = list_worktrees(p(&linked_doc)).unwrap();
+        assert_eq!(worktrees.len(), 2);
+        assert!(worktrees[0].is_main && !worktrees[0].is_current);
+        assert!(worktrees[1].is_current && worktrees[1].name == "linked");
+        assert_eq!(worktrees[1].branch.as_deref(), Some("review"));
+        assert_eq!(
+            worktree_document(doc_s.clone(), linked_dir.clone()),
+            Some(p(&linked.canonicalize().unwrap().join("doc.md")))
+        );
+        let only_here = dir.path().join("notes.md");
+        fs::write(&only_here, "here\n").unwrap();
+        assert_eq!(worktree_document(p(&only_here), linked_dir.clone()), None);
+        // A symlinked document maps by its own name, not by what it points at.
+        let link = dir.path().join("link.md");
+        std::os::unix::fs::symlink("doc.md", &link).unwrap();
+        std::os::unix::fs::symlink("doc.md", linked.join("link.md")).unwrap();
+        assert_eq!(
+            worktree_document(p(&link), linked_dir),
+            Some(p(&linked.canonicalize().unwrap().join("link.md")))
+        );
+        assert!(delete_branch(doc_s, "review".into()).is_err());
+    }
+
+    #[test]
+    fn switch_names_the_files_that_would_lose_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        save_document(doc_s.clone(), "v1\n".into(), None, true).unwrap();
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "v1\n".into(), Some("v1".into()), true).unwrap();
+        let main_branch = Repository::open(dir.path())
+            .unwrap()
+            .head()
+            .unwrap()
+            .shorthand()
+            .unwrap()
+            .to_string();
+        create_branch(doc_s.clone(), "other".into(), true).unwrap();
+        save_document(doc_s.clone(), "other\n".into(), Some("other".into()), true).unwrap();
+        // Autosave writes to disk without committing.
+        save_document(doc_s.clone(), "wip\n".into(), None, false).unwrap();
+
+        let err = checkout_branch(doc_s.clone(), main_branch).unwrap_err();
+        assert!(err.contains("doc.md"), "{err}");
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "wip\n");
     }
 }
