@@ -60,8 +60,18 @@ export const saveDocument = (
     commit,
   });
 
-export const squashRecentCommits = (filePath: string) =>
-  invoke<CommitInfo>("squash_recent_commits", { filePath });
+/** Squash the commits after `base` (or after the last squash / pull). */
+export const squashRecentCommits = (filePath: string, base?: string) =>
+  invoke<CommitInfo>("squash_recent_commits", { filePath, base: base ?? null });
+
+export const describeCommit = (filePath: string, commitId: string) =>
+  invoke<string>("describe_commit", { filePath, commitId });
+
+export const rewordCommit = (
+  filePath: string,
+  commitId: string,
+  message: string,
+) => invoke<CommitInfo>("reword_commit", { filePath, commitId, message });
 
 export const fileHistory = (filePath: string, limit?: number) =>
   invoke<CommitInfo[]>("file_history", { filePath, limit: limit ?? null });

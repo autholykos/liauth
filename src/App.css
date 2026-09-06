@@ -591,6 +591,12 @@ button.wide {
   opacity: 0.55;
 }
 
+.commit-squash {
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
 .commit-summary {
   font-weight: 500;
 }

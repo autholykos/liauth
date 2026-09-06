@@ -961,6 +961,23 @@ function App() {
     [openPath],
   );
 
+  // Toki's one-line recap replaces the default "Save …" subject once it
+  // arrives, provided the commit is still the latest one.
+  const recapCommit = useCallback(
+    async (path: string, commitId: string) => {
+      try {
+        const message = await api.describeCommit(path, commitId);
+        await api.rewordCommit(path, commitId, message);
+        if (filePathRef.current === path && !viewingRef.current) {
+          await refreshGit(path);
+        }
+      } catch (e) {
+        console.info("[liauth] commit recap skipped:", e);
+      }
+    },
+    [refreshGit],
+  );
+
   const doSave = useCallback(async () => {
     const view = viewRef.current;
     if (!view || viewing) return;
@@ -990,6 +1007,7 @@ function App() {
       if (!diskDirtyRef.current) setDirty(info.file_dirty);
       await refreshProject(path);
       if (!unwatchRef.current) await watchFile(path);
+      if (commit && !info.merging) void recapCommit(path, commit.id);
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
@@ -1001,6 +1019,7 @@ function App() {
     refreshProject,
     flash,
     watchFile,
+    recapCommit,
   ]);
 
   const doSaveAs = useCallback(async () => {
@@ -1968,7 +1987,7 @@ function App() {
   const currentWorktree = worktrees.find((w) => w.is_current);
   const versioned = !!repo?.repo_root;
 
-  const squashRecentCommits = useCallback(async () => {
+  const squashRecentCommits = useCallback(async (base?: string) => {
     if (!filePath || squashing) return;
     if (viewingRef.current) {
       flash("Return to the current document before squashing");
@@ -1985,11 +2004,11 @@ function App() {
     setSquashing(true);
     flash("Toki is writing the squash commit message…");
     try {
-      const commit = await api.squashRecentCommits(filePath);
+      const commit = await api.squashRecentCommits(filePath, base);
       const info = await refreshGit(filePath);
       if (!diskDirtyRef.current) setDirty(info.file_dirty);
       setLastSave(`squashed ${commit.id.slice(0, 7)} · ${timeNow()}`);
-      flash(`Squashed recent commits into ${commit.id.slice(0, 7)}`);
+      flash(`Squashed into ${commit.id.slice(0, 7)}: ${commit.summary}`);
     } catch (e) {
       flash(`Could not squash commits: ${e}`);
     } finally {
@@ -2596,6 +2615,17 @@ function App() {
                   <span className="commit-meta">
                     {c.author} · {fmtTime(c.time)} · {c.id.slice(0, 7)}
                   </span>
+                  <button
+                    className="commit-squash"
+                    title="Squash every newer commit into one on top of this one; Toki writes the message"
+                    disabled={squashing || reinstating !== null}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void squashRecentCommits(c.id);
+                    }}
+                  >
+                    Squash to here
+                  </button>
                 </li>
               ))}
             </ul>

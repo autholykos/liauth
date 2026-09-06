@@ -417,9 +417,9 @@ fn squash_backup(branch: &str) -> String {
     format!("refs/liauth/pre-squash/{branch}")
 }
 
-pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
-    const MAX_DIFF_BYTES: usize = 64 * 1024;
-
+/// Squash boundary: an explicit ancestor, or the newer of the last squash
+/// and the integrated upstream point.
+pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, String> {
     let repo = discover(file_path)?;
     require_clean_repo(&repo)?;
     let head_ref = repo.head().map_err(err)?;
@@ -431,27 +431,38 @@ pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
         .target()
         .ok_or_else(|| "current branch has no commit".to_string())?;
 
-    let marker = repo
-        .find_reference(&squash_marker(&branch))
-        .ok()
-        .and_then(|reference| reference.target());
-    let upstream_base = repo
-        .find_branch(&branch, BranchType::Local)
-        .ok()
-        .and_then(|local| local.upstream().ok())
-        .and_then(|upstream| upstream.get().target())
-        .and_then(|upstream| repo.merge_base(head, upstream).ok());
-    let base = [marker, upstream_base]
-        .into_iter()
-        .flatten()
-        .filter_map(|candidate| {
-            first_parent_distance(&repo, head, candidate).map(|distance| (candidate, distance))
-        })
-        .min_by_key(|(_, distance)| *distance)
-        .map(|(candidate, _)| candidate)
-        .ok_or_else(|| {
-            "no squash boundary found; configure and pull a tracking branch first".to_string()
-        })?;
+    let base = match base {
+        Some(base) => {
+            first_parent_distance(&repo, head, base)
+                .ok_or_else(|| "the chosen commit is not behind the current branch".to_string())?;
+            base
+        }
+        None => {
+            let marker = repo
+                .find_reference(&squash_marker(&branch))
+                .ok()
+                .and_then(|reference| reference.target());
+            let upstream_base = repo
+                .find_branch(&branch, BranchType::Local)
+                .ok()
+                .and_then(|local| local.upstream().ok())
+                .and_then(|upstream| upstream.get().target())
+                .and_then(|upstream| repo.merge_base(head, upstream).ok());
+            [marker, upstream_base]
+                .into_iter()
+                .flatten()
+                .filter_map(|candidate| {
+                    first_parent_distance(&repo, head, candidate)
+                        .map(|distance| (candidate, distance))
+                })
+                .min_by_key(|(_, distance)| *distance)
+                .map(|(candidate, _)| candidate)
+                .ok_or_else(|| {
+                    "no squash boundary found; configure and pull a tracking branch first"
+                        .to_string()
+                })?
+        }
+    };
 
     let mut summaries = Vec::new();
     let mut oid = head;
@@ -465,7 +476,7 @@ pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
     }
     summaries.reverse();
     if summaries.len() < 2 {
-        return Err("fewer than two commits since the last squash or pull".to_string());
+        return Err("fewer than two commits to squash".to_string());
     }
 
     let base_tree = repo.find_commit(base).map_err(err)?.tree().map_err(err)?;
@@ -473,8 +484,22 @@ pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
     if base_tree.id() == head_tree.id() {
         return Err("the selected commits have no net changes".to_string());
     }
+    let diff = patch_text(&repo, &base_tree, &head_tree)?;
+
+    Ok(SquashPlan {
+        branch,
+        head,
+        base,
+        summaries,
+        diff,
+    })
+}
+
+/// Unified diff between two trees, capped so it fits a model prompt.
+fn patch_text(repo: &Repository, old: &git2::Tree, new: &git2::Tree) -> Result<String, String> {
+    const MAX_DIFF_BYTES: usize = 64 * 1024;
     let diff = repo
-        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .diff_tree_to_tree(Some(old), Some(new), None)
         .map_err(err)?;
     let mut bytes = Vec::new();
     let mut truncated = false;
@@ -494,17 +519,72 @@ pub fn squash_plan(file_path: &str) -> Result<SquashPlan, String> {
         true
     })
     .map_err(err)?;
-    let mut diff = String::from_utf8_lossy(&bytes).into_owned();
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if truncated {
-        diff.push_str("\n[diff truncated]\n");
+        text.push_str("\n[diff truncated]\n");
     }
+    Ok(text)
+}
 
-    Ok(SquashPlan {
-        branch,
-        head,
-        base,
-        summaries,
-        diff,
+/// The diff a commit introduced over its first parent.
+pub fn commit_patch(file_path: &str, commit_id: &str) -> Result<String, String> {
+    let repo = discover(file_path)?;
+    let commit = repo
+        .find_commit(Oid::from_str(commit_id).map_err(err)?)
+        .map_err(err)?;
+    let parent_tree = match commit.parent(0) {
+        Ok(parent) => Some(parent.tree().map_err(err)?),
+        Err(_) => None,
+    };
+    let tree = commit.tree().map_err(err)?;
+    let empty = repo.treebuilder(None).map_err(err)?.write().map_err(err)?;
+    let empty = repo.find_tree(empty).map_err(err)?;
+    let patch = patch_text(&repo, parent_tree.as_ref().unwrap_or(&empty), &tree);
+    patch
+}
+
+/// Replace a commit's message, only while it is still HEAD. The squash
+/// marker follows it when it points there.
+#[tauri::command]
+pub fn reword_commit(
+    file_path: String,
+    commit_id: String,
+    message: String,
+) -> Result<CommitInfo, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("empty commit message".to_string());
+    }
+    let repo = discover(&file_path)?;
+    if repo.state() != RepositoryState::Clean {
+        return Err("finish the current git operation first".to_string());
+    }
+    let head_ref = repo.head().map_err(err)?;
+    let head = head_ref
+        .target()
+        .ok_or_else(|| "current branch has no commit".to_string())?;
+    if head.to_string() != commit_id {
+        return Err("the commit is no longer the latest".to_string());
+    }
+    let branch = head_ref.shorthand().map_err(err)?.to_string();
+    let commit = repo.find_commit(head).map_err(err)?;
+    let oid = commit
+        .amend(Some("HEAD"), None, None, None, Some(message), None)
+        .map_err(err)?;
+    if let Ok(marker) = repo.find_reference(&squash_marker(&branch)) {
+        if marker.target() == Some(head) {
+            repo.reference(&squash_marker(&branch), oid, true, "liauth reword")
+                .map_err(err)?;
+        }
+    }
+    let commit = repo.find_commit(oid).map_err(err)?;
+    let author = commit.author().name().unwrap_or("").to_string();
+    let time = commit.time().seconds();
+    Ok(CommitInfo {
+        id: oid.to_string(),
+        summary: message.lines().next().unwrap_or("").to_string(),
+        author,
+        time,
     })
 }
 
@@ -520,7 +600,7 @@ pub fn apply_squash(
     if message.lines().next().unwrap_or("").chars().count() > 72 {
         return Err("Toki returned a commit subject longer than 72 characters".to_string());
     }
-    let latest = squash_plan(file_path)?;
+    let latest = squash_plan(file_path, Some(plan.base))?;
     if latest.branch != plan.branch || latest.head != plan.head || latest.base != plan.base {
         return Err("squash boundary changed while Toki was generating the message".to_string());
     }
@@ -1183,7 +1263,7 @@ mod tests {
         let old_head = repo.head().unwrap().target().unwrap();
         let old_tree = repo.find_commit(old_head).unwrap().tree_id();
 
-        let plan = squash_plan(&doc_s).unwrap();
+        let plan = squash_plan(&doc_s, None).unwrap();
         assert_eq!(plan.base, base);
         assert_eq!(plan.head, old_head);
         assert_eq!(plan.summaries, ["First edit", "Second edit"]);
@@ -1210,7 +1290,7 @@ mod tests {
                 .target(),
             Some(new_head)
         );
-        assert!(squash_plan(&doc_s).is_err());
+        assert!(squash_plan(&doc_s, None).is_err());
     }
 
     #[test]
@@ -1259,7 +1339,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let plan = squash_plan(&doc_s).unwrap();
+        let plan = squash_plan(&doc_s, None).unwrap();
         assert_eq!(plan.base, base);
         assert_eq!(plan.summaries, ["One", "Two"]);
     }
@@ -1359,5 +1439,71 @@ mod tests {
         let err = checkout_branch(doc_s.clone(), main_branch).unwrap_err();
         assert!(err.contains("doc.md"), "{err}");
         assert_eq!(fs::read_to_string(&doc).unwrap(), "wip\n");
+    }
+
+    #[test]
+    fn squash_to_a_chosen_commit_keeps_it_as_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        let first = save_document(doc_s.clone(), "v1\n".into(), Some("v1".into()), true)
+            .unwrap()
+            .unwrap();
+        save_document(doc_s.clone(), "v2\n".into(), Some("v2".into()), true).unwrap();
+        save_document(doc_s.clone(), "v3\n".into(), Some("v3".into()), true).unwrap();
+
+        let base = Oid::from_str(&first.id).unwrap();
+        let plan = squash_plan(&doc_s, Some(base)).unwrap();
+        assert_eq!(plan.summaries, vec!["v2", "v3"]);
+        assert!(plan.diff.contains("+v3"));
+        let squashed = apply_squash(&doc_s, &plan, "Rewrite the opening").unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.id().to_string(), squashed.id);
+        assert_eq!(head.parent_id(0).unwrap(), base);
+        assert_eq!(read_document(doc_s.clone()).unwrap(), "v3\n");
+
+        let err = squash_plan(&doc_s, Some(Oid::from_str(&squashed.id).unwrap()))
+            .err()
+            .expect("nothing newer than the squash commit");
+        assert!(err.contains("fewer than two"), "{err}");
+    }
+
+    #[test]
+    fn reword_replaces_only_the_latest_commit_and_moves_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        let first = save_document(doc_s.clone(), "v1\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        let second = save_document(doc_s.clone(), "v2\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert!(commit_patch(&doc_s, &second.id).unwrap().contains("+v2"));
+        assert!(commit_patch(&doc_s, &first.id).unwrap().contains("+v1"));
+
+        let err = reword_commit(doc_s.clone(), first.id.clone(), "Older".into())
+            .err()
+            .expect("only HEAD can be reworded");
+        assert!(err.contains("no longer the latest"), "{err}");
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+        let head = Oid::from_str(&second.id).unwrap();
+        repo.reference(&squash_marker(&branch), head, true, "test")
+            .unwrap();
+        let reworded =
+            reword_commit(doc_s.clone(), second.id.clone(), "Paul meets Lisa".into()).unwrap();
+        assert_ne!(reworded.id, second.id);
+        assert_eq!(reworded.summary, "Paul meets Lisa");
+        let history = file_history(doc_s.clone(), None).unwrap();
+        assert_eq!(history[0].summary, "Paul meets Lisa");
+        assert_eq!(history.len(), 2);
+        assert_eq!(read_document(doc_s).unwrap(), "v2\n");
+        let marker = repo.find_reference(&squash_marker(&branch)).unwrap();
+        assert_eq!(marker.target().unwrap().to_string(), reworded.id);
     }
 }

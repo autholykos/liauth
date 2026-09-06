@@ -16,10 +16,24 @@ fn take_pending_open(state: tauri::State<PendingOpen>) -> Option<String> {
 }
 
 #[tauri::command]
-async fn squash_recent_commits(file_path: String) -> Result<git::CommitInfo, String> {
-    let plan = git::squash_plan(&file_path)?;
+async fn squash_recent_commits(
+    file_path: String,
+    base: Option<String>,
+) -> Result<git::CommitInfo, String> {
+    let base = base
+        .map(|id| git2::Oid::from_str(&id))
+        .transpose()
+        .map_err(|e| e.message().to_string())?;
+    let plan = git::squash_plan(&file_path, base)?;
     let message = ai::squash_commit_message(&plan.branch, &plan.summaries, &plan.diff).await?;
     git::apply_squash(&file_path, &plan, &message)
+}
+
+/// One-line recap of a commit's edit, for its message.
+#[tauri::command]
+async fn describe_commit(file_path: String, commit_id: String) -> Result<String, String> {
+    let diff = git::commit_patch(&file_path, &commit_id)?;
+    ai::commit_recap(&diff).await
 }
 
 #[derive(serde::Serialize)]
@@ -511,6 +525,8 @@ pub fn run() {
             git::merge_branch,
             git::abort_merge,
             git::merge_contents,
+            git::reword_commit,
+            describe_commit,
             config::read_vim_config,
             config::write_vim_config,
             ai::draft_note_edits,

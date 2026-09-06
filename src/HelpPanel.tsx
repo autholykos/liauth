@@ -71,7 +71,10 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
           integrated upstream point. Toki writes the message automatically;
           it receives the commit summaries and a capped aggregate diff. The
           command requires a clean branch and keeps a recovery ref for the
-          previous HEAD.
+          previous HEAD. <em>Squash to here</em> on a History entry does the
+          same for every commit newer than that one. Each <kbd>⌘S</kbd>{" "}
+          commit also gets a one-line recap from Toki as its message, written
+          in the background.
         </p>
       ),
     },
