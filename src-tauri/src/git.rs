@@ -393,12 +393,17 @@ fn require_clean_repo(repo: &Repository) -> Result<(), String> {
     let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
     let changed = statuses
         .iter()
-        .filter_map(|entry| entry.path().map(str::to_owned))
+        .filter_map(|entry| entry.path().map(str::to_owned).ok())
         .collect::<Vec<_>>();
     if changed.is_empty() {
         return Ok(());
     }
-    let shown = changed.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+    let shown = changed
+        .iter()
+        .take(6)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut message = format!("commit or discard changes in {shown} before squashing");
     if changed.len() > 6 {
         message.push_str(&format!(" ({} more)", changed.len() - 6));
