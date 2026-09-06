@@ -265,6 +265,16 @@ button.wide {
   transform: translateY(0);
 }
 
+.room-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-color: var(--c-accent);
+  color: var(--c-accent);
+  white-space: nowrap;
+}
+
 /* Extra vertical breathing room so typewriter centering works at the
    start and end of the document. */
 .app.room .editor-wrap .cm-editor .cm-content {
