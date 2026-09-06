@@ -628,6 +628,27 @@ pub async fn squash_commit_message(
         .ok_or_else(|| "Toki returned no valid squash commit message".to_string())
 }
 
+/// One line, at most 72 characters, saying what an edit changed in the text.
+pub async fn commit_recap(diff: &str) -> Result<String, String> {
+    let prompt = format!(
+        "Riassumi in UNA riga la modifica al testo descritta dal diff seguente.\n\n\
+         REGOLE:\n\
+         - massimo 60 caratteri, nella lingua del testo;\n\
+         - di' cosa cambia nel contenuto (scena, personaggi, tono, frase), non l'operazione;\n\
+         - niente virgolette, niente punto finale, non inventare;\n\
+         - rispondi SOLO con JSON: {{\"message\": \"<riga>\"}}.\n\n\
+         DIFF:\n{diff}"
+    );
+    let content = chat_once(&prompt, 0.2, 128).await?;
+    let message =
+        parse_squash_message(&content).ok_or_else(|| "Toki returned no valid recap".to_string())?;
+    let line = message.lines().next().unwrap_or("").trim().to_string();
+    if line.is_empty() || line.chars().count() > 72 {
+        return Err("Toki returned an unusable recap".to_string());
+    }
+    Ok(line)
+}
+
 /// Rephrase one selected passage. Liauth supplies only surrounding context;
 /// Toki returns one replacement that the frontend stages as CriticMarkup.
 /// The direction is the whole instruction: presets and project skills are
