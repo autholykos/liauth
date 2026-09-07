@@ -1,5 +1,6 @@
 import {
   EditorView,
+  ViewPlugin,
   keymap,
   drawSelection,
   placeholder,
@@ -222,6 +223,32 @@ function installFindPosVFix(): void {
 
 installFindPosVFix();
 
+/**
+ * The content is a centred column narrower than the scroller, so a click
+ * in the margins lands on the scroller itself; WebKit then focuses the
+ * scroller and every key goes nowhere. Treat such a click as a click at
+ * the nearest text position, as CM6 does for clicks inside the content.
+ */
+const marginClick = ViewPlugin.define((view) => {
+  const onMouseDown = (e: MouseEvent) => {
+    if (e.target !== view.scrollDOM || e.button !== 0) return;
+    e.preventDefault();
+    view.dispatch({
+      selection: {
+        anchor: view.posAtCoords({ x: e.clientX, y: e.clientY }, false),
+      },
+      userEvent: "select.pointer",
+    });
+    view.focus();
+  };
+  view.scrollDOM.addEventListener("mousedown", onMouseDown);
+  return {
+    destroy() {
+      view.scrollDOM.removeEventListener("mousedown", onMouseDown);
+    },
+  };
+});
+
 /** Subtle source-level colors for the bits that stay visible. */
 const mdHighlight = HighlightStyle.define([
   { tag: tags.monospace, fontFamily: "var(--font-mono)" },
@@ -395,6 +422,7 @@ export function createEditorState(
       history(),
       drawSelection(),
       EditorView.lineWrapping,
+      marginClick,
       placeholder("Start writing…"),
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),

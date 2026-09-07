@@ -933,7 +933,11 @@ function App() {
   const openPath = useCallback(
     async (path: string) => {
       if (!(await leaveCurrentDocument("Open file"))) return false;
-      return loadFile(path);
+      if (!(await loadFile(path))) return false;
+      // Opening is a deliberate switch to this document: keys should reach
+      // it at once rather than the sidebar item or body that was clicked.
+      viewRef.current?.focus();
+      return true;
     },
     [leaveCurrentDocument, loadFile],
   );
