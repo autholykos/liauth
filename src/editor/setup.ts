@@ -1,5 +1,6 @@
 import {
   EditorView,
+  ViewPlugin,
   keymap,
   drawSelection,
   placeholder,
@@ -222,6 +223,64 @@ function installFindPosVFix(): void {
 
 installFindPosVFix();
 
+/**
+ * The content is a centred column narrower than the scroller, so a click
+ * in the margins lands on the scroller itself; WebKit then focuses the
+ * scroller and every key goes nowhere. Treat such a click as a click at
+ * the nearest text position, as CM6 does for clicks inside the content.
+ */
+/** Width of the edge strip an overlay scrollbar can occupy, in px. */
+const scrollbarBand = 16;
+
+const marginClick = ViewPlugin.define((view) => {
+  const onMouseDown = (e: MouseEvent) => {
+    // Only a plain single press: modified or repeated clicks and drags
+    // keep whatever the browser did with them before.
+    if (
+      e.target !== view.scrollDOM ||
+      e.button !== 0 ||
+      e.detail !== 1 ||
+      e.shiftKey ||
+      e.altKey ||
+      e.metaKey ||
+      e.ctrlKey
+    ) {
+      return;
+    }
+    // A press on a scrollbar also targets the scroller and must keep
+    // scrolling. Classic bars lie outside the client box; overlay bars
+    // (macOS) sit inside it along the far edges when the content overflows.
+    const { clientWidth, clientHeight, scrollWidth, scrollHeight } =
+      view.scrollDOM;
+    const onVerticalBar =
+      scrollHeight > clientHeight && e.offsetX >= clientWidth - scrollbarBand;
+    const onHorizontalBar =
+      scrollWidth > clientWidth && e.offsetY >= clientHeight - scrollbarBand;
+    if (
+      e.offsetX >= clientWidth ||
+      e.offsetY >= clientHeight ||
+      onVerticalBar ||
+      onHorizontalBar
+    ) {
+      return;
+    }
+    e.preventDefault();
+    view.dispatch({
+      selection: {
+        anchor: view.posAtCoords({ x: e.clientX, y: e.clientY }, false),
+      },
+      userEvent: "select.pointer",
+    });
+    view.focus();
+  };
+  view.scrollDOM.addEventListener("mousedown", onMouseDown);
+  return {
+    destroy() {
+      view.scrollDOM.removeEventListener("mousedown", onMouseDown);
+    },
+  };
+});
+
 /** Subtle source-level colors for the bits that stay visible. */
 const mdHighlight = HighlightStyle.define([
   { tag: tags.monospace, fontFamily: "var(--font-mono)" },
@@ -395,6 +454,7 @@ export function createEditorState(
       history(),
       drawSelection(),
       EditorView.lineWrapping,
+      marginClick,
       placeholder("Start writing…"),
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
