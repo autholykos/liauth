@@ -208,11 +208,16 @@ function App() {
   const [lineNums, setLineNums] = useState(
     () => localStorage.getItem("liauth.lines") === "1",
   );
+  // On unless switched off: prose wants the macOS dictionaries.
+  const [spellcheck, setSpellcheck] = useState(
+    () => localStorage.getItem("liauth.spell") !== "0",
+  );
   const [pageLayout, setPageLayout] = useState(
     () => localStorage.getItem("liauth.page") === "1",
   );
   const [novelProof, setNovelProof] = useState(false);
   const lineNumsRef = useRef(lineNums);
+  const spellcheckRef = useRef(spellcheck);
   const [notes, setNotes] = useState<NoteMatch[]>([]);
   const notesTimerRef = useRef<number | undefined>(undefined);
   const [rsvp, setRsvp] = useState<{
@@ -471,6 +476,7 @@ function App() {
             vim: vimRef.current,
             typewriter: roomRef.current,
             lineNumbers: lineNumsRef.current,
+            spellcheck: spellcheckRef.current,
           },
         ),
       );
@@ -707,6 +713,20 @@ function App() {
       );
     }
   }, [lineNums, setEditorContent]);
+
+  // Same for spell checking.
+  useEffect(() => {
+    localStorage.setItem("liauth.spell", spellcheck ? "1" : "0");
+    spellcheckRef.current = spellcheck;
+    const view = viewRef.current;
+    if (view) {
+      setEditorContent(
+        view.state.doc.toString(),
+        viewingRef.current !== null,
+        viewingRef.current,
+      );
+    }
+  }, [spellcheck, setEditorContent]);
 
   // Page layout: the content column styled as a paper sheet (pure CSS).
   useEffect(() => {
@@ -2107,6 +2127,9 @@ function App() {
         case "toggle-lines":
           setLineNums((v) => !v);
           break;
+        case "toggle-spell":
+          setSpellcheck((v) => !v);
+          break;
         case "toggle-vim":
           setVimMode((v) => !v);
           break;
@@ -2194,6 +2217,7 @@ function App() {
       font,
       vim: vimMode,
       lineNumbers: lineNums,
+      spellcheck,
       pageLayout,
       novelProof,
       room,
@@ -2208,6 +2232,7 @@ function App() {
     font,
     vimMode,
     lineNums,
+    spellcheck,
     pageLayout,
     novelProof,
     room,
@@ -2246,6 +2271,10 @@ function App() {
       id: "toggle-lines",
       title: lineNums ? "Hide Line Numbers" : "Show Line Numbers",
       shortcut: "⇧⌘L",
+    },
+    {
+      id: "toggle-spell",
+      title: spellcheck ? "Disable Spell Checking" : "Enable Spell Checking",
     },
     {
       id: "toggle-page",

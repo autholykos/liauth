@@ -17,6 +17,7 @@ export interface MenuSnapshot {
   font: string;
   vim: boolean;
   lineNumbers: boolean;
+  spellcheck: boolean;
   pageLayout: boolean;
   novelProof: boolean;
   room: boolean;
@@ -272,6 +273,7 @@ export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
         s.lineNumbers,
         "CmdOrCtrl+Shift+L",
       ),
+      await check("toggle-spell", "Check Spelling", s.spellcheck),
       await check(
         "toggle-page",
         "Page Layout",

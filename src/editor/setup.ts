@@ -21,6 +21,7 @@ import {
   gotoNextNote,
 } from "./notes";
 import { historyDiff } from "./historyDiff";
+import { spellcheck } from "./spellcheck";
 import {
   keylogRecorder,
   recordKeylog,
@@ -408,6 +409,7 @@ export interface EditorOptions {
   vim?: boolean;
   typewriter?: boolean;
   lineNumbers?: boolean;
+  spellcheck?: boolean;
 }
 
 export function createEditorState(
@@ -420,6 +422,7 @@ export function createEditorState(
     vim: useVim = false,
     typewriter: useTypewriter = false,
     lineNumbers: useLineNumbers = false,
+    spellcheck: useSpellcheck = false,
   } = opts;
   if (useVim) {
     // Ex commands are registered globally; rebind to the current document's
@@ -450,6 +453,7 @@ export function createEditorState(
       useVim ? EditorState.allowMultipleSelections.of(true) : [],
       useTypewriter ? typewriterScroll : [],
       useLineNumbers ? lineNumbers() : [],
+      useSpellcheck ? spellcheck : [],
       EditorState.readOnly.of(readOnly),
       history(),
       drawSelection(),
