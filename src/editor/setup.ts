@@ -234,7 +234,19 @@ const scrollbarBand = 16;
 
 const marginClick = ViewPlugin.define((view) => {
   const onMouseDown = (e: MouseEvent) => {
-    if (e.target !== view.scrollDOM || e.button !== 0) return;
+    // Only a plain single press: modified or repeated clicks and drags
+    // keep whatever the browser did with them before.
+    if (
+      e.target !== view.scrollDOM ||
+      e.button !== 0 ||
+      e.detail !== 1 ||
+      e.shiftKey ||
+      e.altKey ||
+      e.metaKey ||
+      e.ctrlKey
+    ) {
+      return;
+    }
     // A press on a scrollbar also targets the scroller and must keep
     // scrolling. Classic bars lie outside the client box; overlay bars
     // (macOS) sit inside it along the far edges when the content overflows.
