@@ -229,13 +229,29 @@ installFindPosVFix();
  * scroller and every key goes nowhere. Treat such a click as a click at
  * the nearest text position, as CM6 does for clicks inside the content.
  */
+/** Width of the edge strip an overlay scrollbar can occupy, in px. */
+const scrollbarBand = 16;
+
 const marginClick = ViewPlugin.define((view) => {
   const onMouseDown = (e: MouseEvent) => {
     if (e.target !== view.scrollDOM || e.button !== 0) return;
-    // A press on a classic scrollbar also targets the scroller; it lies
-    // outside the client box, and must keep scrolling.
-    const { clientWidth, clientHeight } = view.scrollDOM;
-    if (e.offsetX >= clientWidth || e.offsetY >= clientHeight) return;
+    // A press on a scrollbar also targets the scroller and must keep
+    // scrolling. Classic bars lie outside the client box; overlay bars
+    // (macOS) sit inside it along the far edges when the content overflows.
+    const { clientWidth, clientHeight, scrollWidth, scrollHeight } =
+      view.scrollDOM;
+    const onVerticalBar =
+      scrollHeight > clientHeight && e.offsetX >= clientWidth - scrollbarBand;
+    const onHorizontalBar =
+      scrollWidth > clientWidth && e.offsetY >= clientHeight - scrollbarBand;
+    if (
+      e.offsetX >= clientWidth ||
+      e.offsetY >= clientHeight ||
+      onVerticalBar ||
+      onHorizontalBar
+    ) {
+      return;
+    }
     e.preventDefault();
     view.dispatch({
       selection: {
