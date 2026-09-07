@@ -253,6 +253,8 @@ export async function saveKeylog(view: EditorView): Promise<string> {
     dropped,
     ...context(view),
     layers: layerCensus(view),
+    // Document-wide: a box on screen with no element here is a paint artifact.
+    fatCursors: document.querySelectorAll(".cm-fat-cursor").length,
     layerHtml: Array.from(view.dom.querySelectorAll(CURSOR_LAYERS), (el) =>
       el.outerHTML.slice(0, 2000),
     ),
