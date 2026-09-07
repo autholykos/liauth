@@ -26,6 +26,7 @@ import {
   toggleBold,
   toggleItalic,
   sweepGhostCursorLayers,
+  setSpellcheck as applySpellcheck,
   CursorStatus,
 } from "./editor/setup";
 import { dumpKeylog } from "./editor/keylog";
@@ -714,19 +715,14 @@ function App() {
     }
   }, [lineNums, setEditorContent]);
 
-  // Same for spell checking.
+  // Spell checking is reconfigured in place: no state rebuild, so the undo
+  // history and the selection survive the toggle.
   useEffect(() => {
     localStorage.setItem("liauth.spell", spellcheck ? "1" : "0");
     spellcheckRef.current = spellcheck;
     const view = viewRef.current;
-    if (view) {
-      setEditorContent(
-        view.state.doc.toString(),
-        viewingRef.current !== null,
-        viewingRef.current,
-      );
-    }
-  }, [spellcheck, setEditorContent]);
+    if (view) applySpellcheck(view, spellcheck);
+  }, [spellcheck]);
 
   // Page layout: the content column styled as a paper sheet (pure CSS).
   useEffect(() => {

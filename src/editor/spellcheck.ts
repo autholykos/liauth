@@ -20,6 +20,9 @@ const NOT_PROSE = new Set([
   "HTMLTag",
   "HTMLBlock",
   "Comment",
+  "CommentBlock",
+  "ProcessingInstruction",
+  "ProcessingInstructionBlock",
 ]);
 
 const notProse = Decoration.mark({ attributes: { spellcheck: "false" } });

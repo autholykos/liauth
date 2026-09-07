@@ -6,7 +6,7 @@ import {
   placeholder,
   lineNumbers,
 } from "@codemirror/view";
-import { EditorState, EditorSelection } from "@codemirror/state";
+import { Compartment, EditorState, EditorSelection } from "@codemirror/state";
 import { history, historyKeymap, defaultKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { syntaxHighlighting, HighlightStyle } from "@codemirror/language";
@@ -22,6 +22,15 @@ import {
 } from "./notes";
 import { historyDiff } from "./historyDiff";
 import { spellcheck } from "./spellcheck";
+
+/** Spell checking is toggled in place so undo history and selection survive. */
+const spellcheckCompartment = new Compartment();
+
+export function setSpellcheck(view: EditorView, on: boolean): void {
+  view.dispatch({
+    effects: spellcheckCompartment.reconfigure(on ? spellcheck : []),
+  });
+}
 import {
   keylogRecorder,
   recordKeylog,
@@ -453,7 +462,7 @@ export function createEditorState(
       useVim ? EditorState.allowMultipleSelections.of(true) : [],
       useTypewriter ? typewriterScroll : [],
       useLineNumbers ? lineNumbers() : [],
-      useSpellcheck ? spellcheck : [],
+      spellcheckCompartment.of(useSpellcheck ? spellcheck : []),
       EditorState.readOnly.of(readOnly),
       history(),
       drawSelection(),
