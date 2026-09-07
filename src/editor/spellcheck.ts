@@ -47,7 +47,13 @@ const exclusions = ViewPlugin.fromClass(
       this.decorations = excludedRanges(view);
     }
     update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged) {
+      // The parser finishes large documents asynchronously, in updates that
+      // change neither the document nor the viewport.
+      if (
+        update.docChanged ||
+        update.viewportChanged ||
+        syntaxTree(update.startState) !== syntaxTree(update.state)
+      ) {
         this.decorations = excludedRanges(update.view);
       }
     }
