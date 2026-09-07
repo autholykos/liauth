@@ -232,6 +232,10 @@ installFindPosVFix();
 const marginClick = ViewPlugin.define((view) => {
   const onMouseDown = (e: MouseEvent) => {
     if (e.target !== view.scrollDOM || e.button !== 0) return;
+    // A press on a classic scrollbar also targets the scroller; it lies
+    // outside the client box, and must keep scrolling.
+    const { clientWidth, clientHeight } = view.scrollDOM;
+    if (e.offsetX >= clientWidth || e.offsetY >= clientHeight) return;
     e.preventDefault();
     view.dispatch({
       selection: {
