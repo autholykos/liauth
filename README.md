@@ -35,6 +35,11 @@ git engine for versioning and asynchronous review.
   pivot, sentence/paragraph-aware pacing, 100–900 WPM (↑/↓), arrows to step,
   Esc drops the cursor where you stopped. Markdown syntax and notes are
   stripped from the word stream.
+- **Key log** — `:keylog` (or "Write Key Log" in the palette) dumps the last
+  500 input events — DOM keys, composition and focus changes, plus what the
+  Vim engine made of each — to `~/.config/liauth/keylog.jsonl`, so one
+  reproduction of a keyboard glitch is enough for a bug report. `:keylog
+  clear` empties the buffer first.
 - **Concurrent-write detection** — the open file is watched; external writes
   reload automatically when the buffer is clean, merge automatically (diff3,
   same algorithm as git) when both sides changed compatibly, and otherwise

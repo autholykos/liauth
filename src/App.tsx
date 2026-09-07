@@ -28,6 +28,7 @@ import {
   sweepGhostCursorLayers,
   CursorStatus,
 } from "./editor/setup";
+import { dumpKeylog } from "./editor/keylog";
 import {
   buildAppMenu,
   showEditorSelectionMenu,
@@ -463,6 +464,7 @@ function App() {
             onToggleRoom: () => setRoom((r) => !r),
             onRsvp: () => rsvpRef.current(),
             onStatus: (s) => setCursor(s),
+            onNotice: flash,
           },
           {
             readOnly,
@@ -487,7 +489,7 @@ function App() {
       }
       loadingRef.current = false;
     },
-    [autoSave, displayHistoryDiff, refreshNotes, scheduleCounts],
+    [autoSave, displayHistoryDiff, flash, refreshNotes, scheduleCounts],
   );
 
   useEffect(() => {
@@ -2132,6 +2134,9 @@ function App() {
           if (panelRef.current === "vimrc") setPanel("none");
           else void openVimrcPanel();
           break;
+        case "keylog":
+          if (viewRef.current) dumpKeylog(viewRef.current, flash);
+          break;
         case "toggle-nav":
           toggleNavigatorPanel("files");
           break;
@@ -2170,6 +2175,7 @@ function App() {
       squashRecentCommits,
       openVimrcPanel,
       toggleNavigatorPanel,
+      flash,
     ],
   );
 
@@ -2251,6 +2257,7 @@ function App() {
       title: vimMode ? "Disable Vim Keybindings" : "Enable Vim Keybindings",
     },
     { id: "edit-vimrc", title: "Edit Vim Config…" },
+    { id: "keylog", title: "Write Key Log" },
     { id: "zoom-in", title: "Zoom In", shortcut: "⌘+" },
     { id: "zoom-out", title: "Zoom Out", shortcut: "⌘−" },
     { id: "zoom-reset", title: "Actual Size", shortcut: "⌘0" },

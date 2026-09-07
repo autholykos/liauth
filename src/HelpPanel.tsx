@@ -155,7 +155,7 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Vim",
       search:
-        "vim modal editing motions registers visual mode ex commands write room rsvp " +
+        "vim modal editing motions registers visual mode ex commands write room rsvp keylog " +
         "mappings vimrc config map noremap mapleader leader set options keybindings " +
         "search replace substitute regex pcre nopcre",
       body: (
@@ -164,6 +164,12 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
             Modal editing with motions, registers, and visual mode. Custom ex
             commands: <code>:w</code> saves and commits, <code>:room</code>{" "}
             toggles the writing room, <code>:rsvp</code> speed-reads.
+          </p>
+          <p>
+            Keyboard acting up? <code>:keylog</code> writes the last 500 input
+            events (DOM and Vim engine) to{" "}
+            <code>~/.config/liauth/keylog.jsonl</code> for a bug report;{" "}
+            <code>:keylog clear</code> empties the buffer before you reproduce.
           </p>
           <p>
             Replace with <code>:%s/old/new/g</code> (<code>%</code> = whole

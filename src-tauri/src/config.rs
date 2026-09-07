@@ -30,20 +30,33 @@ pub fn read_vim_config() -> Option<VimConfig> {
     None
 }
 
+/// Liauth's own config directory, created on demand.
+fn config_dir() -> Result<PathBuf, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
+    let dir = home.join(".config/liauth");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
 /// Save the vim config. Always writes the dedicated Liauth file — never a
 /// fallback (~/.vimrc), so editing inside Liauth can't clobber the user's
 /// real vim setup. Since the Liauth file wins on lookup, saving content
 /// that was loaded from a fallback effectively forks it.
 #[tauri::command]
 pub fn write_vim_config(content: String) -> Result<VimConfig, String> {
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
-    let path = home.join(".config/liauth/vimrc");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let path = config_dir()?.join("vimrc");
     fs::write(&path, &content).map_err(|e| e.to_string())?;
     Ok(VimConfig {
         path: path.display().to_string(),
         content,
     })
+}
+
+/// Dump of the in-app key recorder (`:keylog`), one JSON object per line.
+/// Each dump carries the whole ring buffer, so the file is overwritten.
+#[tauri::command]
+pub fn write_keylog(content: String) -> Result<String, String> {
+    let path = config_dir()?.join("keylog.jsonl");
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
 }

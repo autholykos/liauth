@@ -529,6 +529,7 @@ pub fn run() {
             describe_commit,
             config::read_vim_config,
             config::write_vim_config,
+            config::write_keylog,
             ai::draft_note_edits,
             ai::warm_note_cache,
             ai::list_rephrase_skills,
