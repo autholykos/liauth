@@ -879,13 +879,12 @@ button.wide {
   color: var(--c-bg) !important;
 }
 
-.cm-editor:not(.cm-focused) .cm-fat-cursor {
-  background: none !important;
-  /* Drawn inside the box, not as an outline: WebKit leaves a stale outline
-     ring painted where the cursor used to be, which reads as ghost cursors. */
-  outline: none !important;
-  box-shadow: inset 0 0 0 1px var(--c-accent);
-  color: inherit !important;
+/* No block cursor while the editor is unfocused, like CodeMirror's own
+   cursor. WKWebView left the hollow unfocused cursor painted at its old
+   position whenever it moved (panel opening, file switch), which showed up
+   as ghost cursors; an unpainted layer has nothing to leave behind. */
+.cm-editor:not(.cm-focused) .cm-vimCursorLayer {
+  display: none;
 }
 
 /* Vim command line (: prompt) at the bottom of the editor. */
