@@ -125,14 +125,23 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Writing",
       search:
-        "writing room fullscreen typewriter scrolling toolbar rsvp speed read themes fonts zoom view menu",
+        "writing room fullscreen typewriter scrolling toolbar rsvp speed read themes fonts zoom view menu " +
+        "spelling spell check dictionary suggestions learn ignore",
       body: (
-        <p>
-          <kbd>⌘⇧F</kbd> enters the writing room: fullscreen, no chrome,
-          typewriter scrolling (mouse to the top edge reveals the toolbar).{" "}
-          <kbd>⌘⇧R</kbd> speed-reads from the cursor. Themes, fonts, and zoom
-          live in the View menu.
-        </p>
+        <>
+          <p>
+            <kbd>⌘⇧F</kbd> enters the writing room: fullscreen, no chrome,
+            typewriter scrolling (mouse to the top edge reveals the toolbar).{" "}
+            <kbd>⌘⇧R</kbd> speed-reads from the cursor. Themes, fonts, and
+            zoom live in the View menu.
+          </p>
+          <p>
+            Spelling is checked with the macOS dictionaries, language detected
+            automatically; code, URLs and HTML are skipped. Right-click a
+            marked word for suggestions, Ignore, or Learn Spelling. Toggle it
+            with Check Spelling in the View menu.
+          </p>
+        </>
       ),
     },
     {

@@ -35,6 +35,10 @@ git engine for versioning and asynchronous review.
   pivot, sentence/paragraph-aware pacing, 100–900 WPM (↑/↓), arrows to step,
   Esc drops the cursor where you stopped. Markdown syntax and notes are
   stripped from the word stream.
+- **Spell checking** — native macOS dictionaries with automatic language
+  detection, on by default (View › Check Spelling). Code, URLs and HTML are
+  skipped; right-click a marked word for suggestions, Ignore, or Learn
+  Spelling.
 - **Key log** — `:keylog` (or "Write Key Log" in the palette) dumps the last
   500 input events — DOM keys, composition and focus changes, plus what the
   Vim engine made of each — to `~/.config/liauth/keylog.jsonl`, so one
