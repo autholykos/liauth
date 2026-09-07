@@ -20,6 +20,12 @@ import {
   gotoNextNote,
 } from "./notes";
 import { historyDiff } from "./historyDiff";
+import {
+  keylogRecorder,
+  recordKeylog,
+  clearKeylog,
+  dumpKeylog,
+} from "./keylog";
 
 function installWrappedLineVimNavigation(): void {
   // Bind directly to the display-line motion instead of feeding `g` and
@@ -234,6 +240,8 @@ const mdHighlight = HighlightStyle.define([
  * (e.g. leaving visual block mode) until its next repaint.
  */
 export function sweepGhostCursorLayers(view: EditorView): void {
+  let orphans = 0;
+  let cleared = 0;
   const vimLayers = view.scrollDOM.querySelectorAll(".cm-vimCursorLayer");
   if (vimLayers.length > 0) {
     // Internal plugin state; absent when vim mode is off (no layer is legit).
@@ -244,7 +252,10 @@ export function sweepGhostCursorLayers(view: EditorView): void {
         } | null
       )?.state?.vimPlugin?.blockCursor?.cursorLayer ?? null;
     vimLayers.forEach((el) => {
-      if (el !== live) el.remove();
+      if (el !== live) {
+        el.remove();
+        orphans++;
+      }
     });
   }
   // drawSelection's layer orphans the same way; the live one is always the
@@ -252,7 +263,10 @@ export function sweepGhostCursorLayers(view: EditorView): void {
   const cursorLayers = Array.from(
     view.scrollDOM.querySelectorAll(".cm-cursorLayer:not(.cm-vimCursorLayer)"),
   );
-  for (const el of cursorLayers.slice(0, -1)) el.remove();
+  for (const el of cursorLayers.slice(0, -1)) {
+    el.remove();
+    orphans++;
+  }
   // Stale children: more painted cursors than selection ranges means the
   // layer missed a collapse; clear it and let its next repaint rebuild.
   const ranges = view.state.selection.ranges.length;
@@ -260,8 +274,17 @@ export function sweepGhostCursorLayers(view: EditorView): void {
     ".cm-cursorLayer, .cm-vimCursorLayer",
   );
   layers.forEach((layer) => {
-    if (layer.children.length > ranges) layer.replaceChildren();
+    if (layer.children.length > ranges) {
+      layer.replaceChildren();
+      cleared++;
+    }
   });
+  if (orphans || cleared) {
+    recordKeylog({
+      type: "editor:sweep",
+      detail: `orphans=${orphans} cleared=${cleared}`,
+    });
+  }
 }
 
 /** Wrap the selection in `marker` (or insert it) — used for Cmd-B / Cmd-I. */
@@ -317,6 +340,8 @@ export interface EditorCallbacks {
   onToggleRoom?: () => void;
   onRsvp?: () => void;
   onStatus?: (s: CursorStatus) => void;
+  /** Transient status-bar message. */
+  onNotice?: (message: string) => void;
 }
 
 export interface EditorOptions {
@@ -343,6 +368,19 @@ export function createEditorState(
     Vim.defineEx("write", "w", () => cb.onSave());
     Vim.defineEx("room", "room", () => cb.onToggleRoom?.());
     Vim.defineEx("rsvp", "rsvp", () => cb.onRsvp?.());
+    Vim.defineEx("keylog", "keylog", (cm, params) => {
+      const notify = (message: string) => cb.onNotice?.(message);
+      // Typed as a string, but absent when the command has no arguments.
+      const arg = (params.argString ?? "").trim();
+      if (arg === "clear") {
+        clearKeylog();
+        notify("Key log cleared");
+      } else if (arg) {
+        notify("Usage: :keylog [clear]");
+      } else {
+        dumpKeylog(cm.cm6, notify);
+      }
+    });
   }
   return EditorState.create({
     doc,
@@ -391,6 +429,7 @@ export function createEditorState(
           cb.onStatus({ line: line.number, col: head - line.from + 1 });
         }
       }),
+      keylogRecorder,
     ],
   });
 }

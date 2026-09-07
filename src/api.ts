@@ -146,6 +146,10 @@ export const readVimConfig = () => invoke<VimConfig | null>("read_vim_config");
 export const writeVimConfig = (content: string) =>
   invoke<VimConfig>("write_vim_config", { content });
 
+/** Overwrite the key-recorder dump; resolves to its path. */
+export const writeKeylog = (content: string) =>
+  invoke<string>("write_keylog", { content });
+
 export const takePendingOpen = () => invoke<string | null>("take_pending_open");
 
 export interface EditPair {
