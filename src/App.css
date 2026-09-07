@@ -881,7 +881,10 @@ button.wide {
 
 .cm-editor:not(.cm-focused) .cm-fat-cursor {
   background: none !important;
-  outline: 1px solid var(--c-accent);
+  /* Drawn inside the box, not as an outline: WebKit leaves a stale outline
+     ring painted where the cursor used to be, which reads as ghost cursors. */
+  outline: none !important;
+  box-shadow: inset 0 0 0 1px var(--c-accent);
   color: inherit !important;
 }
 
