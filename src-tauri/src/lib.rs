@@ -484,20 +484,26 @@ fn print_page(webview: tauri::Webview) -> Result<(), String> {
     }
 }
 
+/// macOS text-system defaults the editor depends on; read once by the
+/// system when the window comes up, so they are set before the app starts.
 #[cfg(target_os = "macos")]
-fn disable_mac_press_and_hold() {
-    // Vim navigation uses held keys; the native accent picker otherwise
-    // appears over the editor instead of allowing key repeat.
+fn apply_mac_text_defaults() {
     use objc2_foundation::{ns_string, NSUserDefaults};
 
-    NSUserDefaults::standardUserDefaults()
-        .setBool_forKey(false, ns_string!("ApplePressAndHoldEnabled"));
+    let defaults = NSUserDefaults::standardUserDefaults();
+    // Vim navigation uses held keys; the native accent picker otherwise
+    // appears over the editor instead of allowing key repeat.
+    defaults.setBool_forKey(false, ns_string!("ApplePressAndHoldEnabled"));
+    // WebKit only marks misspellings while this process-level preference is
+    // on. Safari registers it; a plain WKWebView leaves it off, so the
+    // spellcheck attribute on the editor alone never drew a squiggle.
+    defaults.setBool_forKey(true, ns_string!("WebContinuousSpellCheckingEnabled"));
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "macos")]
-    disable_mac_press_and_hold();
+    apply_mac_text_defaults();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
