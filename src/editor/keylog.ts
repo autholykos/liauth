@@ -104,13 +104,17 @@ function describe(node: EventTarget | null, view: EditorView): string {
   return `${tag}${id}${cls}`;
 }
 
-function vimMode(vim: {
-  insertMode: boolean;
-  visualMode: boolean;
-  visualLine: boolean;
-  visualBlock: boolean;
-}): string {
-  if (vim.insertMode) return "insert";
+function vimMode(
+  vim: {
+    insertMode: boolean;
+    visualMode: boolean;
+    visualLine: boolean;
+    visualBlock: boolean;
+  },
+  overwrite: boolean,
+): string {
+  // Replace mode (R) is insert mode with the adapter's overwrite flag set.
+  if (vim.insertMode) return overwrite ? "replace" : "insert";
   if (!vim.visualMode) return "normal";
   if (vim.visualLine) return "visual-line";
   return vim.visualBlock ? "visual-block" : "visual";
@@ -126,10 +130,11 @@ function context(view: EditorView): Context {
     const anchor = doc.lineAt(main.anchor);
     sel = `${anchor.number}:${main.anchor - anchor.from + 1}-${sel}`;
   }
-  const vim = getCM(view)?.state.vim;
+  const cm = getCM(view);
+  const vim = cm?.state.vim;
   return {
     active: describe(document.activeElement, view),
-    mode: vim ? vimMode(vim) : undefined,
+    mode: cm && vim ? vimMode(vim, !!cm.state.overwrite) : undefined,
     pending: vim?.status || undefined,
     sel,
     focus: view.hasFocus,
