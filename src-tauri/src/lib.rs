@@ -287,57 +287,6 @@ fn destination_folder(path: &std::path::Path) -> Result<std::path::PathBuf, Stri
     Err("destination no longer exists".to_string())
 }
 
-struct TrackedFile {
-    repo: git2::Repository,
-    rel: std::path::PathBuf,
-}
-
-fn tracked_file(path: &std::path::Path) -> Option<TrackedFile> {
-    let repo = git2::Repository::discover(path.parent()?).ok()?;
-    let root = std::fs::canonicalize(repo.workdir()?).ok()?;
-    let file = std::fs::canonicalize(path).ok()?;
-    let rel = file.strip_prefix(root).ok()?.to_path_buf();
-    repo.index().ok()?.get_path(&rel, 0)?;
-    Some(TrackedFile { repo, rel })
-}
-
-fn stage_destination(
-    tracked: Option<TrackedFile>,
-    destination: &std::path::Path,
-    remove_source: bool,
-) {
-    let Some(TrackedFile { repo, rel }) = tracked else {
-        return;
-    };
-    let Some(root) = repo.workdir().and_then(|p| std::fs::canonicalize(p).ok()) else {
-        return;
-    };
-    let Some(new_rel) = std::fs::canonicalize(destination)
-        .ok()
-        .and_then(|p| p.strip_prefix(root).ok().map(std::path::Path::to_path_buf))
-    else {
-        return;
-    };
-    let Ok(mut index) = repo.index() else {
-        return;
-    };
-    if (!remove_source || index.remove_path(&rel).is_ok()) && index.add_path(&new_rel).is_ok() {
-        let _ = index.write();
-    }
-}
-
-fn stage_delete(tracked: Option<TrackedFile>) {
-    let Some(TrackedFile { repo, rel }) = tracked else {
-        return;
-    };
-    let Ok(mut index) = repo.index() else {
-        return;
-    };
-    if index.remove_path(&rel).is_ok() {
-        let _ = index.write();
-    }
-}
-
 fn unique_copy_path(source: &std::path::Path, folder: &std::path::Path) -> std::path::PathBuf {
     let direct = folder.join(file_name(source).unwrap_or_default());
     if !direct.exists() {
@@ -392,9 +341,9 @@ fn rename_project_file(file_path: String, new_name: String) -> Result<String, St
             return Err(format!("{new_name} already exists"));
         }
     }
-    let tracked = tracked_file(source);
+    let tracked = git::tracked_file(source);
     std::fs::rename(source, &destination).map_err(|e| e.to_string())?;
-    stage_destination(tracked, &destination, true);
+    git::stage_destination(tracked, &destination, true);
     Ok(destination.display().to_string())
 }
 
@@ -425,13 +374,13 @@ fn paste_project_file(
         unique_copy_path(source, &folder)
     };
     if cut {
-        let tracked = tracked_file(source);
+        let tracked = git::tracked_file(source);
         std::fs::rename(source, &destination).map_err(|e| e.to_string())?;
-        stage_destination(tracked, &destination, true);
+        git::stage_destination(tracked, &destination, true);
     } else {
-        let tracked = tracked_file(source);
+        let tracked = git::tracked_file(source);
         std::fs::copy(source, &destination).map_err(|e| e.to_string())?;
-        stage_destination(tracked, &destination, false);
+        git::stage_destination(tracked, &destination, false);
     }
     Ok(destination.display().to_string())
 }
@@ -442,9 +391,9 @@ fn delete_project_file(file_path: String) -> Result<(), String> {
     if !path.is_file() {
         return Err("file no longer exists".to_string());
     }
-    let tracked = tracked_file(path);
+    let tracked = git::tracked_file(path);
     std::fs::remove_file(path).map_err(|e| e.to_string())?;
-    stage_delete(tracked);
+    git::stage_delete(tracked);
     Ok(())
 }
 
@@ -814,5 +763,23 @@ mod tests {
         let tree = repo.head().unwrap().peel_to_tree().unwrap();
         assert!(tree.get_path(std::path::Path::new("chapter.md")).is_err());
         assert!(tree.get_path(std::path::Path::new("other.md")).is_ok());
+    }
+
+    #[test]
+    fn navigator_move_into_subfolder_stages_both_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("draft.md");
+        let folder = dir.path().join("chapters");
+        std::fs::create_dir(&folder).unwrap();
+        git::init_repo(p(&source)).unwrap();
+        git::save_document(p(&source), "draft\n".into(), None, true).unwrap();
+
+        let moved = paste_project_file(p(&source), p(&folder), true).unwrap();
+        git::save_document(moved, "draft\n".into(), None, true).unwrap();
+        let repo = git2::Repository::open(dir.path()).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        assert!(tree.get_path(std::path::Path::new("draft.md")).is_err());
+        assert!(tree.get_path(std::path::Path::new("chapters/draft.md")).is_ok());
+        assert!(repo.statuses(None).unwrap().is_empty());
     }
 }

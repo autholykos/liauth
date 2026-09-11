@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePersistedSetting } from "./usePersistedSetting";
 import { RsvpWord, orpIndex } from "./editor/rsvp";
 
 const WPM_MIN = 100;
 const WPM_MAX = 900;
 const WPM_STEP = 25;
 
-function initialWpm(): number {
-  const stored = Number(localStorage.getItem("liauth.wpm"));
+function initialWpm(value: string | null): number {
+  const stored = Number(value);
   return stored >= WPM_MIN && stored <= WPM_MAX ? stored : 350;
 }
 
@@ -19,15 +20,11 @@ interface Props {
 export function RsvpOverlay({ words, startIndex, onExit }: Props) {
   const [index, setIndex] = useState(startIndex);
   const [playing, setPlaying] = useState(true);
-  const [wpm, setWpm] = useState(initialWpm);
+  const [wpm, setWpm] = usePersistedSetting("liauth.wpm", initialWpm);
 
   const i = Math.min(index, words.length - 1);
   const word = words[i];
   const finished = index >= words.length;
-
-  useEffect(() => {
-    localStorage.setItem("liauth.wpm", String(wpm));
-  }, [wpm]);
 
   // The player: one timeout per word, length scaled by the word's
   // multiplier (sentence ends, long words, paragraph breaks).

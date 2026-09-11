@@ -58,8 +58,8 @@ pub struct HistoryHunk {
 
 pub struct SquashPlan {
     pub branch: String,
-    pub head: Oid,
-    pub base: Oid,
+    head: Oid,
+    base: Oid,
     pub summaries: Vec<String>,
     pub diff: String,
 }
@@ -68,14 +68,15 @@ fn err(e: git2::Error) -> String {
     e.message().to_string()
 }
 
-fn discover(file_path: &str) -> Result<Repository, String> {
-    let dir = Path::new(file_path)
+fn discover(file_path: impl AsRef<Path>) -> Result<Repository, String> {
+    let dir = file_path
+        .as_ref()
         .parent()
         .ok_or_else(|| "file has no parent directory".to_string())?;
     Repository::discover(dir).map_err(err)
 }
 
-fn workdir_rel(repo: &Repository, file_path: &str) -> Result<PathBuf, String> {
+fn workdir_rel(repo: &Repository, file_path: impl AsRef<Path>) -> Result<PathBuf, String> {
     let workdir = repo
         .workdir()
         .ok_or_else(|| "repository has no working directory".to_string())?;
@@ -86,6 +87,51 @@ fn workdir_rel(repo: &Repository, file_path: &str) -> Result<PathBuf, String> {
     file.strip_prefix(&workdir)
         .map(|p| p.to_path_buf())
         .map_err(|_| "file is outside the repository".to_string())
+}
+
+pub(crate) struct TrackedFile {
+    repo: Repository,
+    rel: PathBuf,
+}
+
+/// Capture the index entry before a filesystem move or removal: resolving
+/// its repository-relative path requires the source to still exist.
+pub(crate) fn tracked_file(path: &Path) -> Option<TrackedFile> {
+    let repo = discover(path).ok()?;
+    let rel = workdir_rel(&repo, path).ok()?;
+    repo.index().ok()?.get_path(&rel, 0)?;
+    Some(TrackedFile { repo, rel })
+}
+
+pub(crate) fn stage_destination(
+    tracked: Option<TrackedFile>,
+    destination: &Path,
+    remove_source: bool,
+) {
+    let Some(TrackedFile { repo, rel }) = tracked else {
+        return;
+    };
+    let Ok(new_rel) = workdir_rel(&repo, destination) else {
+        return;
+    };
+    let Ok(mut index) = repo.index() else {
+        return;
+    };
+    if (!remove_source || index.remove_path(&rel).is_ok()) && index.add_path(&new_rel).is_ok() {
+        let _ = index.write();
+    }
+}
+
+pub(crate) fn stage_delete(tracked: Option<TrackedFile>) {
+    let Some(TrackedFile { repo, rel }) = tracked else {
+        return;
+    };
+    let Ok(mut index) = repo.index() else {
+        return;
+    };
+    if index.remove_path(&rel).is_ok() {
+        let _ = index.write();
+    }
 }
 
 fn signature(repo: &Repository) -> Result<Signature<'static>, String> {
@@ -599,14 +645,15 @@ pub fn apply_squash(
     if message.lines().next().unwrap_or("").chars().count() > 72 {
         return Err("Toki returned a commit subject longer than 72 characters".to_string());
     }
-    let latest = squash_plan(file_path, Some(plan.base))?;
-    if latest.branch != plan.branch || latest.head != plan.head || latest.base != plan.base {
-        return Err("squash boundary changed while Toki was generating the message".to_string());
-    }
     let repo = discover(file_path)?;
     require_no_git_operation(&repo)?;
+    // Keep this reference through set_target: libgit2 compares its cached
+    // OID so a concurrent branch update cannot be overwritten.
     let mut head_ref = repo.head().map_err(err)?;
-    if head_ref.shorthand().map_err(err)? != plan.branch || head_ref.target() != Some(plan.head) {
+    if !head_ref.is_branch()
+        || head_ref.shorthand().map_err(err)? != plan.branch
+        || head_ref.target() != Some(plan.head)
+    {
         return Err("branch changed while Toki was generating the message".to_string());
     }
 
@@ -653,8 +700,8 @@ pub fn list_branches(file_path: String) -> Result<Vec<BranchInfo>, String> {
         let refname = branch.get().name().map_err(err)?;
         let checked_out_in = elsewhere
             .iter()
-            .find(|(head, _)| head == refname)
-            .map(|(_, dir)| dir.display().to_string());
+            .find(|checkout| checkout.has_head(refname))
+            .map(|checkout| checkout.dir.display().to_string());
         out.push(BranchInfo {
             name: branch.name().map_err(err)?.unwrap_or("").to_string(),
             is_head: branch.is_head(),
@@ -682,18 +729,18 @@ pub fn list_worktrees(file_path: String) -> Result<Vec<WorktreeInfo>, String> {
     let here = workdir(&repo);
     Ok(checkouts(&repo)
         .iter()
-        .enumerate()
-        .filter_map(|(index, checkout)| {
-            let dir = workdir(checkout)?;
+        .filter_map(|checkout| {
+            let dir = &checkout.dir;
             Some(WorktreeInfo {
                 name: dir.file_name()?.to_string_lossy().into_owned(),
                 path: dir.display().to_string(),
                 branch: checkout
+                    .repo
                     .head()
                     .ok()
                     .and_then(|head| head.shorthand().ok().map(str::to_owned)),
-                is_main: index == 0,
-                is_current: Some(&dir) == here.as_ref(),
+                is_main: checkout.linked.is_none(),
+                is_current: Some(dir) == here.as_ref(),
             })
         })
         .collect())
@@ -717,41 +764,32 @@ pub fn worktree_document(file_path: String, worktree_path: String) -> Option<Str
     target.is_file().then(|| target.display().to_string())
 }
 
-/// Remove the linked worktree rooted at `dir`: never the main checkout, a
-/// locked worktree, or one with uncommitted or untracked files.
-fn remove_worktree(repo: &Repository, dir: &Path) -> Result<(), String> {
-    let names = repo.worktrees().map_err(err)?;
-    for name in names.iter().filter_map(|name| name.ok().flatten()) {
-        let worktree = repo.find_worktree(name).map_err(err)?;
-        let dirty = {
-            let linked = Repository::open_from_worktree(&worktree).map_err(err)?;
-            if workdir(&linked).as_deref() != Some(dir) {
-                continue;
-            }
-            let mut status = StatusOptions::new();
-            status.include_untracked(true).include_ignored(false);
-            let statuses = linked.statuses(Some(&mut status)).map_err(err)?;
-            !statuses.is_empty()
-        };
-        if dirty {
-            return Err(format!("worktree {name} has uncommitted changes"));
-        }
-        if worktree.is_locked().map_err(err)? != git2::WorktreeLockStatus::Unlocked {
-            return Err(format!("worktree {name} is locked"));
-        }
-        let mut prune = git2::WorktreePruneOptions::new();
-        prune.valid(true).working_tree(true);
-        return worktree.prune(Some(&mut prune)).map_err(err);
+/// Remove only an unlocked, clean linked checkout. Drop its repository
+/// handle before pruning the directory it owns.
+fn remove_worktree(checkout: Checkout) -> Result<(), String> {
+    let Checkout { repo, dir, linked } = checkout;
+    let worktree = linked.ok_or_else(|| format!("{} is the main checkout", dir.display()))?;
+    let name = worktree.name().map_err(err)?.unwrap_or("");
+    let mut status = StatusOptions::new();
+    status.include_untracked(true).include_ignored(false);
+    if !repo.statuses(Some(&mut status)).map_err(err)?.is_empty() {
+        return Err(format!("worktree {name} has uncommitted changes"));
     }
-    Err(format!("{} is the main checkout", dir.display()))
+    if worktree.is_locked().map_err(err)? != git2::WorktreeLockStatus::Unlocked {
+        return Err(format!("worktree {name} is locked"));
+    }
+    drop(repo);
+    let mut prune = git2::WorktreePruneOptions::new();
+    prune.valid(true).working_tree(true);
+    worktree.prune(Some(&mut prune)).map_err(err)
 }
 
 /// Delete a branch; when another worktree holds it, that worktree goes too.
 #[tauri::command]
 pub fn delete_branch(file_path: String, name: String) -> Result<(), String> {
     let repo = discover(&file_path)?;
-    if let Some(dir) = checked_out_elsewhere(&repo, &format!("refs/heads/{name}")) {
-        remove_worktree(&repo, &dir)?;
+    if let Some(checkout) = checked_out_elsewhere(&repo, &format!("refs/heads/{name}")) {
+        remove_worktree(checkout)?;
     }
     let mut branch = repo.find_branch(&name, BranchType::Local).map_err(err)?;
     branch.delete().map_err(err)
@@ -772,59 +810,75 @@ fn workdir(repo: &Repository) -> Option<PathBuf> {
     repo.workdir()?.canonicalize().ok()
 }
 
-/// Every checkout of the repository: the main working directory first,
-/// then the linked worktrees.
-fn checkouts(repo: &Repository) -> Vec<Repository> {
+struct Checkout {
+    repo: Repository,
+    dir: PathBuf,
+    linked: Option<git2::Worktree>,
+}
+
+impl Checkout {
+    fn new(repo: Repository, linked: Option<git2::Worktree>) -> Option<Self> {
+        let dir = workdir(&repo)?;
+        Some(Self { repo, dir, linked })
+    }
+
+    fn has_head(&self, refname: &str) -> bool {
+        self.repo
+            .head()
+            .ok()
+            .is_some_and(|head| head.name().ok() == Some(refname))
+    }
+}
+
+/// Main directory first, then linked worktrees. Unavailable checkouts are
+/// omitted consistently for listing, branch switching and removal.
+fn checkouts(repo: &Repository) -> Vec<Checkout> {
     let mut out = Vec::new();
-    if let Ok(main) = Repository::open(repo.commondir()) {
+    if let Some(main) = Repository::open(repo.commondir())
+        .ok()
+        .and_then(|repo| Checkout::new(repo, None))
+    {
         out.push(main);
     }
     if let Ok(names) = repo.worktrees() {
         for name in names.iter().filter_map(|name| name.ok().flatten()) {
-            if let Ok(linked) = repo
-                .find_worktree(name)
-                .and_then(|wt| Repository::open_from_worktree(&wt))
-            {
-                out.push(linked);
+            let checkout = repo.find_worktree(name).ok().and_then(|linked| {
+                Repository::open_from_worktree(&linked)
+                    .ok()
+                    .and_then(|repo| Checkout::new(repo, Some(linked)))
+            });
+            if let Some(checkout) = checkout {
+                out.push(checkout);
             }
         }
     }
     out
 }
 
-/// HEAD reference and working directory of every checkout other than `repo`.
-fn other_checkouts(repo: &Repository) -> Vec<(String, PathBuf)> {
+fn other_checkouts(repo: &Repository) -> Vec<Checkout> {
     let here = workdir(repo);
     checkouts(repo)
-        .iter()
-        .filter_map(|checkout| {
-            let dir = workdir(checkout)?;
-            if Some(&dir) == here.as_ref() {
-                return None;
-            }
-            let head = checkout.head().ok()?.name().ok()?.to_owned();
-            Some((head, dir))
-        })
+        .into_iter()
+        .filter(|checkout| Some(&checkout.dir) != here.as_ref())
         .collect()
 }
 
 /// libgit2 refuses to move HEAD onto a branch another checkout holds, but
 /// only after checkout_tree has already rewritten the index and files.
-fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<PathBuf> {
+fn checked_out_elsewhere(repo: &Repository, refname: &str) -> Option<Checkout> {
     other_checkouts(repo)
         .into_iter()
-        .find(|(head, _)| head == refname)
-        .map(|(_, dir)| dir)
+        .find(|checkout| checkout.has_head(refname))
 }
 
 #[tauri::command]
 pub fn checkout_branch(file_path: String, name: String) -> Result<(), String> {
     let repo = discover(&file_path)?;
     let refname = format!("refs/heads/{name}");
-    if let Some(dir) = checked_out_elsewhere(&repo, &refname) {
+    if let Some(checkout) = checked_out_elsewhere(&repo, &refname) {
         return Err(format!(
             "{name} is checked out in another worktree ({})",
-            dir.display()
+            checkout.dir.display()
         ));
     }
     let obj = repo.revparse_single(&refname).map_err(err)?;
@@ -1419,10 +1473,60 @@ mod tests {
         let err = delete_branch(doc_s.clone(), "review".into()).unwrap_err();
         assert!(err.contains("uncommitted"), "{err}");
         fs::remove_file(linked.join("scratch.md")).unwrap();
+        let worktree = repo.find_worktree("linked").unwrap();
+        worktree.lock(Some("still in use")).unwrap();
+        let err = delete_branch(doc_s.clone(), "review".into()).unwrap_err();
+        assert!(err.contains("locked"), "{err}");
+        worktree.unlock().unwrap();
         delete_branch(doc_s.clone(), "review".into()).unwrap();
         assert!(!linked.exists());
         assert_eq!(list_worktrees(doc_s).unwrap().len(), 1);
         assert!(repo.find_branch("review", git2::BranchType::Local).is_err());
+    }
+
+    #[test]
+    fn deleting_a_checkout_ignores_an_unavailable_unrelated_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("doc.md");
+        let doc_s = p(&doc);
+        init_repo(doc_s.clone()).unwrap();
+        save_document(doc_s.clone(), "v1\n".into(), None, true).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let missing = dir.path().join("missing");
+        let kept = dir.path().join("kept");
+        repo.worktree("a-missing", &missing, None).unwrap();
+        repo.worktree("z-kept", &kept, None).unwrap();
+        fs::remove_dir_all(&missing).unwrap();
+        // Leave a malformed registration that cannot be opened as a repository.
+        fs::remove_file(repo.commondir().join("worktrees/a-missing/HEAD")).unwrap();
+        delete_branch(doc_s, "z-kept".into()).unwrap();
+        assert!(!kept.exists());
+    }
+
+    #[test]
+    fn squash_rejects_a_stale_plan_without_moving_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = p(&dir.path().join("doc.md"));
+        init_repo(doc.clone()).unwrap();
+        let base = save_document(doc.clone(), "base\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        save_document(doc.clone(), "one\n".into(), None, true).unwrap();
+        save_document(doc.clone(), "two\n".into(), None, true).unwrap();
+        let plan = squash_plan(&doc, Some(Oid::from_str(&base.id).unwrap())).unwrap();
+        let latest = save_document(doc.clone(), "three\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert!(apply_squash(&doc, &plan, "Squash")
+            .err()
+            .unwrap()
+            .contains("changed"));
+        let repo = discover(&doc).unwrap();
+        assert_eq!(
+            repo.head().unwrap().target().unwrap().to_string(),
+            latest.id
+        );
+        assert_eq!(fs::read_to_string(doc).unwrap(), "three\n");
     }
 
     #[test]

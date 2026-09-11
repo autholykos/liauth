@@ -10,13 +10,13 @@ import {
   Decoration,
   DecorationSet,
   EditorView,
-  ViewPlugin,
-  ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 import { EditorState, Range, StateField } from "@codemirror/state";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { SyntaxNodeRef } from "@lezer/common";
+import { hidingPlugin, selectionTouches } from "./decorations";
+import { notesField } from "./notes";
 
 class BulletWidget extends WidgetType {
   toDOM(): HTMLElement {
@@ -75,34 +75,21 @@ class CheckboxWidget extends WidgetType {
 
 const HEADING_RE = /^ATXHeading(\d)$/;
 
-/** Does any selection range touch [from, to]? */
-function selectionTouches(
-  state: EditorState,
-  from: number,
-  to: number,
-): boolean {
-  return state.selection.ranges.some((r) => r.from <= to && r.to >= from);
-}
-
-/** GFM parses {~~old~>new~~} as strikethrough; those ranges belong to the
- *  CriticMarkup notes plugin, so the preview must leave them alone. The
- *  strikethrough node may start mid-run when the old text is empty
- *  ({~~~>new~~} has a three-tilde run), so extend over the tilde runs
- *  before testing for the enclosing braces. */
+/** GFM's enclosing strike belongs to the substitution; nested strikes don't. */
 function isCriticSuggestion(
   state: EditorState,
   from: number,
   to: number,
 ): boolean {
-  let s = from;
-  while (s > 0 && state.sliceDoc(s - 1, s) === "~") s--;
-  let e = to;
-  while (e < state.doc.length && state.sliceDoc(e, e + 1) === "~") e++;
-  return (
-    state.sliceDoc(s - 1, s) === "{" &&
-    state.sliceDoc(e, e + 1) === "}" &&
-    state.sliceDoc(s, e).includes("~>")
-  );
+  return state
+    .field(notesField)
+    .some(
+      (note) =>
+        note.kind === "suggestion" &&
+        note.from < from &&
+        from <= note.oldFrom &&
+        note.to === to + 1,
+    );
 }
 
 /** Does any selection range touch the line(s) covering [from, to]? */
@@ -116,27 +103,8 @@ function selectionOnLine(
   return selectionTouches(state, start.from, end.to);
 }
 
-interface PreviewSets {
-  decorations: DecorationSet;
-  /** The hidden (replaced) ranges, exposed as atomic ranges so clicks and
-   *  cursor motion can never land inside invisible text. */
-  atomic: DecorationSet;
-}
-
-function buildDecorations(view: EditorView): PreviewSets {
-  const decos: Range<Decoration>[] = [];
-  const hides: Range<Decoration>[] = [];
+export const livePreview = hidingPlugin((view, { decos, hide }) => {
   const state = view.state;
-  const hide = (
-    from: number,
-    to: number,
-    spec: Parameters<typeof Decoration.replace>[0] = {},
-  ) => {
-    const d = Decoration.replace(spec).range(from, to);
-    decos.push(d);
-    hides.push(d);
-  };
-
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
       from,
@@ -306,45 +274,10 @@ function buildDecorations(view: EditorView): PreviewSets {
       },
     });
   }
-
-  return {
-    decorations: Decoration.set(decos, true),
-    atomic: Decoration.set(hides, true),
-  };
-}
-
-class LivePreviewPlugin {
-  decorations: DecorationSet;
-  atomic: DecorationSet;
-  constructor(view: EditorView) {
-    ({ decorations: this.decorations, atomic: this.atomic } =
-      buildDecorations(view));
-  }
-  update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged) {
-      ({ decorations: this.decorations, atomic: this.atomic } =
-        buildDecorations(update.view));
-    }
-  }
-}
-
-export const livePreview = ViewPlugin.fromClass(LivePreviewPlugin, {
-  decorations: (v) => v.decorations,
-  provide: (plugin) =>
-    EditorView.atomicRanges.of(
-      (view) => view.plugin(plugin)?.atomic ?? Decoration.none,
-    ),
 });
 
-// ---------------------------------------------------------------------------
-// Table rendering.
-//
-// A whole GFM table is replaced by a rendered <table> block widget unless the
-// selection is inside it, in which case the source is shown (monospaced, so
-// the pipes line up). Replacing decorations that span line breaks must be
-// provided by a StateField, not a ViewPlugin, so tables live here rather
-// than in LivePreviewPlugin.
-
+/** Block replacements must be provided by a StateField: a ViewPlugin
+ * cannot replace line breaks because it runs after the viewport is built. */
 interface TableCellData {
   /** Offset of the cell relative to the table start. */
   offset: number;

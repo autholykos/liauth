@@ -16,6 +16,7 @@ import { livePreview, tableRendering } from "./livePreview";
 import { typewriterScroll } from "./typewriter";
 import {
   criticMarkup,
+  notesField,
   insertNote,
   insertSuggestion,
   gotoNextNote,
@@ -23,16 +24,9 @@ import {
 import { historyDiff } from "./historyDiff";
 import { spellcheck } from "./spellcheck";
 
-/** Spell checking is toggled in place so undo history and selection survive. */
-const spellcheckCompartment = new Compartment();
-
-export function setSpellcheck(view: EditorView, on: boolean): void {
-  view.dispatch({
-    effects: spellcheckCompartment.reconfigure(on ? spellcheck : []),
-  });
-}
 import {
   keylogRecorder,
+  keylogErrors,
   recordKeylog,
   clearKeylog,
   dumpKeylog,
@@ -90,12 +84,18 @@ function installVimSearchPromptExitFix(): void {
     const onKeyDown = promptOptions.onKeyDown;
     const onClose = promptOptions.onClose;
     let finished = false;
+    let closeDialog: VimDialogClose = () => {};
     const accept = (value: string) => {
       if (finished) return;
       finished = true;
-      callback?.(value);
+      try {
+        callback?.(value);
+      } finally {
+        // The adapter closes only after the callback returns. A search error
+        // must not leave a live input whose callback is already consumed.
+        closeDialog();
+      }
     };
-    let closeDialog: VimDialogClose = () => {};
     const onWindowKeyUp = (event: KeyboardEvent) => {
       if (!input.isConnected || !this.state.dialog?.contains(input)) {
         window.removeEventListener("keyup", onWindowKeyUp, true);
@@ -421,49 +421,80 @@ export interface EditorOptions {
   spellcheck?: boolean;
 }
 
+const optionCompartments = {
+  vim: new Compartment(),
+  typewriter: new Compartment(),
+  lineNumbers: new Compartment(),
+  spellcheck: new Compartment(),
+};
+
+type ToggleOption = keyof typeof optionCompartments;
+
+function optionExtension(name: ToggleOption, on: boolean) {
+  if (!on) return [];
+  switch (name) {
+    case "vim":
+      return [
+        vim(),
+        strayTextGuard,
+        EditorState.allowMultipleSelections.of(true),
+      ];
+    case "typewriter":
+      return typewriterScroll;
+    case "lineNumbers":
+      return lineNumbers();
+    case "spellcheck":
+      return spellcheck;
+  }
+}
+
+/** Reconfigure an option while retaining the document, selection and Undo. */
+export function setEditorOption(
+  view: EditorView,
+  name: ToggleOption,
+  on: boolean,
+): void {
+  view.dispatch({
+    effects: optionCompartments[name].reconfigure(optionExtension(name, on)),
+  });
+}
+
 export function createEditorState(
   doc: string,
   cb: EditorCallbacks,
   opts: EditorOptions = {},
 ): EditorState {
-  const {
-    readOnly = false,
-    vim: useVim = false,
-    typewriter: useTypewriter = false,
-    lineNumbers: useLineNumbers = false,
-    spellcheck: useSpellcheck = false,
-  } = opts;
-  if (useVim) {
-    // Ex commands are registered globally; rebind to the current document's
-    // callbacks each time a state is built.
-    Vim.defineEx("write", "w", () => cb.onSave());
-    Vim.defineEx("room", "room", () => cb.onToggleRoom?.());
-    Vim.defineEx("rsvp", "rsvp", () => cb.onRsvp?.());
-    Vim.defineEx("keylog", "keylog", (cm, params) => {
-      const notify = (message: string) => cb.onNotice?.(message);
-      // Typed as a string, but absent when the command has no arguments.
-      const arg = (params.argString ?? "").trim();
-      if (arg === "clear") {
-        clearKeylog();
-        notify("Key log cleared");
-      } else if (arg) {
-        notify("Usage: :keylog [clear]");
-      } else {
-        dumpKeylog(cm.cm6, notify);
-      }
-    });
-  }
+  // Ex commands are registered globally; rebind to the current document's
+  // callbacks even when Vim will be enabled later via its compartment.
+  Vim.defineEx("write", "w", () => cb.onSave());
+  Vim.defineEx("room", "room", () => cb.onToggleRoom?.());
+  Vim.defineEx("rsvp", "rsvp", () => cb.onRsvp?.());
+  Vim.defineEx("keylog", "keylog", (cm, params) => {
+    const notify = (message: string) => cb.onNotice?.(message);
+    // Typed as a string, but absent when the command has no arguments.
+    const arg = (params.argString ?? "").trim();
+    if (arg === "clear") {
+      clearKeylog();
+      notify("Key log cleared");
+    } else if (arg) {
+      notify("Usage: :keylog [clear]");
+    } else {
+      dumpKeylog(cm.cm6, notify);
+    }
+  });
   return EditorState.create({
     doc,
     extensions: [
       // vim() must precede other keymaps to take precedence.
-      useVim ? [vim(), strayTextGuard] : [],
-      // Visual block mode emits one range per selected line.
-      useVim ? EditorState.allowMultipleSelections.of(true) : [],
-      useTypewriter ? typewriterScroll : [],
-      useLineNumbers ? lineNumbers() : [],
-      spellcheckCompartment.of(useSpellcheck ? spellcheck : []),
-      EditorState.readOnly.of(readOnly),
+      ...Object.entries(optionCompartments).map(([name, compartment]) =>
+        compartment.of(
+          optionExtension(
+            name as ToggleOption,
+            opts[name as ToggleOption] ?? false,
+          ),
+        ),
+      ),
+      EditorState.readOnly.of(opts.readOnly ?? false),
       history(),
       drawSelection(),
       EditorView.lineWrapping,
@@ -471,9 +502,11 @@ export function createEditorState(
       placeholder("Start writing…"),
       markdown({ base: markdownLanguage }),
       syntaxHighlighting(mdHighlight),
+      notesField,
       livePreview,
       tableRendering,
       criticMarkup,
+      notesField,
       historyDiff,
       keymap.of([
         {
@@ -503,6 +536,7 @@ export function createEditorState(
         }
       }),
       keylogRecorder,
+      keylogErrors,
     ],
   });
 }

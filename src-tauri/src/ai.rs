@@ -351,23 +351,11 @@ fn ensure_tls() {
 /// failures are irrelevant.
 #[tauri::command]
 pub async fn warm_note_cache(document: String, repo_root: Option<String>) {
-    ensure_tls();
     let prompt = format!(
         "{}Reply with exactly: ok",
         prompt_prefix(repo_root.as_deref(), &document)
     );
-    let body = serde_json::json!({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 1,
-    });
-    let _ = reqwest::Client::new()
-        .post(ENDPOINT)
-        .timeout(std::time::Duration::from_secs(600))
-        .json(&body)
-        .send()
-        .await;
+    let _ = chat_once(&prompt, 0.0, 1).await;
 }
 
 /// Turn one review note into concrete find→replace edits. The whole
@@ -417,32 +405,8 @@ pub async fn draft_note_edits(
     // (currently 32768), so an oversized generation ceiling gets whole
     // requests rejected on long chapters; observed replies stay well
     // under 2k tokens.
-    let body = serde_json::json!({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": 4096,
-    });
-    ensure_tls();
-    // Long-document prompt processing can legitimately take minutes.
-    let resp = reqwest::Client::new()
-        .post(ENDPOINT)
-        .timeout(std::time::Duration::from_secs(600))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("model request failed: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("model request failed: {e}"))?
-        .json::<ChatResponse>()
-        .await
-        .map_err(|e| format!("bad model response: {e}"))?;
-    let content = resp
-        .choices
-        .first()
-        .map(|c| c.message.content.as_str())
-        .unwrap_or("");
-    parse_edits(content).ok_or_else(|| "model reply contained no JSON edit list".to_string())
+    let content = chat_once(&prompt, 0.0, 4096).await?;
+    parse_edits(&content).ok_or_else(|| "model reply contained no JSON edit list".to_string())
 }
 
 #[derive(Debug, PartialEq)]
