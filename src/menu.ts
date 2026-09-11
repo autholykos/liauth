@@ -12,23 +12,7 @@ import {
   PredefinedMenuItem,
 } from "@tauri-apps/api/menu";
 
-export interface MenuSnapshot {
-  theme: string;
-  font: string;
-  vim: boolean;
-  lineNumbers: boolean;
-  spellcheck: boolean;
-  pageLayout: boolean;
-  novelProof: boolean;
-  room: boolean;
-  navOpen: boolean;
-  showHiddenFiles: boolean;
-  versioned: boolean;
-  panel: string;
-  recents: string[];
-}
-
-type Run = (id: string) => void;
+import type { AppCommand } from "./commands";
 
 export type NavigatorFileAction =
   | "rename"
@@ -121,212 +105,132 @@ export async function showEditorSelectionMenu(
   }
 }
 
-export async function buildAppMenu(run: Run, s: MenuSnapshot): Promise<void> {
-  const item = (id: string, text: string, accelerator?: string) =>
-    MenuItem.new({ id, text, accelerator, action: () => run(id) });
-  const check = (
-    id: string,
-    text: string,
-    checked: boolean,
-    accelerator?: string,
-  ) =>
-    CheckMenuItem.new({
+export async function buildAppMenu(
+  commands: AppCommand[],
+  run: (id: string) => void,
+): Promise<void> {
+  const registry = new Map(commands.map((command) => [command.id, command]));
+  const item = (id: string) => {
+    const command = registry.get(id);
+    if (!command) throw new Error(`Unknown menu command: ${id}`);
+    const options = {
       id,
-      text,
-      checked,
-      accelerator,
+      text: command.menuTitle ?? command.title,
+      accelerator: command.accelerator,
       action: () => run(id),
-    });
-
-  const appMenu = await Submenu.new({
-    text: "Liauth",
-    items: [
-      await PredefinedMenuItem.new({
-        item: { About: null },
-        text: "About Liauth",
-      }),
-      await item("check-updates", "Check for Updates…"),
-      await sep(),
-      await item("palette", "Command Palette…", "CmdOrCtrl+K"),
-      await sep(),
-      await PredefinedMenuItem.new({ item: "Hide", text: "Hide Liauth" }),
-      await PredefinedMenuItem.new({ item: "HideOthers" }),
-      await PredefinedMenuItem.new({ item: "ShowAll" }),
-      await sep(),
-      await item("quit", "Quit Liauth", "CmdOrCtrl+Q"),
-    ],
-  });
-
-  const recentItems = await Promise.all(
-    s.recents.map((p) =>
-      MenuItem.new({
-        id: `recent:${p}`,
-        text: p.split("/").pop() ?? p,
-        action: () => run(`recent:${p}`),
-      }),
-    ),
-  );
+    };
+    return command.checked === undefined
+      ? MenuItem.new(options)
+      : CheckMenuItem.new({ ...options, checked: command.checked });
+  };
+  const items = (...ids: string[]) => Promise.all(ids.map(item));
+  const category = (prefix: string) =>
+    items(...commands.filter((c) => c.id.startsWith(prefix)).map((c) => c.id));
+  const recentItems = await category("recent:");
   const openRecent = await Submenu.new({
     text: "Open Recent",
-    items:
-      recentItems.length > 0
-        ? [
-            ...recentItems,
-            await sep(),
-            await item("clear-recents", "Clear Menu"),
-          ]
-        : [
-            await MenuItem.new({
-              id: "no-recents",
-              text: "No Recent Documents",
-              enabled: false,
-            }),
-          ],
+    items: recentItems.length
+      ? [...recentItems, await sep(), await item("clear-recents")]
+      : [
+          await MenuItem.new({
+            id: "no-recents",
+            text: "No Recent Documents",
+            enabled: false,
+          }),
+        ],
   });
-
-  const fileMenu = await Submenu.new({
-    text: "File",
-    items: [
-      await item("open", "Open…", "CmdOrCtrl+O"),
-      await item("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"),
-      openRecent,
-      await sep(),
-      await item("save", "Save (Commit)", "CmdOrCtrl+S"),
-      await item("save-as", "Save As…", "CmdOrCtrl+Shift+S"),
-      await item("reload", "Reload from Disk", "CmdOrCtrl+R"),
-      await sep(),
-      await item(
-        "export-pdf",
-        s.novelProof ? "Export Novel PDF…" : "Export as PDF…",
-        "CmdOrCtrl+Shift+E",
-      ),
-    ],
-  });
-
-  const editMenu = await Submenu.new({
-    text: "Edit",
-    items: [
-      await PredefinedMenuItem.new({ item: "Undo" }),
-      await PredefinedMenuItem.new({ item: "Redo" }),
-      await sep(),
-      await PredefinedMenuItem.new({ item: "Cut" }),
-      await PredefinedMenuItem.new({ item: "Copy" }),
-      await PredefinedMenuItem.new({ item: "Paste" }),
-      await PredefinedMenuItem.new({ item: "SelectAll" }),
-      await sep(),
-      await item("bold", "Bold", "CmdOrCtrl+B"),
-      await item("italic", "Italic", "CmdOrCtrl+I"),
-      await sep(),
-      await item("insert-note", "Insert Note", "CmdOrCtrl+Shift+M"),
-      await item("insert-suggestion", "Insert Suggestion", "CmdOrCtrl+Shift+U"),
-      await item("next-note", "Next Note/Suggestion", "CmdOrCtrl+Shift+J"),
-    ],
-  });
-
-  const themeMenu = await Submenu.new({
-    text: "Theme",
-    items: await Promise.all(
-      [
-        ["paper", "Paper"],
-        ["sepia", "Sepia"],
-        ["dark", "Dark"],
-        ["room", "Room"],
-      ].map(([id, label]) => check(`theme:${id}`, label, s.theme === id)),
-    ),
-  });
-
-  const fontMenu = await Submenu.new({
-    text: "Font",
-    items: await Promise.all(
-      [
-        ["serif", "Serif"],
-        ["sans", "Sans"],
-        ["mono", "Mono"],
-      ].map(([id, label]) => check(`font:${id}`, label, s.font === id)),
-    ),
-  });
-
-  const viewMenu = await Submenu.new({
-    text: "View",
-    items: [
-      themeMenu,
-      fontMenu,
-      await sep(),
-      await item("zoom-in", "Zoom In", "CmdOrCtrl+="),
-      await item("zoom-out", "Zoom Out", "CmdOrCtrl+-"),
-      await item("zoom-reset", "Actual Size", "CmdOrCtrl+0"),
-      await sep(),
-      await check(
-        "toggle-nav",
-        "Files Sidebar",
-        s.navOpen,
-        "CmdOrCtrl+Shift+B",
-      ),
-      await check(
-        "toggle-hidden-files",
-        "Show Hidden Files and Folders",
-        s.showHiddenFiles,
-      ),
-      await check(
-        "toggle-lines",
-        "Line Numbers",
-        s.lineNumbers,
-        "CmdOrCtrl+Shift+L",
-      ),
-      await check("toggle-spell", "Check Spelling", s.spellcheck),
-      await check(
-        "toggle-page",
-        "Page Layout",
-        s.pageLayout,
-        "CmdOrCtrl+Shift+P",
-      ),
-      await check("toggle-novel-proof", "Novel Proof", s.novelProof),
-      await check("toggle-vim", "Vim Keybindings", s.vim),
-      await item("edit-vimrc", "Edit Vim Config…"),
-      await sep(),
-      await check("toggle-room", "Writing Room", s.room, "CmdOrCtrl+Shift+F"),
-      await item("rsvp", "Speed Read", "CmdOrCtrl+Shift+R"),
-    ],
-  });
-
-  const documentMenu = await Submenu.new({
-    text: "Document",
-    items: [
-      ...(s.versioned
-        ? [
-            await check("panel-history", "History", s.panel === "history"),
-            await check("panel-review", "Branches", s.panel === "review"),
-            await item("new-review-branch", "New Branch…"),
-            await item("squash-recent", "Squash Recent Commits"),
-          ]
-        : [await item("enable-versioning", "Enable Versioning…")]),
-      await sep(),
-      await check("panel-notes", "Notes", s.panel === "notes"),
-    ],
-  });
-
-  const windowMenu = await Submenu.new({
-    text: "Window",
-    items: [
-      await PredefinedMenuItem.new({ item: "Minimize" }),
-      await PredefinedMenuItem.new({ item: "Fullscreen" }),
-    ],
-  });
-
-  const helpMenu = await Submenu.new({
-    text: "Help",
-    items: [await item("panel-help", "Liauth Help")],
-  });
-
   const menu = await Menu.new({
     items: [
-      appMenu,
-      fileMenu,
-      editMenu,
-      viewMenu,
-      documentMenu,
-      windowMenu,
-      helpMenu,
+      await Submenu.new({
+        text: "Liauth",
+        items: [
+          await PredefinedMenuItem.new({
+            item: { About: null },
+            text: "About Liauth",
+          }),
+          await item("check-updates"),
+          await sep(),
+          await item("palette"),
+          await sep(),
+          await PredefinedMenuItem.new({ item: "Hide", text: "Hide Liauth" }),
+          await PredefinedMenuItem.new({ item: "HideOthers" }),
+          await PredefinedMenuItem.new({ item: "ShowAll" }),
+          await sep(),
+          await item("quit"),
+        ],
+      }),
+      await Submenu.new({
+        text: "File",
+        items: [
+          ...(await items("open", "open-folder")),
+          openRecent,
+          await sep(),
+          ...(await items("save", "save-as", "reload")),
+          await sep(),
+          await item("export-pdf"),
+        ],
+      }),
+      await Submenu.new({
+        text: "Edit",
+        items: [
+          await PredefinedMenuItem.new({ item: "Undo" }),
+          await PredefinedMenuItem.new({ item: "Redo" }),
+          await sep(),
+          await PredefinedMenuItem.new({ item: "Cut" }),
+          await PredefinedMenuItem.new({ item: "Copy" }),
+          await PredefinedMenuItem.new({ item: "Paste" }),
+          await PredefinedMenuItem.new({ item: "SelectAll" }),
+          await sep(),
+          ...(await items("bold", "italic")),
+          await sep(),
+          ...(await items("insert-note", "insert-suggestion", "next-note")),
+        ],
+      }),
+      await Submenu.new({
+        text: "View",
+        items: [
+          await Submenu.new({ text: "Theme", items: await category("theme:") }),
+          await Submenu.new({ text: "Font", items: await category("font:") }),
+          await sep(),
+          ...(await items("zoom-in", "zoom-out", "zoom-reset")),
+          await sep(),
+          ...(await items(
+            "toggle-nav",
+            "toggle-hidden-files",
+            "toggle-lines",
+            "toggle-spell",
+            "toggle-page",
+            "toggle-novel-proof",
+            "toggle-vim",
+            "edit-vimrc",
+          )),
+          await sep(),
+          ...(await items("toggle-room", "rsvp")),
+        ],
+      }),
+      await Submenu.new({
+        text: "Document",
+        items: [
+          ...(await (registry.has("panel-history")
+            ? items(
+                "panel-history",
+                "panel-review",
+                "new-review-branch",
+                "squash-recent",
+              )
+            : items("enable-versioning"))),
+          await sep(),
+          await item("panel-notes"),
+        ],
+      }),
+      await Submenu.new({
+        text: "Window",
+        items: [
+          await PredefinedMenuItem.new({ item: "Minimize" }),
+          await PredefinedMenuItem.new({ item: "Fullscreen" }),
+        ],
+      }),
+      await Submenu.new({ text: "Help", items: await items("panel-help") }),
     ],
   });
   await menu.setAsAppMenu();

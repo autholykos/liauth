@@ -1,10 +1,10 @@
 import {
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { EditorView } from "@codemirror/view";
@@ -19,14 +19,14 @@ import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
-import { watch, type UnwatchFn } from "@tauri-apps/plugin-fs";
+import { watch } from "@tauri-apps/plugin-fs";
 import { getCM } from "@replit/codemirror-vim";
 import {
   createEditorState,
   toggleBold,
   toggleItalic,
   sweepGhostCursorLayers,
-  setSpellcheck as applySpellcheck,
+  setEditorOption,
   CursorStatus,
 } from "./editor/setup";
 import { dumpKeylog } from "./editor/keylog";
@@ -37,13 +37,13 @@ import {
   showNavigatorFolderMenu,
   type NavigatorFileAction,
 } from "./menu";
-import { CommandPalette, PaletteCommand } from "./CommandPalette";
+import { CommandPalette } from "./CommandPalette";
 import { RephraseDialog } from "./RephraseDialog";
 import { applyVimrc, VimrcSummary } from "./editor/vimrc";
 import { gotoNextHistoryChange, setHistoryDiff } from "./editor/historyDiff";
 import { HelpPanel } from "./HelpPanel";
 import {
-  scanNotes,
+  notesField,
   insertNote,
   insertSuggestion,
   gotoNextNote,
@@ -57,19 +57,32 @@ import { buildRsvpWords, RsvpWord } from "./editor/rsvp";
 import { RsvpOverlay } from "./RsvpOverlay";
 import { renderMarkdown } from "./renderMarkdown";
 import * as api from "./api";
+import {
+  DocumentSession,
+  type DocumentSnapshot,
+  type ViewedVersion,
+} from "./documentSession";
+import {
+  createCommands,
+  fallbackCommand,
+  THEMES,
+  type FontPref,
+  type Theme,
+  type AppCommand,
+} from "./commands";
+import { usePersistedSetting } from "./usePersistedSetting";
+import { timeNow, baseName, parentPath, fmtTime } from "./format";
+import { NotesPanel } from "./NotesPanel";
+import { HistoryPanel } from "./HistoryPanel";
+import { BranchesPanel } from "./BranchesPanel";
+import { FileNavigator } from "./FileNavigator";
 import "./App.css";
 
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
-type Theme = "paper" | "sepia" | "dark" | "room";
 type NavigatorView = "files" | "search";
 type WorkspaceSearchState = api.ProjectSearch | "searching" | "error" | null;
-type AutoSaveResult = "ok" | "blocked-conflict" | "failed";
+type AutoSaveResult = "ok" | "blocked-conflict" | "failed" | "changed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
-type ViewedVersion = api.CommitInfo & {
-  currentContent: string;
-  historicalContent: string;
-  hunks: api.HistoryHunk[];
-};
 type RephraseState = {
   id: number;
   from: number;
@@ -84,21 +97,6 @@ type RephraseState = {
   busy: boolean;
   error: string | null;
 };
-
-const THEMES: { id: Theme; label: string }[] = [
-  { id: "paper", label: "Paper" },
-  { id: "sepia", label: "Sepia" },
-  { id: "dark", label: "Dark" },
-  { id: "room", label: "Room" },
-];
-
-type FontPref = "serif" | "sans" | "mono";
-
-const FONTS: { id: FontPref; label: string }[] = [
-  { id: "serif", label: "Serif" },
-  { id: "sans", label: "Sans" },
-  { id: "mono", label: "Mono" },
-];
 
 const ZOOM_MIN = 0.8;
 const ZOOM_MAX = 2.0;
@@ -115,9 +113,9 @@ const DEFAULT_VIMRC = `" Liauth vim config — supported: the map/noremap/unmap 
 " nnoremap k gk
 `;
 
-function loadRecents(): string[] {
+function loadRecents(stored: string | null): string[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem("liauth.recents") ?? "[]");
+    const parsed = JSON.parse(stored ?? "[]");
     return Array.isArray(parsed)
       ? parsed.filter((p) => typeof p === "string")
       : [];
@@ -126,25 +124,16 @@ function loadRecents(): string[] {
   }
 }
 
-function timeNow(): string {
-  return new Date().toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function initialFont(): FontPref {
-  const stored = localStorage.getItem("liauth.font");
+function initialFont(stored: string | null): FontPref {
   return stored === "sans" || stored === "mono" ? stored : "serif";
 }
 
-function initialZoom(): number {
-  const stored = Number(localStorage.getItem("liauth.zoom"));
+function initialZoom(value: string | null): number {
+  const stored = Number(value);
   return stored >= ZOOM_MIN && stored <= ZOOM_MAX ? stored : 1;
 }
 
-function initialTheme(): Theme {
-  const stored = localStorage.getItem("liauth.theme");
+function initialTheme(stored: string | null): Theme {
   if (THEMES.some((t) => t.id === stored)) {
     return stored as Theme;
   }
@@ -153,113 +142,86 @@ function initialTheme(): Theme {
     : "paper";
 }
 
-const clip = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
-const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
-const parentPath = (path: string) => {
-  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return cut > 0 ? path.slice(0, cut) : null;
-};
-
 function selectionContext(text: string, from: number, to: number): string {
   const before = text.lastIndexOf("\n\n", Math.max(0, from - 1));
   const after = text.indexOf("\n\n", to);
-  return text.slice(before < 0 ? 0 : before + 2, after < 0 ? text.length : after);
-}
-
-function fmtTime(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-function fmtAgo(unixSeconds: number): string {
-  const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86400);
-  if (days < 1) return "today";
-  if (days < 2) return "yesterday";
-  if (days < 30) return `${days} days ago`;
-  if (days < 365) return `${Math.floor(days / 30)} months ago`;
-  return fmtTime(unixSeconds);
+  return text.slice(
+    before < 0 ? 0 : before + 2,
+    after < 0 ? text.length : after,
+  );
 }
 
 function App() {
   const editorHost = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const loadingRef = useRef(false);
-  const saveRef = useRef<() => void>(() => {});
 
-  const [filePath, setFilePath] = useState<string | null>(null);
-  const [repo, setRepo] = useState<api.RepoInfo | null>(null);
-  const [dirty, setDirty] = useState(false);
+  const [session] = useState(() => new DocumentSession());
+  const {
+    filePath,
+    dirty,
+    viewing,
+    reinstating,
+    extConflict,
+    versioning,
+    lastSave,
+  } = useSyncExternalStore(session.subscribe, session.getSnapshot);
+  const repo = versioning?.repo ?? null;
   const [panel, setPanel] = useState<Panel>("none");
-  const [history, setHistory] = useState<api.CommitInfo[]>([]);
-  const [branches, setBranches] = useState<api.BranchInfo[]>([]);
-  const [worktrees, setWorktrees] = useState<api.WorktreeInfo[]>([]);
-  const [viewing, setViewing] = useState<ViewedVersion | null>(null);
-  const [reinstating, setReinstating] = useState<number | null>(null);
   const [squashing, setSquashing] = useState(false);
   const [status, setStatus] = useState<string>("");
-  const [vimMode, setVimMode] = useState(
-    () => localStorage.getItem("liauth.vim") === "1",
+  const [vimMode, setVimMode] = usePersistedSetting(
+    "liauth.vim",
+    (stored) => stored === "1",
   );
-  const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [theme, setTheme] = usePersistedSetting("liauth.theme", initialTheme);
   const [room, setRoom] = useState(false);
-  const [font, setFont] = useState<FontPref>(initialFont);
-  const [zoom, setZoom] = useState<number>(initialZoom);
-  const [lineNums, setLineNums] = useState(
-    () => localStorage.getItem("liauth.lines") === "1",
+  const [font, setFont] = usePersistedSetting("liauth.font", initialFont);
+  const [zoom, setZoom] = usePersistedSetting("liauth.zoom", initialZoom);
+  const [lineNums, setLineNums] = usePersistedSetting(
+    "liauth.lines",
+    (stored) => stored === "1",
   );
   // On unless switched off: prose wants the macOS dictionaries.
-  const [spellcheck, setSpellcheck] = useState(
-    () => localStorage.getItem("liauth.spell") !== "0",
+  const [spellcheck, setSpellcheck] = usePersistedSetting(
+    "liauth.spell",
+    (stored) => stored !== "0",
   );
-  const [pageLayout, setPageLayout] = useState(
-    () => localStorage.getItem("liauth.page") === "1",
+  const [pageLayout, setPageLayout] = usePersistedSetting(
+    "liauth.page",
+    (stored) => stored === "1",
   );
   const [novelProof, setNovelProof] = useState(false);
-  const lineNumsRef = useRef(lineNums);
-  const spellcheckRef = useRef(spellcheck);
   const [notes, setNotes] = useState<NoteMatch[]>([]);
-  const notesTimerRef = useRef<number | undefined>(undefined);
   const [rsvp, setRsvp] = useState<{
     words: RsvpWord[];
     startIndex: number;
   } | null>(null);
-  const rsvpRef = useRef<() => void>(() => {});
-  const rsvpOpenRef = useRef(false);
-  rsvpOpenRef.current = rsvp !== null;
-  const vimRef = useRef(vimMode);
-  const roomRef = useRef(room);
+  const editorOptions = {
+    vim: vimMode,
+    typewriter: room,
+    lineNumbers: lineNums,
+    spellcheck,
+  };
+  const editorOptionsRef = useRef(editorOptions);
+  editorOptionsRef.current = editorOptions;
   const roomMountedRef = useRef(false);
-  const viewingRef = useRef(viewing);
-  viewingRef.current = viewing;
-  const reinstatingRef = useRef(reinstating);
-  reinstatingRef.current = reinstating;
   const reinstateHistoryRef = useRef<(index: number) => void>(() => {});
-  const panelRef = useRef(panel);
-  panelRef.current = panel;
-  const filePathRef = useRef(filePath);
-  filePathRef.current = filePath;
-  // Tracks "buffer differs from disk" — distinct from `dirty`, which now
-  // means "uncommitted changes" and only clears on a real (commit) save.
-  const diskDirtyRef = useRef(false);
-  // Last disk content this app loaded or wrote: the merge base for
-  // reconciling concurrent external writes, and the way our own saves
-  // are told apart from someone else's.
-  const lastDiskRef = useRef("");
-  const unwatchRef = useRef<UnwatchFn | null>(null);
-  const [extConflict, setExtConflict] = useState<string | null>(null); // disk content
-  const extConflictRef = useRef<string | null>(null);
-  extConflictRef.current = extConflict;
-  const [recents, setRecents] = useState<string[]>(loadRecents);
+  const [recents, setRecents] = usePersistedSetting(
+    "liauth.recents",
+    loadRecents,
+    JSON.stringify,
+  );
   const [vimrc, setVimrc] = useState<VimrcSummary | null>(null);
   const [vimrcDraft, setVimrcDraft] = useState("");
-  const [navOpen, setNavOpen] = useState(
-    () => localStorage.getItem("liauth.nav") === "1",
+  const [navOpen, setNavOpen] = usePersistedSetting(
+    "liauth.nav",
+    (stored) => stored === "1",
   );
   const [navigatorView, setNavigatorView] = useState<NavigatorView>("files");
-  const [showHiddenFiles, setShowHiddenFiles] = useState(
-    () => localStorage.getItem("liauth.hiddenFiles") === "1",
+  const [showHiddenFiles, setShowHiddenFiles] = usePersistedSetting(
+    "liauth.hiddenFiles",
+    (stored) => stored === "1",
   );
   const [project, setProject] = useState<api.ProjectFiles | null>(null);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(
@@ -285,7 +247,6 @@ function App() {
   const rephraseIdRef = useRef(0);
   const [cursor, setCursor] = useState<CursorStatus>({ line: 1, col: 1 });
   const [counts, setCounts] = useState({ words: 0, chars: 0 });
-  const [lastSave, setLastSave] = useState("");
   const countsTimerRef = useRef<number | undefined>(undefined);
   const runRef = useRef<(id: string) => void>(() => {});
 
@@ -313,7 +274,7 @@ function App() {
 
   const refreshNotes = useCallback(() => {
     const view = viewRef.current;
-    if (view) setNotes(scanNotes(view.state.doc.toString()));
+    if (view) setNotes(view.state.field(notesField));
   }, []);
 
   const updateCounts = useCallback(() => {
@@ -331,10 +292,7 @@ function App() {
     countsTimerRef.current = window.setTimeout(updateCounts, 300);
   }, [updateCounts]);
 
-  useEffect(() => {
-    setLastSave("");
-    updateCounts();
-  }, [filePath, updateCounts]);
+  useEffect(updateCounts, [filePath, updateCounts]);
 
   useEffect(() => {
     const name = fileName ?? "Untitled";
@@ -348,23 +306,34 @@ function App() {
   // window blur.
   const autoSave = useCallback(async (): Promise<AutoSaveResult> => {
     const view = viewRef.current;
-    const path = filePathRef.current;
-    if (!view || !path || viewingRef.current || !diskDirtyRef.current) {
+    const snapshot = session.getSnapshot();
+    if (!view || !snapshot.filePath || snapshot.viewing || !snapshot.diskDirty)
       return "ok";
-    }
-    if (extConflictRef.current !== null) return "blocked-conflict";
+    if (snapshot.extConflict !== null) return "blocked-conflict";
+    const content = view.state.doc.toString();
     try {
-      const content = view.state.doc.toString();
-      await api.saveDocument(path, content, undefined, false);
-      diskDirtyRef.current = false;
-      lastDiskRef.current = content;
-      setLastSave(`autosaved ${timeNow()}`);
-      return "ok";
+      const saved = await session.save(content, false);
+      if (!saved.current) return "changed";
+      session.setLastSave(`autosaved ${timeNow()}`);
+      return session.getSnapshot().diskDirty ? "changed" : "ok";
     } catch (e) {
       console.warn("[liauth] autosave failed:", e);
       return "failed";
     }
-  }, []);
+  }, [session]);
+
+  const autoSaveOr = useCallback(
+    async (action: string): Promise<boolean> => {
+      const saved = await autoSave();
+      if (saved === "blocked-conflict")
+        flash(`Resolve the disk conflict before ${action}`);
+      if (saved === "failed") flash(`Autosave failed; ${action} canceled`);
+      if (saved === "changed")
+        flash(`Document changed while saving; ${action} canceled`);
+      return saved === "ok";
+    },
+    [autoSave, flash],
+  );
 
   useEffect(() => {
     const onBlur = () => void autoSave();
@@ -379,7 +348,7 @@ function App() {
           comparison
             ? {
                 hunks: comparison.hunks,
-                disabled: reinstatingRef.current !== null,
+                disabled: session.getSnapshot().reinstating !== null,
                 onReinstate: (index) => reinstateHistoryRef.current(index),
               }
             : null,
@@ -393,7 +362,10 @@ function App() {
   const startRsvp = useCallback(() => {
     const view = viewRef.current;
     if (!view) return;
-    const words = buildRsvpWords(view.state.doc.toString());
+    const words = buildRsvpWords(
+      view.state.doc.toString(),
+      view.state.field(notesField),
+    );
     if (words.length === 0) {
       flash("Nothing to read");
       return;
@@ -404,10 +376,6 @@ function App() {
     if (startIndex < 0) startIndex = words.length - 1;
     setRsvp({ words, startIndex });
   }, [flash]);
-
-  useEffect(() => {
-    rsvpRef.current = startRsvp;
-  }, [startRsvp]);
 
   const exitRsvp = useCallback((offset: number) => {
     setRsvp(null);
@@ -421,22 +389,18 @@ function App() {
     view.focus();
   }, []);
 
-  // Cmd/Ctrl-Shift-R opens the reader.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        e.shiftKey &&
-        e.key.toLowerCase() === "r" &&
-        !rsvpOpenRef.current
-      ) {
-        e.preventDefault();
-        rsvpRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  const bindVimAutosave = useCallback(
+    (view: EditorView) => {
+      const cm = getCM(view);
+      if (!cm) return;
+      let lastMode = "normal";
+      cm.on("vim-mode-change", (e: { mode: string }) => {
+        if (lastMode === "insert" && e.mode !== "insert") void autoSave();
+        lastMode = e.mode;
+      });
+    },
+    [autoSave],
+  );
 
   const setEditorContent = useCallback(
     (
@@ -447,7 +411,6 @@ function App() {
       // Loads, reloads, history views, and branch switches all pass through
       // here, so the Notes panel and navigator badge update in the same frame.
       setRephrase(null);
-      setNotes(scanNotes(content));
       const view = viewRef.current;
       if (!view) return;
       loadingRef.current = true;
@@ -457,100 +420,45 @@ function App() {
           {
             onChange: () => {
               if (!loadingRef.current) {
-                setDirty(true);
-                diskDirtyRef.current = true;
+                session.edit();
               }
               scheduleCounts();
               // Notes also drive the navigator badge, so keep them current
               // even while the Notes panel itself is closed.
-              window.clearTimeout(notesTimerRef.current);
-              notesTimerRef.current = window.setTimeout(refreshNotes, 300);
+              refreshNotes();
             },
-            onSave: () => saveRef.current(),
+            onSave: () => runRef.current("save"),
             onToggleRoom: () => setRoom((r) => !r),
-            onRsvp: () => rsvpRef.current(),
+            onRsvp: () => runRef.current("rsvp"),
             onStatus: (s) => setCursor(s),
             onNotice: flash,
           },
           {
             readOnly,
-            vim: vimRef.current,
-            typewriter: roomRef.current,
-            lineNumbers: lineNumsRef.current,
-            spellcheck: spellcheckRef.current,
+            ...editorOptionsRef.current,
           },
         ),
       );
+      refreshNotes();
       displayHistoryDiff(view, comparison);
       sweepGhostCursorLayers(view);
-      // Autosave when leaving vim insert mode.
-      if (vimRef.current) {
-        const cm = getCM(view);
-        if (cm) {
-          let lastMode = "normal";
-          cm.on("vim-mode-change", (e: { mode: string }) => {
-            if (lastMode === "insert" && e.mode !== "insert") void autoSave();
-            lastMode = e.mode;
-          });
-        }
-      }
+      bindVimAutosave(view);
       loadingRef.current = false;
     },
-    [autoSave, displayHistoryDiff, flash, refreshNotes, scheduleCounts],
+    [bindVimAutosave, displayHistoryDiff, flash, refreshNotes, scheduleCounts],
   );
 
   useEffect(() => {
-    localStorage.setItem("liauth.theme", theme);
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("liauth.font", font);
     document.documentElement.dataset.font = font;
   }, [font]);
 
   useEffect(() => {
-    localStorage.setItem("liauth.zoom", String(zoom));
     document.documentElement.style.setProperty("--editor-zoom", String(zoom));
   }, [zoom]);
-
-  // Cmd/Ctrl +/-/0 text zoom and Cmd/Ctrl-K palette (fallbacks for when
-  // the native menu accelerators don't fire, e.g. dev reload states).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      if (e.key === "=" || e.key === "+") {
-        e.preventDefault();
-        setZoom((z) => clampZoom(z + ZOOM_STEP));
-      } else if (e.key === "-" || e.key === "_") {
-        e.preventDefault();
-        setZoom((z) => clampZoom(z - ZOOM_STEP));
-      } else if (e.key === "0") {
-        e.preventDefault();
-        setZoom(1);
-      } else if (e.key.toLowerCase() === "k" && !e.shiftKey) {
-        e.preventDefault();
-        setPaletteOpen((o) => !o);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem("liauth.recents", JSON.stringify(recents));
-  }, [recents]);
-
-  useEffect(() => {
-    localStorage.setItem("liauth.nav", navOpen ? "1" : "0");
-  }, [navOpen]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "liauth.hiddenFiles",
-      showHiddenFiles ? "1" : "0",
-    );
-  }, [showHiddenFiles]);
 
   const refreshProject = useCallback(
     async (anchor: string | null) => {
@@ -600,9 +508,9 @@ function App() {
 
     setWorkspaceSearch("searching");
     const timer = window.setTimeout(() => {
-      const currentFilePath = viewingRef.current
+      const currentFilePath = session.getSnapshot().viewing
         ? null
-        : filePathRef.current;
+        : session.getSnapshot().filePath;
       const currentContent = currentFilePath
         ? (viewRef.current?.state.doc.toString() ?? null)
         : null;
@@ -645,7 +553,7 @@ function App() {
         if (!cfg) return;
         const summary = applyVimrc(cfg.path, cfg.content);
         setVimrc(summary);
-        if (vimRef.current && summary.applied > 0) {
+        if (editorOptionsRef.current.vim && summary.applied > 0) {
           flash(
             `Vim config: ${summary.applied} entries from ${cfg.path}` +
               (summary.skipped.length
@@ -687,46 +595,26 @@ function App() {
     }
   }, [vimrcDraft, flash]);
 
-  // Rebuild the editor state when vim mode toggles, keeping the content.
   useEffect(() => {
-    localStorage.setItem("liauth.vim", vimMode ? "1" : "0");
-    vimRef.current = vimMode;
     const view = viewRef.current;
     if (view) {
-      setEditorContent(
-        view.state.doc.toString(),
-        viewingRef.current !== null,
-        viewingRef.current,
-      );
+      setEditorOption(view, "vim", vimMode);
+      bindVimAutosave(view);
     }
-  }, [vimMode, setEditorContent]);
+  }, [vimMode, bindVimAutosave]);
 
-  // Same for the line-number gutter.
   useEffect(() => {
-    localStorage.setItem("liauth.lines", lineNums ? "1" : "0");
-    lineNumsRef.current = lineNums;
     const view = viewRef.current;
-    if (view) {
-      setEditorContent(
-        view.state.doc.toString(),
-        viewingRef.current !== null,
-        viewingRef.current,
-      );
-    }
-  }, [lineNums, setEditorContent]);
+    if (view) setEditorOption(view, "lineNumbers", lineNums);
+  }, [lineNums]);
 
-  // Spell checking is reconfigured in place: no state rebuild, so the undo
-  // history and the selection survive the toggle.
   useEffect(() => {
-    localStorage.setItem("liauth.spell", spellcheck ? "1" : "0");
-    spellcheckRef.current = spellcheck;
     const view = viewRef.current;
-    if (view) applySpellcheck(view, spellcheck);
+    if (view) setEditorOption(view, "spellcheck", spellcheck);
   }, [spellcheck]);
 
   // Page layout: the content column styled as a paper sheet (pure CSS).
   useEffect(() => {
-    localStorage.setItem("liauth.page", pageLayout ? "1" : "0");
     document.documentElement.dataset.page = pageLayout ? "1" : "0";
   }, [pageLayout]);
 
@@ -739,7 +627,6 @@ function App() {
   // Room mode: fullscreen, chrome hidden, typewriter scrolling. Theme and
   // font stay as they are — the Room theme is just an option in the picker.
   useEffect(() => {
-    roomRef.current = room;
     if (!roomMountedRef.current) {
       roomMountedRef.current = true;
       return;
@@ -752,107 +639,76 @@ function App() {
     }
     const view = viewRef.current;
     if (view) {
-      setEditorContent(
-        view.state.doc.toString(),
-        viewingRef.current !== null,
-        viewingRef.current,
-      );
+      setEditorOption(view, "typewriter", room);
       view.focus();
     }
-  }, [room, setEditorContent]);
+  }, [room]);
 
-  // Cmd/Ctrl-Shift-F toggles room mode from anywhere.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        e.shiftKey &&
-        e.key.toLowerCase() === "f"
-      ) {
-        e.preventDefault();
-        setRoom((r) => !r);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
-
-  const refreshGit = useCallback(async (path: string) => {
-    const info = await api.repoInfo(path);
-    setRepo(info);
-    if (info.repo_root) {
-      setHistory(await api.fileHistory(path));
-      setBranches(await api.listBranches(path));
-      setWorktrees(await api.listWorktrees(path));
-    } else {
-      setHistory([]);
-      setBranches([]);
-      setWorktrees([]);
-    }
-    return info;
-  }, []);
+  const refreshGit = useCallback(
+    (path: string) => session.refreshGit(path),
+    [session],
+  );
 
   // External-change handling: called by the file watcher. Our own writes
   // are recognized by comparing disk against what we last wrote.
   const handleExternalChange = useCallback(async () => {
-    const path = filePathRef.current;
     const view = viewRef.current;
-    // While viewing history the buffer holds an old version on purpose;
-    // loadFile re-reads the disk when returning to current.
-    if (!path || !view || viewingRef.current) return;
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    if (!path || !view || snapshot.viewing) return;
     let disk: string;
     try {
       disk = await api.readDocument(path);
     } catch {
-      return; // deleted/renamed mid-event; ignore
-    }
-    if (disk === lastDiskRef.current) return; // our own write
+      return;
+    } // deleted/renamed mid-event
+    if (!session.sameDocument(snapshot) || session.getSnapshot().viewing)
+      return;
+    const current = session.getSnapshot();
+    if (disk === current.lastDisk) return;
     const buffer = view.state.doc.toString();
-    if (disk === buffer) {
-      lastDiskRef.current = disk;
+    if (disk === buffer || !current.diskDirty) {
+      session.acceptDisk(disk);
+      if (disk !== buffer) setEditorContent(disk);
+      await refreshGit(path);
+      if (session.sameDocument(current) && disk !== buffer)
+        flash("Reloaded — file changed on disk");
       return;
     }
-    if (!diskDirtyRef.current) {
-      // Buffer is clean: just take the external version.
-      lastDiskRef.current = disk;
-      setEditorContent(disk);
-      const info = await refreshGit(path);
-      if (!diskDirtyRef.current) setDirty(info.file_dirty);
-      flash("Reloaded — file changed on disk");
-      return;
+    // Keep autosave blocked until the external version has been reconciled.
+    session.setConflict(disk);
+    const merging = session.getSnapshot();
+    try {
+      const merged = await api.mergeContents(current.lastDisk, buffer, disk);
+      if (!session.isCurrent(merging)) return;
+      if (!merged.conflicts) {
+        session.mergeDisk(disk);
+        setEditorContent(merged.content);
+        flash("Merged concurrent changes from disk — save to commit");
+      }
+    } catch (e) {
+      if (session.sameDocument(merging))
+        flash(`Could not merge disk changes: ${e}`);
     }
-    // Concurrent writes: try a three-way merge with the last common
-    // disk state as the ancestor (the same algorithm git merge uses).
-    const merged = await api.mergeContents(lastDiskRef.current, buffer, disk);
-    if (!merged.conflicts) {
-      lastDiskRef.current = disk;
-      setEditorContent(merged.content);
-      setDirty(true);
-      diskDirtyRef.current = true;
-      flash("Merged concurrent changes from disk — save to commit");
-    } else {
-      setExtConflict(disk);
-    }
-  }, [setEditorContent, refreshGit, flash]);
+  }, [session, setEditorContent, refreshGit, flash]);
 
   const watchFile = useCallback(
     async (path: string) => {
-      unwatchRef.current?.();
-      unwatchRef.current = null;
+      const snapshot = session.getSnapshot();
+      if (path !== snapshot.filePath) return;
       try {
-        unwatchRef.current = await watch(
-          path,
-          () => void handleExternalChange(),
-          { delayMs: 500 },
-        );
+        const unwatch = await watch(path, () => void handleExternalChange(), {
+          delayMs: 500,
+        });
+        session.attachWatcher(snapshot, unwatch);
       } catch (e) {
         console.warn("[liauth] file watch failed:", e);
       }
     },
-    [handleExternalChange],
+    [session, handleExternalChange],
   );
 
-  useEffect(() => () => unwatchRef.current?.(), []);
+  useEffect(() => session.close, [session]);
 
   const checkForUpdates = useCallback(async () => {
     flash("Checking for updates...");
@@ -895,55 +751,55 @@ function App() {
   const loadFile = useCallback(
     async (path: string) => {
       try {
-        const content = await api.readDocument(path);
-        setFilePath(path);
-        setViewing(null);
-        setDirty(false);
-        setExtConflict(null);
-        diskDirtyRef.current = false;
-        lastDiskRef.current = content;
+        const content = await session.open(path);
+        if (content === null) return false;
+        const snapshot = session.getSnapshot();
         setEditorContent(content);
-        setRecents((r) => [path, ...r.filter((p) => p !== path)].slice(0, 8));
+        setRecents((recent) =>
+          [path, ...recent.filter((p) => p !== path)].slice(0, 8),
+        );
         const info = await refreshGit(path);
-        // A document carrying review notes will likely get Draft edits;
-        // pre-fill the model's KV cache (voice guide + document) so the
-        // first draft is fast.
-        if (scanNotes(content).some((n) => n.kind === "comment")) {
+        if (!session.sameDocument(snapshot)) return false;
+        if (
+          viewRef.current?.state
+            .field(notesField)
+            .some((n) => n.kind === "comment")
+        ) {
           void api.warmNoteCache(content, info.repo_root);
         }
-        if (!diskDirtyRef.current) setDirty(info.file_dirty);
         await watchFile(path);
-        return true;
+        return session.sameDocument(snapshot);
       } catch (e) {
         flash(`Could not open file: ${e}`);
         return false;
       }
     },
-    [setEditorContent, refreshGit, flash, watchFile],
+    [session, setEditorContent, setRecents, refreshGit, flash, watchFile],
+  );
+
+  const closeDocument = useCallback(
+    (folder: string | null) => {
+      session.close();
+      localStorage.removeItem("liauth.lastFile");
+      setOpenFolder(folder);
+      setEditorContent("");
+    },
+    [session, setEditorContent],
   );
 
   const leaveCurrentDocument = useCallback(
     async (title: string): Promise<boolean> => {
       const view = viewRef.current;
       if (!view) return true;
-      if (!filePathRef.current && view.state.doc.length > 0) {
+      if (!session.getSnapshot().filePath && view.state.doc.length > 0) {
         return ask("Discard the untitled document?", {
           title,
           kind: "warning",
         });
       }
-      const saved = await autoSave();
-      if (saved === "blocked-conflict") {
-        flash("Resolve the disk conflict before opening another document");
-        return false;
-      }
-      if (saved === "failed") {
-        flash("Autosave failed; current document left open");
-        return false;
-      }
-      return true;
+      return autoSaveOr("opening another document");
     },
-    [autoSave, flash],
+    [autoSaveOr],
   );
 
   const openPath = useCallback(
@@ -962,14 +818,14 @@ function App() {
     async (match: api.ProjectSearchMatch) => {
       const navigation = ++workspaceSearchNavigationRef.current;
       if (
-        filePathRef.current !== match.path ||
-        viewingRef.current !== null
+        session.getSnapshot().filePath !== match.path ||
+        session.getSnapshot().viewing !== null
       ) {
         if (!(await openPath(match.path))) return;
       }
       if (
         navigation !== workspaceSearchNavigationRef.current ||
-        filePathRef.current !== match.path
+        session.getSnapshot().filePath !== match.path
       ) {
         return;
       }
@@ -994,7 +850,10 @@ function App() {
       try {
         const message = await api.describeCommit(path, commitId);
         await api.rewordCommit(path, commitId, message);
-        if (filePathRef.current === path && !viewingRef.current) {
+        if (
+          session.getSnapshot().filePath === path &&
+          !session.getSnapshot().viewing
+        ) {
           await refreshGit(path);
         }
       } catch (e) {
@@ -1006,40 +865,45 @@ function App() {
 
   const doSave = useCallback(async () => {
     const view = viewRef.current;
-    if (!view || viewing) return;
-    let path = filePath;
+    const start = session.getSnapshot();
+    if (!view || start.viewing) return;
+    let path = start.filePath;
     if (!path) {
       path = await saveDialog({
         filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-        // An explicitly opened folder is where the untitled buffer lives.
         defaultPath: openFolder ?? undefined,
       });
-      if (!path) return;
-      setFilePath(path);
+      if (
+        !path ||
+        !session.sameDocument(start) ||
+        session.getSnapshot().viewing
+      )
+        return;
     }
     try {
-      const content = view.state.doc.toString();
-      const commit = await api.saveDocument(path, content);
-      setDirty(false);
-      setExtConflict(null);
-      diskDirtyRef.current = false;
-      lastDiskRef.current = content;
-      setLastSave(
+      const { commit, current } = await session.save(
+        view.state.doc.toString(),
+        true,
+        undefined,
+        path,
+      );
+      if (!current) return;
+      const snapshot = session.getSnapshot();
+      session.setLastSave(
         commit
           ? `committed ${commit.id.slice(0, 7)} · ${timeNow()}`
           : `saved ${timeNow()}`,
       );
       const info = await refreshGit(path);
-      if (!diskDirtyRef.current) setDirty(info.file_dirty);
+      if (!session.sameDocument(snapshot)) return;
       await refreshProject(path);
-      if (!unwatchRef.current) await watchFile(path);
+      if (!session.hasWatcher()) await watchFile(path);
       if (commit && !info.merging) void recapCommit(path, commit.id);
     } catch (e) {
       flash(`Save failed: ${e}`);
     }
   }, [
-    filePath,
-    viewing,
+    session,
     openFolder,
     refreshGit,
     refreshProject,
@@ -1050,29 +914,37 @@ function App() {
 
   const doSaveAs = useCallback(async () => {
     const view = viewRef.current;
-    if (!view || viewing) return;
+    const start = session.getSnapshot();
+    if (!view || start.viewing) return;
     const path = await saveDialog({
       filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-      defaultPath: fileName ?? undefined,
+      defaultPath: start.filePath ? baseName(start.filePath) : "Untitled",
     });
-    if (!path) return;
+    if (!path || !session.sameDocument(start) || session.getSnapshot().viewing)
+      return;
     try {
-      await api.saveDocument(path, view.state.doc.toString());
-      await loadFile(path);
-      setLastSave(`saved as ${path.split("/").pop()} · ${timeNow()}`);
+      const { current } = await session.save(
+        view.state.doc.toString(),
+        true,
+        undefined,
+        path,
+      );
+      if (!current) return;
+      session.setLastSave(`saved as ${baseName(path)} · ${timeNow()}`);
+      setRecents((recent) =>
+        [path, ...recent.filter((p) => p !== path)].slice(0, 8),
+      );
+      await refreshGit(path);
+      await watchFile(path);
     } catch (e) {
       flash(`Save As failed: ${e}`);
     }
-  }, [viewing, fileName, loadFile, flash]);
-
-  useEffect(() => {
-    saveRef.current = () => void doSave();
-  }, [doSave]);
+  }, [session, setRecents, refreshGit, watchFile, flash]);
 
   const doReload = useCallback(async () => {
-    const path = filePathRef.current;
+    const path = session.getSnapshot().filePath;
     if (!path) return;
-    if (diskDirtyRef.current) {
+    if (session.getSnapshot().diskDirty) {
       const ok = await ask("Discard unsaved changes and reload from disk?", {
         title: "Reload",
       });
@@ -1084,19 +956,15 @@ function App() {
 
   const saveBeforeFileOperation = useCallback(
     async (path: string, action: string): Promise<boolean> => {
-      if (path !== filePathRef.current) return true;
-      const saved = await autoSave();
-      if (saved === "blocked-conflict") {
-        flash(`Resolve the disk conflict before ${action}`);
-        return false;
-      }
-      if (saved === "failed") {
-        flash(`Autosave failed; ${action} canceled`);
-        return false;
-      }
-      return true;
+      if (path !== session.getSnapshot().filePath) return true;
+      return autoSaveOr(action);
     },
-    [autoSave, flash],
+    [autoSaveOr],
+  );
+
+  const projectAnchor = useCallback(
+    () => session.getSnapshot().filePath ?? project?.root ?? openFolder,
+    [project?.root, openFolder],
   );
 
   const renameNavigatorFile = useCallback(
@@ -1108,17 +976,17 @@ function App() {
       try {
         const newPath = await api.renameProjectFile(file.path, newName);
         setRecents((recent) => [
-          ...new Set(recent.map((path) => (path === file.path ? newPath : path))),
+          ...new Set(
+            recent.map((path) => (path === file.path ? newPath : path)),
+          ),
         ]);
         setFileClipboard((staged) =>
           staged?.path === file.path ? { ...staged, path: newPath } : staged,
         );
-        if (filePathRef.current === file.path) {
+        if (session.getSnapshot().filePath === file.path) {
           await loadFile(newPath);
         } else {
-          await refreshProject(
-            filePathRef.current ?? project?.root ?? openFolder,
-          );
+          await refreshProject(projectAnchor());
         }
         flash(`Renamed to ${baseName(newPath)}`);
       } catch (e) {
@@ -1129,6 +997,7 @@ function App() {
       saveBeforeFileOperation,
       loadFile,
       refreshProject,
+      projectAnchor,
       project?.root,
       openFolder,
       flash,
@@ -1158,7 +1027,7 @@ function App() {
           destination.path,
           staged.mode === "cut",
         );
-        const sourceIsCurrent = filePathRef.current === staged.path;
+        const sourceIsCurrent = session.getSnapshot().filePath === staged.path;
         if (staged.mode === "cut") {
           setFileClipboard(null);
           if (newPath === staged.path) {
@@ -1167,17 +1036,13 @@ function App() {
           }
           setRecents((recent) => [
             ...new Set(
-              recent.map((path) =>
-                path === staged.path ? newPath : path,
-              ),
+              recent.map((path) => (path === staged.path ? newPath : path)),
             ),
           ]);
           if (sourceIsCurrent) await loadFile(newPath);
         }
         if (!(sourceIsCurrent && staged.mode === "cut")) {
-          await refreshProject(
-            filePathRef.current ?? project?.root ?? openFolder,
-          );
+          await refreshProject(projectAnchor());
         }
         flash(
           staged.mode === "cut"
@@ -1195,6 +1060,7 @@ function App() {
       saveBeforeFileOperation,
       loadFile,
       refreshProject,
+      projectAnchor,
       project?.root,
       openFolder,
       flash,
@@ -1203,10 +1069,10 @@ function App() {
 
   const deleteNavigatorFile = useCallback(
     async (file: api.ProjectFile) => {
-      const wasCurrent = file.path === filePathRef.current;
+      const wasCurrent = file.path === session.getSnapshot().filePath;
       const ok = await ask(
         `Delete “${file.rel}” permanently?` +
-          (wasCurrent && diskDirtyRef.current
+          (wasCurrent && session.getSnapshot().diskDirty
             ? " Unsaved edits will also be lost."
             : " This cannot be undone."),
         { title: "Delete File", kind: "warning" },
@@ -1214,34 +1080,17 @@ function App() {
       if (!ok) return;
       try {
         await api.deleteProjectFile(file.path);
-        const isCurrent = file.path === filePathRef.current;
+        const isCurrent = file.path === session.getSnapshot().filePath;
         setRecents((recent) => recent.filter((path) => path !== file.path));
         setFileClipboard((staged) =>
           staged?.path === file.path ? null : staged,
         );
         const anchor = project?.root ?? openFolder ?? parentPath(file.path);
         if (isCurrent) {
-          unwatchRef.current?.();
-          unwatchRef.current = null;
-          localStorage.removeItem("liauth.lastFile");
-          setOpenFolder(anchor);
-          setFilePath(null);
-          setViewing(null);
-          setDirty(false);
-          setExtConflict(null);
-          diskDirtyRef.current = false;
-          lastDiskRef.current = "";
-          setEditorContent("");
-          setRepo(null);
-          setHistory([]);
-          setBranches([]);
-          setWorktrees([]);
-          setLastSave("");
+          closeDocument(anchor);
         }
         if (!isCurrent) {
-          await refreshProject(
-            filePathRef.current ?? project?.root ?? openFolder,
-          );
+          await refreshProject(projectAnchor());
         }
         flash(`Deleted ${baseName(file.path)}`);
       } catch (e) {
@@ -1251,34 +1100,34 @@ function App() {
     [
       project?.root,
       openFolder,
-      setEditorContent,
+      closeDocument,
       refreshProject,
+      projectAnchor,
       flash,
     ],
   );
 
   const openNavigatorFileMenu = useCallback(
     (file: api.ProjectFile) => {
-      void showNavigatorFileMenu(
-        (action: NavigatorFileAction) => {
-          switch (action) {
-            case "rename":
-              void renameNavigatorFile(file);
-              break;
-            case "cut":
-            case "copy":
-              stageNavigatorFile(file, action);
-              break;
-            case "paste":
-              void pasteNavigatorFile(file);
-              break;
-            case "delete":
-              void deleteNavigatorFile(file);
-              break;
-          }
-        },
-        fileClipboard !== null,
-      ).catch((e) => flash(`Could not open file menu: ${e}`));
+      void showNavigatorFileMenu((action: NavigatorFileAction) => {
+        switch (action) {
+          case "rename":
+            void renameNavigatorFile(file);
+            break;
+          case "cut":
+          case "copy":
+            stageNavigatorFile(file, action);
+            break;
+          case "paste":
+            void pasteNavigatorFile(file);
+            break;
+          case "delete":
+            void deleteNavigatorFile(file);
+            break;
+        }
+      }, fileClipboard !== null).catch((e) =>
+        flash(`Could not open file menu: ${e}`),
+      );
     },
     [
       fileClipboard,
@@ -1319,40 +1168,43 @@ function App() {
   const resolveExternal = useCallback(
     async (mode: "merge" | "mine" | "theirs") => {
       const view = viewRef.current;
-      const path = filePathRef.current;
-      if (!view || !path || extConflict === null) return;
+      const snapshot = session.getSnapshot();
+      const { filePath: path, extConflict: disk } = snapshot;
+      if (!view || !path || disk === null || snapshot.viewing) return;
       const buffer = view.state.doc.toString();
-      if (mode === "mine") {
-        await api.saveDocument(path, buffer, undefined, false);
-        lastDiskRef.current = buffer;
-        diskDirtyRef.current = false;
-        const info = await refreshGit(path);
-        if (!diskDirtyRef.current) setDirty(info.file_dirty);
-        setExtConflict(null);
-        flash("Kept your version — disk overwritten");
-      } else if (mode === "theirs") {
-        setExtConflict(null);
-        await loadFile(path);
-        flash("Took the disk version");
-      } else {
-        const merged = await api.mergeContents(
-          lastDiskRef.current,
-          buffer,
-          extConflict,
-        );
-        lastDiskRef.current = extConflict;
-        setEditorContent(merged.content);
-        setDirty(true);
-        diskDirtyRef.current = true;
-        setExtConflict(null);
-        flash(
-          merged.conflicts
-            ? "Conflict markers inserted — resolve them, then save"
-            : "Merged — save to commit",
-        );
+      try {
+        if (mode === "mine") {
+          const { current } = await session.save(buffer, false);
+          if (!current) return;
+          await refreshGit(path);
+          if (session.sameDocument(snapshot))
+            flash("Kept your version — disk overwritten");
+        } else if (mode === "theirs") {
+          if (await loadFile(path)) flash("Took the disk version");
+        } else {
+          const merged = await api.mergeContents(
+            snapshot.lastDisk,
+            buffer,
+            disk,
+          );
+          if (
+            !session.isCurrent(snapshot) ||
+            session.getSnapshot().extConflict !== disk
+          )
+            return;
+          session.mergeDisk(disk);
+          setEditorContent(merged.content);
+          flash(
+            merged.conflicts
+              ? "Conflict markers inserted — resolve them, then save"
+              : "Merged — save to commit",
+          );
+        }
+      } catch (e) {
+        flash(`Could not resolve disk conflict: ${e}`);
       }
     },
-    [extConflict, loadFile, refreshGit, setEditorContent, flash],
+    [session, loadFile, refreshGit, setEditorContent, flash],
   );
 
   // Mount the editor once.
@@ -1423,8 +1275,8 @@ function App() {
   useEffect(() => {
     const un = getCurrentWindow().onCloseRequested(async (e) => {
       const view = viewRef.current;
-      const path = filePathRef.current;
-      if (view && path && extConflictRef.current !== null) {
+      const path = session.getSnapshot().filePath;
+      if (view && path && session.getSnapshot().extConflict !== null) {
         const ok = await ask(
           "The file has an unresolved disk conflict. Quit and discard your in-memory version?",
           { title: "Quit Liauth", kind: "warning" },
@@ -1435,12 +1287,14 @@ function App() {
         }
         return;
       }
-      if (view && path && diskDirtyRef.current) {
+      if (view && path && session.getSnapshot().diskDirty) {
         try {
           const content = view.state.doc.toString();
-          await api.saveDocument(path, content, undefined, false);
-          diskDirtyRef.current = false;
-          lastDiskRef.current = content;
+          const { current } = await session.save(content, false);
+          if (!current || session.getSnapshot().diskDirty) {
+            e.preventDefault();
+            flash("Document changed while saving; close canceled");
+          }
         } catch {
           const ok = await ask(
             "Autosave failed. Quit and discard unsaved in-memory changes?",
@@ -1464,7 +1318,7 @@ function App() {
     return () => {
       void un.then((f) => f());
     };
-    // Close handling is registered once; it reads live state through refs.
+    // Close handling reads the live session, including pending edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1479,24 +1333,14 @@ function App() {
   // Open Folder…: navigator rooted at the folder (or its repo), and a
   // fresh untitled buffer that will save into it. Untitled means no
   // autosave — nothing exists on disk until the user names the file.
-  const openFolderPath = useCallback(async (dir: string) => {
-    if (!(await leaveCurrentDocument("Open folder"))) return;
-    unwatchRef.current?.();
-    unwatchRef.current = null;
-    setFilePath(null);
-    setViewing(null);
-    setDirty(false);
-    setExtConflict(null);
-    diskDirtyRef.current = false;
-    lastDiskRef.current = "";
-    setEditorContent("");
-    setRepo(null);
-    setHistory([]);
-    setBranches([]);
-    setWorktrees([]);
-    setOpenFolder(dir);
-    setNavOpen(true);
-  }, [leaveCurrentDocument, setEditorContent]);
+  const openFolderPath = useCallback(
+    async (dir: string) => {
+      if (!(await leaveCurrentDocument("Open folder"))) return;
+      closeDocument(dir);
+      setNavOpen(true);
+    },
+    [leaveCurrentDocument, closeDocument],
+  );
 
   const doOpenFolder = useCallback(async () => {
     const dir = await openDialog({ directory: true });
@@ -1504,7 +1348,9 @@ function App() {
   }, [openFolderPath]);
 
   const enableVersioning = useCallback(async () => {
-    if (!filePath) {
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    if (!path) {
       flash("Save the document first");
       return;
     }
@@ -1512,77 +1358,69 @@ function App() {
       "This will create a git repository in the document's folder. Continue?",
       { title: "Enable versioning" },
     );
-    if (!ok) return;
-    await api.initRepo(filePath);
+    if (!ok || !session.sameDocument(snapshot) || session.getSnapshot().viewing)
+      return;
+    await api.initRepo(path);
+    if (!session.sameDocument(snapshot) || session.getSnapshot().viewing)
+      return;
     const view = viewRef.current;
-    if (view) {
-      const content = view.state.doc.toString();
-      await api.saveDocument(filePath, content, "Initial version");
-      diskDirtyRef.current = false;
-      lastDiskRef.current = content;
-      setDirty(false);
-    }
-    const info = await refreshGit(filePath);
-    if (!diskDirtyRef.current) setDirty(info.file_dirty);
-    flash("Versioning enabled");
-  }, [filePath, refreshGit, flash]);
+    if (
+      view &&
+      !(await session.save(view.state.doc.toString(), true, "Initial version"))
+        .current
+    )
+      return;
+    await refreshGit(path);
+    if (session.sameDocument(snapshot)) flash("Versioning enabled");
+  }, [session, refreshGit, flash]);
 
   const viewVersion = useCallback(
     async (commit: api.CommitInfo) => {
+      if (!(await autoSaveOr("viewing history"))) return;
       const view = viewRef.current;
-      if (!filePath || !view) return;
-      const currentContent =
-        viewingRef.current?.currentContent ?? view.state.doc.toString();
-      const saved = await autoSave();
-      if (saved === "blocked-conflict") {
-        flash("Resolve the disk conflict before viewing history");
-        return;
+      if (!view) return;
+      try {
+        const selected = await session.viewVersion(
+          commit,
+          view.state.doc.toString(),
+        );
+        if (selected)
+          setEditorContent(selected.historicalContent, true, selected);
+      } catch (e) {
+        flash(`Could not view history: ${e}`);
       }
-      if (saved === "failed") {
-        flash("Autosave failed; current version left open");
-        return;
-      }
-      const historicalContent = await api.fileAtCommit(filePath, commit.id);
-      const hunks = await api.historyDiff(currentContent, historicalContent);
-      const selected = {
-        ...commit,
-        currentContent,
-        historicalContent,
-        hunks,
-      };
-      viewingRef.current = selected;
-      setViewing(selected);
-      setEditorContent(historicalContent, true, selected);
     },
-    [filePath, autoSave, flash, setEditorContent],
+    [session, autoSaveOr, setEditorContent, flash],
   );
 
   const backToCurrent = useCallback(async () => {
-    if (!filePath) return;
-    await loadFile(filePath);
-  }, [filePath, loadFile]);
+    const path = session.getSnapshot().filePath;
+    if (path) await loadFile(path);
+  }, [session, loadFile]);
 
   const restoreVersion = useCallback(() => {
+    const viewing = session.getSnapshot().viewing;
     if (!viewing) return;
-    setViewing(null);
+    session.setViewing(null);
     setEditorContent(viewing.historicalContent);
-    diskDirtyRef.current = true;
-    setDirty(true);
+    session.edit();
     flash(
       `Restored ${viewing.id.slice(0, 7)} into the editor — save to commit`,
     );
-  }, [viewing, setEditorContent, flash]);
+  }, [session, setEditorContent, flash]);
 
   const reinstateHistoryChange = useCallback(
     async (index: number) => {
-      const path = filePathRef.current;
-      const comparison = viewingRef.current;
-      if (!path || !comparison || reinstatingRef.current !== null) return;
-      reinstatingRef.current = index;
-      setReinstating(index);
+      const snapshot = session.getSnapshot();
+      const path = snapshot.filePath;
+      const comparison = snapshot.viewing;
+      if (!path || !comparison || session.getSnapshot().reinstating !== null)
+        return;
+
+      session.setReinstating(index);
       try {
         const comparisonIsCurrent = () =>
-          viewingRef.current === comparison;
+          session.getSnapshot().viewing === comparison;
         const currentIsUnchanged = async () =>
           (await api.readDocument(path)) === comparison.currentContent;
         if (!comparisonIsCurrent()) return;
@@ -1602,17 +1440,15 @@ function App() {
           return;
         }
         if (!comparisonIsCurrent()) return;
-        viewingRef.current = null;
-        setViewing(null);
+
+        session.setViewing(null);
         setEditorContent(content);
-        diskDirtyRef.current = true;
-        setDirty(true);
+        session.edit();
         flash("History change reinstated — save to commit");
       } catch (e) {
         flash(`Could not reinstate history change: ${e}`);
       } finally {
-        reinstatingRef.current = null;
-        setReinstating(null);
+        if (session.sameDocument(snapshot)) session.setReinstating(null);
       }
     },
     [setEditorContent, flash],
@@ -1627,117 +1463,126 @@ function App() {
     if (view) displayHistoryDiff(view, viewing);
   }, [viewing, reinstating, displayHistoryDiff]);
 
+  const reloadAfterGit = useCallback(
+    async (snapshot: DocumentSnapshot) => {
+      if (!snapshot.filePath || !session.sameDocument(snapshot)) return false;
+      if (!session.isCurrent(snapshot)) {
+        await refreshGit(snapshot.filePath);
+        flash("Repository changed; newer editor changes kept");
+        return false;
+      }
+      return loadFile(snapshot.filePath);
+    },
+    [session, refreshGit, loadFile, flash],
+  );
+
   const newReviewBranch = useCallback(async () => {
-    if (!filePath) return;
+    if (!session.getSnapshot().filePath) return;
     const name = window.prompt(
       "Branch name",
       `draft-${new Date().toISOString().slice(0, 10)}`,
     );
-    if (!name) return;
-    const saved = await autoSave();
-    if (saved === "blocked-conflict") {
-      flash("Resolve the disk conflict before creating a branch");
-      return;
-    }
-    if (saved === "failed") {
-      flash("Autosave failed; branch not created");
-      return;
-    }
+    if (!name || !(await autoSaveOr("creating a branch"))) return;
+    const snapshot = session.getSnapshot();
+    if (!snapshot.filePath) return;
     try {
-      await api.createBranch(filePath, name, true);
-      await loadFile(filePath);
-      flash(`On branch ${name} — edits here stay separate until merged`);
+      await api.createBranch(snapshot.filePath, name, true);
+      if (await reloadAfterGit(snapshot))
+        flash(`On branch ${name} — edits here stay separate until merged`);
     } catch (e) {
       flash(`Could not create branch: ${e}`);
     }
-  }, [filePath, autoSave, loadFile, flash]);
+  }, [session, autoSaveOr, reloadAfterGit, flash]);
 
   const switchBranch = useCallback(
     async (name: string) => {
-      if (!filePath) return;
-      if (dirty) {
+      const snapshot = session.getSnapshot();
+      if (!snapshot.filePath) return;
+      if (snapshot.dirty) {
         flash("Save (⌘S) to commit your changes before switching branches");
         return;
       }
       try {
-        await api.checkoutBranch(filePath, name);
-        await loadFile(filePath);
-        flash(`Switched to ${name}`);
+        await api.checkoutBranch(snapshot.filePath, name);
+        if (await reloadAfterGit(snapshot)) flash(`Switched to ${name}`);
       } catch (e) {
         flash(`Could not switch: ${e}`);
       }
     },
-    [filePath, dirty, loadFile, flash],
+    [session, reloadAfterGit, flash],
   );
 
   const deleteBranch = useCallback(
     async (name: string, worktree: string | null = null) => {
-      if (!filePath) return;
+      const snapshot = session.getSnapshot();
+      if (!snapshot.filePath) return;
       const question = worktree
         ? `Delete branch ${name} and remove worktree ${baseName(worktree)}? Its folder is deleted; commits only on the branch are lost.`
         : `Delete branch ${name}? Commits only on it are lost.`;
-      if (!(await ask(question, { title: "Delete branch", kind: "warning" }))) {
+      if (
+        !(await ask(question, { title: "Delete branch", kind: "warning" })) ||
+        !session.sameDocument(snapshot)
+      )
         return;
-      }
       try {
-        await api.deleteBranch(filePath, name);
-        await refreshGit(filePath);
-        flash(`Deleted ${name}`);
+        await api.deleteBranch(snapshot.filePath, name);
+        await refreshGit(snapshot.filePath);
+        if (session.sameDocument(snapshot)) flash(`Deleted ${name}`);
       } catch (e) {
         flash(`Could not delete: ${e}`);
       }
     },
-    [filePath, refreshGit, flash],
+    [session, refreshGit, flash],
   );
 
-  // The same document in another worktree, or that worktree's folder when
-  // the document does not exist there.
+  // The same document in another worktree, or its folder when absent.
   const openInWorktree = useCallback(
     async (dir: string) => {
-      const target = filePath
-        ? await api.worktreeDocument(filePath, dir)
+      const snapshot = session.getSnapshot();
+      const target = snapshot.filePath
+        ? await api.worktreeDocument(snapshot.filePath, dir)
         : null;
-      if (target) {
-        await openPath(target);
-      } else {
-        await openFolderPath(dir);
-      }
+      if (!session.sameDocument(snapshot)) return;
+      if (target) await openPath(target);
+      else await openFolderPath(dir);
     },
-    [filePath, openPath, openFolderPath],
+    [session, openPath, openFolderPath],
   );
 
   const doMerge = useCallback(
     async (name: string) => {
-      if (!filePath) return;
-      if (dirty) {
+      const snapshot = session.getSnapshot();
+      if (!snapshot.filePath) return;
+      if (snapshot.dirty) {
         flash("Commit uncommitted changes before merging");
         return;
       }
       try {
-        const result = await api.mergeBranch(filePath, name);
-        await loadFile(filePath);
-        if (result.status === "conflicts") {
+        const result = await api.mergeBranch(snapshot.filePath, name);
+        if (!(await reloadAfterGit(snapshot))) return;
+        if (result.status === "conflicts")
           flash(
             "Conflicts — resolve the <<< >>> markers, then Save to conclude the merge",
           );
-        } else if (result.status === "up_to_date") {
-          flash("Already up to date");
-        } else {
-          flash(`Merged ${name}`);
-        }
+        else if (result.status === "up_to_date") flash("Already up to date");
+        else flash(`Merged ${name}`);
       } catch (e) {
         flash(`Merge failed: ${e}`);
       }
     },
-    [filePath, dirty, loadFile, flash],
+    [session, reloadAfterGit, flash],
   );
 
   const doAbortMerge = useCallback(async () => {
-    if (!filePath) return;
-    await api.abortMerge(filePath);
-    await loadFile(filePath);
-    flash("Merge aborted");
-  }, [filePath, loadFile, flash]);
+    const snapshot = session.getSnapshot();
+    if (!snapshot.filePath) return;
+    try {
+      await api.abortMerge(snapshot.filePath);
+      if (await reloadAfterGit(snapshot)) flash("Merge aborted");
+    } catch (e) {
+      flash(`Could not abort merge: ${e}`);
+    }
+  }, [session, reloadAfterGit, flash]);
 
   const exportPdf = useCallback(() => {
     const view = viewRef.current;
@@ -1761,15 +1606,13 @@ function App() {
     const view = viewRef.current;
     if (!view || viewing) return;
     insertNote(view);
-    refreshNotes();
-  }, [viewing, refreshNotes]);
+  }, [viewing]);
 
   const addSuggestion = useCallback(() => {
     const view = viewRef.current;
     if (!view || viewing) return;
     insertSuggestion(view);
-    refreshNotes();
-  }, [viewing, refreshNotes]);
+  }, [viewing]);
 
   const startRephrase = useCallback(
     (from: number, to: number, selection: string, document: string) => {
@@ -1782,7 +1625,7 @@ function App() {
         selection,
         context: selectionContext(document, from, to),
         document,
-        path: filePathRef.current,
+        path: session.getSnapshot().filePath,
         repoRoot,
         skills: [],
         skillsLoading: repoRoot !== null,
@@ -1826,9 +1669,9 @@ function App() {
       event.preventDefault();
       const document = view.state.doc.toString();
       const selection = view.state.sliceDoc(from, to);
-      const overlapsNote = scanNotes(document).some(
-        (note) => from < note.to && to > note.from,
-      );
+      const overlapsNote = view.state
+        .field(notesField)
+        .some((note) => from < note.to && to > note.from);
       void showEditorSelectionMenu(() => {
         if (overlapsNote) {
           flash("Rephrase cannot cross an existing note or suggestion");
@@ -1861,8 +1704,8 @@ function App() {
         if (rephraseRef.current?.id !== request.id) return;
         if (
           !live ||
-          viewingRef.current ||
-          filePathRef.current !== request.path ||
+          session.getSnapshot().viewing ||
+          session.getSnapshot().filePath !== request.path ||
           live.state.doc.toString() !== request.document
         ) {
           setRephrase(null);
@@ -1889,7 +1732,7 @@ function App() {
           );
           return;
         }
-        refreshNotes();
+
         setPanel("notes");
         setRephrase(null);
         flash("Rephrase staged as a suggestion");
@@ -1901,7 +1744,7 @@ function App() {
         );
       }
     },
-    [refreshNotes, flash],
+    [flash],
   );
 
   const closeRephrase = useCallback(() => {
@@ -1931,15 +1774,14 @@ function App() {
       const view = viewRef.current;
       if (!view || viewing) return;
       if (view.state.sliceDoc(n.from, n.to) !== n.raw) {
-        refreshNotes();
-        flash("Document changed under the note — list refreshed, try again");
+        flash("Document changed — select the note again");
         return;
       }
       view.dispatch({ changes: { from: n.from, to: n.to, insert } });
-      refreshNotes();
+
       flash(msg);
     },
-    [viewing, refreshNotes, flash],
+    [viewing, flash],
   );
 
   const dismissNote = useCallback(
@@ -1965,7 +1807,7 @@ function App() {
     async (n: CommentNote) => {
       const view = viewRef.current;
       if (!view || viewing || drafting !== null) return;
-      const startPath = filePathRef.current;
+      const startDocument = session.getSnapshot();
       setDrafting(n.from);
       try {
         const pairs = await api.draftNoteEdits(
@@ -1976,7 +1818,10 @@ function App() {
         );
         // Inference takes a while; don't apply to a different document or
         // to a read-only historical buffer opened meanwhile.
-        if (filePathRef.current !== startPath || viewingRef.current) {
+        if (
+          !session.sameDocument(startDocument) ||
+          session.getSnapshot().viewing
+        ) {
           flash("Draft discarded — the document changed");
           return;
         }
@@ -1985,7 +1830,7 @@ function App() {
         const live = viewRef.current;
         if (!live) return;
         const { applied, missed } = applyEditsAsSuggestions(live, pairs, n);
-        refreshNotes();
+
         flash(
           applied === 0
             ? "The model proposed no applicable edits"
@@ -1999,216 +1844,55 @@ function App() {
         setDrafting(null);
       }
     },
-    [viewing, drafting, repo?.repo_root, refreshNotes, flash],
+    [viewing, drafting, repo?.repo_root, flash],
   );
 
   const toggleNotesPanel = useCallback(() => {
-    setPanel((p) => {
-      if (p === "notes") return "none";
-      refreshNotes();
-      return "notes";
-    });
-  }, [refreshNotes]);
+    setPanel((p) => (p === "notes" ? "none" : "notes"));
+  }, []);
 
-  const currentWorktree = worktrees.find((w) => w.is_current);
   const versioned = !!repo?.repo_root;
 
-  const squashRecentCommits = useCallback(async (base?: string) => {
-    if (!filePath || squashing) return;
-    if (viewingRef.current) {
-      flash("Return to the current document before squashing");
-      return;
-    }
-    if (dirty || diskDirtyRef.current) {
-      flash("Commit current changes before squashing");
-      return;
-    }
-    if (repo?.merging) {
-      flash("Finish the merge before squashing");
-      return;
-    }
-    setSquashing(true);
-    flash("Toki is writing the squash commit message…");
-    try {
-      const commit = await api.squashRecentCommits(filePath, base);
-      const info = await refreshGit(filePath);
-      if (!diskDirtyRef.current) setDirty(info.file_dirty);
-      setLastSave(`squashed ${commit.id.slice(0, 7)} · ${timeNow()}`);
-      flash(`Squashed into ${commit.id.slice(0, 7)}: ${commit.summary}`);
-    } catch (e) {
-      // The failure ends a wait of up to minutes: keep it readable in the
-      // toast, and on record in the status bar until the next save.
-      setLastSave(`squash failed · ${e}`);
-      flash(`Could not squash commits: ${e}`, 15000);
-    } finally {
-      setSquashing(false);
-    }
-  }, [filePath, squashing, dirty, repo?.merging, refreshGit, flash]);
-
-  // Central command runner: native menus, the command palette, and the
-  // remaining toolbar buttons all route through here.
-  const execCommand = useCallback(
-    (id: string) => {
-      if (id.startsWith("recent:")) {
-        void openPath(id.slice(7));
+  const squashRecentCommits = useCallback(
+    async (base?: string) => {
+      const snapshot = session.getSnapshot();
+      const { filePath, dirty, versioning } = snapshot;
+      if (!filePath || squashing) return;
+      if (session.getSnapshot().viewing) {
+        flash("Return to the current document before squashing");
         return;
       }
-      if (id.startsWith("theme:")) {
-        setTheme(id.slice(6) as Theme);
+      if (dirty || session.getSnapshot().diskDirty) {
+        flash("Commit current changes before squashing");
         return;
       }
-      if (id.startsWith("font:")) {
-        setFont(id.slice(5) as FontPref);
+      if (versioning?.repo.merging) {
+        flash("Finish the merge before squashing");
         return;
       }
-      const view = viewRef.current;
-      switch (id) {
-        case "open":
-          void doOpen();
-          break;
-        case "open-folder":
-          void doOpenFolder();
-          break;
-        case "save":
-          void doSave();
-          break;
-        case "save-as":
-          void doSaveAs();
-          break;
-        case "reload":
-          void doReload();
-          break;
-        case "export-pdf":
-          exportPdf();
-          break;
-        case "check-updates":
-          void checkForUpdates();
-          break;
-        case "quit":
-          void getCurrentWindow().close();
-          break;
-        case "clear-recents":
-          setRecents([]);
-          break;
-        case "bold":
-          if (view) {
-            toggleBold(view);
-            view.focus();
-          }
-          break;
-        case "italic":
-          if (view) {
-            toggleItalic(view);
-            view.focus();
-          }
-          break;
-        case "insert-note":
-          addNote();
-          break;
-        case "insert-suggestion":
-          addSuggestion();
-          break;
-        case "next-note":
-          if (view) gotoNextNote(view);
-          break;
-        case "zoom-in":
-          setZoom((z) => clampZoom(z + ZOOM_STEP));
-          break;
-        case "zoom-out":
-          setZoom((z) => clampZoom(z - ZOOM_STEP));
-          break;
-        case "zoom-reset":
-          setZoom(1);
-          break;
-        case "toggle-lines":
-          setLineNums((v) => !v);
-          break;
-        case "toggle-spell":
-          setSpellcheck((v) => !v);
-          break;
-        case "toggle-vim":
-          setVimMode((v) => !v);
-          break;
-        case "toggle-room":
-          setRoom((r) => !r);
-          break;
-        case "toggle-page":
-          setPageLayout((p) => !p);
-          break;
-        case "toggle-novel-proof":
-          setNovelProof((proof) => !proof);
-          break;
-        case "rsvp":
-          startRsvp();
-          break;
-        case "panel-notes":
-          toggleNotesPanel();
-          break;
-        case "panel-history":
-          setPanel((p) => (p === "history" ? "none" : "history"));
-          break;
-        case "panel-review":
-          setPanel((p) => (p === "review" ? "none" : "review"));
-          break;
-        case "panel-help":
-          setPanel((p) => (p === "help" ? "none" : "help"));
-          break;
-        case "edit-vimrc":
-          if (panelRef.current === "vimrc") setPanel("none");
-          else void openVimrcPanel();
-          break;
-        case "keylog":
-          if (viewRef.current) dumpKeylog(viewRef.current, flash);
-          break;
-        case "toggle-nav":
-          toggleNavigatorPanel("files");
-          break;
-        case "toggle-hidden-files":
-          setShowHiddenFiles((visible) => !visible);
-          break;
-        case "enable-versioning":
-          void enableVersioning();
-          break;
-        case "new-review-branch":
-          void newReviewBranch();
-          break;
-        case "squash-recent":
-          void squashRecentCommits();
-          break;
-        case "palette":
-          setPaletteOpen(true);
-          break;
+      setSquashing(true);
+      flash("Toki is writing the squash commit message…");
+      try {
+        const commit = await api.squashRecentCommits(filePath, base);
+        await refreshGit(filePath);
+        if (!session.sameDocument(snapshot)) return;
+        session.setLastSave(`squashed ${commit.id.slice(0, 7)} · ${timeNow()}`);
+        flash(`Squashed into ${commit.id.slice(0, 7)}: ${commit.summary}`);
+      } catch (e) {
+        // The failure ends a wait of up to minutes: keep it readable in the
+        // toast, and on record in the status bar until the next save.
+        if (!session.sameDocument(snapshot)) return;
+        session.setLastSave(`squash failed · ${e}`);
+        flash(`Could not squash commits: ${e}`, 15000);
+      } finally {
+        setSquashing(false);
       }
     },
-    [
-      openPath,
-      doOpen,
-      doOpenFolder,
-      doSave,
-      doSaveAs,
-      doReload,
-      exportPdf,
-      checkForUpdates,
-      addNote,
-      addSuggestion,
-      startRsvp,
-      toggleNotesPanel,
-      enableVersioning,
-      newReviewBranch,
-      squashRecentCommits,
-      openVimrcPanel,
-      toggleNavigatorPanel,
-      flash,
-    ],
+    [session, squashing, refreshGit, flash],
   );
 
-  useEffect(() => {
-    runRef.current = execCommand;
-  }, [execCommand]);
-
-  // Native menu bar: rebuilt whenever the state it reflects changes.
-  useEffect(() => {
-    void buildAppMenu((id) => runRef.current(id), {
+  const commands = createCommands(
+    {
       theme,
       font,
       vim: vimMode,
@@ -2220,9 +1904,98 @@ function App() {
       navOpen: filesNavigatorOpen,
       showHiddenFiles,
       versioned,
+      squashing,
       panel,
       recents,
-    }).catch((e) => console.warn("[liauth] menu build failed:", e));
+    },
+    {
+      open: doOpen,
+      "open-folder": doOpenFolder,
+      save: doSave,
+      "save-as": doSaveAs,
+      reload: doReload,
+      "export-pdf": exportPdf,
+      "check-updates": checkForUpdates,
+      quit: () => {
+        void getCurrentWindow().close();
+      },
+      "clear-recents": () => setRecents([]),
+      bold: () => {
+        if (viewRef.current) {
+          toggleBold(viewRef.current);
+          viewRef.current.focus();
+        }
+      },
+      italic: () => {
+        if (viewRef.current) {
+          toggleItalic(viewRef.current);
+          viewRef.current.focus();
+        }
+      },
+      "insert-note": addNote,
+      "insert-suggestion": addSuggestion,
+      "next-note": () => {
+        if (viewRef.current) gotoNextNote(viewRef.current);
+      },
+      "zoom-in": () => setZoom((z) => clampZoom(z + ZOOM_STEP)),
+      "zoom-out": () => setZoom((z) => clampZoom(z - ZOOM_STEP)),
+      "zoom-reset": () => setZoom(1),
+      "toggle-lines": () => setLineNums((v) => !v),
+      "toggle-spell": () => setSpellcheck((v) => !v),
+      "toggle-vim": () => setVimMode((v) => !v),
+      "toggle-room": () => setRoom((v) => !v),
+      "toggle-page": () => setPageLayout((v) => !v),
+      "toggle-novel-proof": () => setNovelProof((v) => !v),
+      rsvp: () => {
+        if (!rsvp) startRsvp();
+      },
+      "panel-notes": toggleNotesPanel,
+      "panel-history": () =>
+        setPanel((p) => (p === "history" ? "none" : "history")),
+      "panel-review": () =>
+        setPanel((p) => (p === "review" ? "none" : "review")),
+      "panel-help": () => setPanel((p) => (p === "help" ? "none" : "help")),
+      "edit-vimrc": () => {
+        if (panel === "vimrc") setPanel("none");
+        else void openVimrcPanel();
+      },
+      keylog: () => {
+        if (viewRef.current) dumpKeylog(viewRef.current, flash);
+      },
+      "toggle-nav": () => toggleNavigatorPanel("files"),
+      "toggle-hidden-files": () => setShowHiddenFiles((v) => !v),
+      "enable-versioning": enableVersioning,
+      "new-review-branch": newReviewBranch,
+      "squash-recent": squashRecentCommits,
+      palette: () => setPaletteOpen((open) => !open),
+      openRecent: openPath,
+      theme: setTheme,
+      font: setFont,
+    },
+  );
+  const commandsRef = useRef<AppCommand[]>(commands);
+  commandsRef.current = commands;
+  const execCommand = useCallback((id: string) => {
+    commandsRef.current.find((command) => command.id === id)?.run();
+  }, []);
+  runRef.current = execCommand;
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const command = fallbackCommand(commandsRef.current, event);
+      if (!command) return;
+      event.preventDefault();
+      command.run();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  // Handlers read the current registry; rebuild labels/checks only when needed.
+  useEffect(() => {
+    void buildAppMenu(commandsRef.current, execCommand).catch((e) =>
+      console.warn("[liauth] menu build failed:", e),
+    );
   }, [
     theme,
     font,
@@ -2236,93 +2009,21 @@ function App() {
     navigatorView,
     showHiddenFiles,
     versioned,
+    squashing,
     panel,
     recents,
+    execCommand,
   ]);
 
-  const paletteCommands: PaletteCommand[] = [
-    { id: "open", title: "Open…", shortcut: "⌘O" },
-    { id: "open-folder", title: "Open Folder…", shortcut: "⇧⌘O" },
-    { id: "save", title: "Save (Commit)", shortcut: "⌘S" },
-    { id: "save-as", title: "Save As…", shortcut: "⇧⌘S" },
-    { id: "reload", title: "Reload from Disk", shortcut: "⌘R" },
-    {
-      id: "export-pdf",
-      title: novelProof ? "Export Novel PDF" : "Export as PDF",
-      shortcut: "⇧⌘E",
-    },
-    { id: "check-updates", title: "Check for Updates…" },
-    { id: "bold", title: "Bold", shortcut: "⌘B" },
-    { id: "italic", title: "Italic", shortcut: "⌘I" },
-    { id: "insert-note", title: "Insert Note", shortcut: "⇧⌘M" },
-    { id: "insert-suggestion", title: "Insert Suggestion", shortcut: "⇧⌘U" },
-    { id: "next-note", title: "Next Note/Suggestion", shortcut: "⇧⌘J" },
-    {
-      id: "toggle-room",
-      title: room ? "Exit Writing Room" : "Enter Writing Room",
-      shortcut: "⇧⌘F",
-    },
-    { id: "rsvp", title: "Speed Read", shortcut: "⇧⌘R" },
-    {
-      id: "toggle-lines",
-      title: lineNums ? "Hide Line Numbers" : "Show Line Numbers",
-      shortcut: "⇧⌘L",
-    },
-    {
-      id: "toggle-spell",
-      title: spellcheck ? "Disable Spell Checking" : "Enable Spell Checking",
-    },
-    {
-      id: "toggle-page",
-      title: pageLayout ? "Exit Page Layout" : "Page Layout",
-      shortcut: "⇧⌘P",
-    },
-    {
-      id: "toggle-novel-proof",
-      title: novelProof ? "Exit Novel Proof" : "Novel Proof",
-    },
-    {
-      id: "toggle-vim",
-      title: vimMode ? "Disable Vim Keybindings" : "Enable Vim Keybindings",
-    },
-    { id: "edit-vimrc", title: "Edit Vim Config…" },
-    { id: "keylog", title: "Write Key Log" },
-    { id: "zoom-in", title: "Zoom In", shortcut: "⌘+" },
-    { id: "zoom-out", title: "Zoom Out", shortcut: "⌘−" },
-    { id: "zoom-reset", title: "Actual Size", shortcut: "⌘0" },
-    ...THEMES.map((t) => ({ id: `theme:${t.id}`, title: `Theme: ${t.label}` })),
-    ...FONTS.map((f) => ({ id: `font:${f.id}`, title: `Font: ${f.label}` })),
-    {
-      id: "toggle-nav",
-      title: filesNavigatorOpen ? "Hide Files Sidebar" : "Show Files Sidebar",
-      shortcut: "⇧⌘B",
-    },
-    {
-      id: "toggle-hidden-files",
-      title: showHiddenFiles
-        ? "Hide Hidden Files and Folders"
-        : "Show Hidden Files and Folders",
-    },
-    { id: "panel-notes", title: "Toggle Notes Panel" },
-    { id: "panel-help", title: "Help" },
-    ...(versioned
-      ? [
-          { id: "panel-history", title: "Toggle History Panel" },
-          { id: "panel-review", title: "Toggle Branches Panel" },
-          { id: "new-review-branch", title: "New Branch…" },
-          {
-            id: "squash-recent",
-            title: squashing
-              ? "Squashing Recent Commits with Toki…"
-              : "Squash Recent Commits",
-          },
-        ]
-      : [{ id: "enable-versioning", title: "Enable Versioning…" }]),
-    ...recents.map((p) => ({
-      id: `recent:${p}`,
-      title: `Open Recent: ${p.split("/").pop()}`,
-    })),
-  ];
+  const paletteCommands = commands.filter(
+    (command) => command.palette !== false,
+  );
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    // Release focus before the command runs, so it can focus its own UI.
+    viewRef.current?.focus();
+  }, []);
 
   const proofSource = novelProof
     ? (viewRef.current?.state.doc.toString() ?? "")
@@ -2536,89 +2237,19 @@ function App() {
         ) : null}
 
         {filesNavigatorOpen && !room ? (
-          <aside className="nav-panel">
-            <h3 title={project?.root}>{project?.name ?? "Project"}</h3>
-            {!filePath ? (
-              <p className="muted">Open a document to list its project.</p>
-            ) : null}
-            {project?.truncated ? (
-              <p className="muted">Showing first 500 markdown files.</p>
-            ) : null}
-            <ul className="nav-list">
-              {(project?.files ?? []).map((f, i, all) => {
-                const rel = f.rel.replace(/\\/g, "/");
-                const cut = rel.lastIndexOf("/");
-                const dir = cut >= 0 ? rel.slice(0, cut) : "";
-                const name = cut >= 0 ? rel.slice(cut + 1) : rel;
-                const prev = i > 0 ? all[i - 1].rel.replace(/\\/g, "/") : "";
-                const prevCut = prev.lastIndexOf("/");
-                const prevDir = prevCut >= 0 ? prev.slice(0, prevCut) : "";
-                const hiddenByCollapsedParent = [...collapsedDirs].some(
-                  (parent) => dir.startsWith(`${parent}/`),
-                );
-                if (hiddenByCollapsedParent) return null;
-                const collapsed = collapsedDirs.has(dir);
-                const hasNotes =
-                  f.path === filePath ? notes.length > 0 : f.has_notes;
-                const isDirty = f.path === filePath ? dirty : f.dirty;
-                const cls = [
-                  "nav-file",
-                  f.path === filePath ? "selected" : "",
-                  isDirty ? "dirty" : "",
-                  dir ? "nested" : "",
-                  fileClipboard?.mode === "cut" &&
-                  fileClipboard.path === f.path
-                    ? "cut"
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ");
-                return (
-                  <Fragment key={f.path}>
-                    {dir && dir !== prevDir ? (
-                      <li
-                        className="nav-dir"
-                        title={`${collapsed ? "Expand" : "Collapse"} ${dir}`}
-                        aria-expanded={!collapsed}
-                        onClick={() => toggleNavigatorFolder(dir)}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          openNavigatorFolderMenu(dir, f);
-                        }}
-                      >
-                        <span className="nav-dir-chevron" aria-hidden="true">
-                          {collapsed ? "▸" : "▾"}
-                        </span>
-                        {dir}/
-                      </li>
-                    ) : null}
-                    {!collapsed ? (
-                      <li
-                        className={cls}
-                        title={`${f.rel}${isDirty ? " — uncommitted changes" : ""}${hasNotes ? " — unresolved notes" : ""}`}
-                        onClick={() => {
-                          if (f.path !== filePath) void openPath(f.path);
-                        }}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          openNavigatorFileMenu(f);
-                        }}
-                      >
-                        <span className="nav-file-name">{name}</span>
-                        {hasNotes ? (
-                          <span
-                            className="nav-note-dot"
-                            title="Contains unresolved notes"
-                            aria-label="Contains unresolved notes"
-                          />
-                        ) : null}
-                      </li>
-                    ) : null}
-                  </Fragment>
-                );
-              })}
-            </ul>
-          </aside>
+          <FileNavigator
+            project={project}
+            document={session.getSnapshot()}
+            noteCount={notes.length}
+            collapsedDirs={collapsedDirs}
+            fileClipboard={fileClipboard}
+            actions={{
+              toggleNavigatorFolder,
+              openNavigatorFolderMenu,
+              openNavigatorFileMenu,
+              openPath,
+            }}
+          />
         ) : null}
 
         {proofDocument ? (
@@ -2639,223 +2270,41 @@ function App() {
         />
 
         {panel === "history" && versioned ? (
-          <aside className="side-panel">
-            <h3>History</h3>
-            {history.length === 0 ? (
-              <p className="muted">No versions yet.</p>
-            ) : null}
-            <ul className="commit-list">
-              {history.map((c) => (
-                <li
-                  key={c.id}
-                  className={viewing?.id === c.id ? "selected" : ""}
-                  onClick={() => {
-                    if (reinstating === null) void viewVersion(c);
-                  }}
-                  aria-disabled={reinstating !== null}
-                >
-                  <span className="commit-summary">{c.summary}</span>
-                  <span className="commit-meta">
-                    {c.author} · {fmtTime(c.time)} · {c.id.slice(0, 7)}
-                  </span>
-                  <button
-                    className="commit-squash"
-                    title="Squash every newer commit into one on top of this one; Toki writes the message"
-                    disabled={squashing || reinstating !== null}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void squashRecentCommits(c.id);
-                    }}
-                  >
-                    Squash to here
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </aside>
+          <HistoryPanel
+            document={session.getSnapshot()}
+            squashing={squashing}
+            viewVersion={viewVersion}
+            squashRecentCommits={squashRecentCommits}
+          />
         ) : null}
 
-        {panel === "review" && versioned ? (
-          <aside className="side-panel">
-            <h3>Branches</h3>
-            <p className="muted">
-              On <strong>{repo?.branch}</strong>
-              {currentWorktree && !currentWorktree.is_main
-                ? ` in worktree ${currentWorktree.name}`
-                : ""}
-            </p>
-            <button className="wide" onClick={() => void newReviewBranch()}>
-              New branch…
-            </button>
-            <ul className="branch-list">
-              {branches.map((b) => (
-                <li key={b.name} className={b.is_head ? "selected" : ""}>
-                  <span className="branch-name">
-                    ⎇ {b.name}
-                    {b.is_head ? " (current)" : ""}
-                    <span className="muted">
-                      {" "}
-                      · {fmtAgo(b.last_commit_time)}
-                      {b.checked_out_in
-                        ? ` · in ${baseName(b.checked_out_in)}`
-                        : ""}
-                    </span>
-                  </span>
-                  {b.is_head ? null : b.checked_out_in ? (
-                    <span className="branch-actions">
-                      <button onClick={() => void doMerge(b.name)}>
-                        Merge in
-                      </button>
-                      <button
-                        onClick={() => void openInWorktree(b.checked_out_in!)}
-                      >
-                        Open there
-                      </button>
-                      <button
-                        title="Delete branch and its worktree"
-                        onClick={() =>
-                          void deleteBranch(b.name, b.checked_out_in)
-                        }
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ) : (
-                    <span className="branch-actions">
-                      <button onClick={() => void switchBranch(b.name)}>
-                        Switch
-                      </button>
-                      <button onClick={() => void doMerge(b.name)}>
-                        Merge in
-                      </button>
-                      <button
-                        title="Delete branch"
-                        onClick={() => void deleteBranch(b.name)}
-                      >
-                        ×
-                      </button>
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {worktrees.length > 1 ? (
-              <>
-                <h3>Worktrees</h3>
-                <ul className="branch-list">
-                  {worktrees.map((w) => (
-                    <li key={w.path} className={w.is_current ? "selected" : ""}>
-                      <span className="branch-name">
-                        {w.name}
-                        {w.branch ? ` · ${w.branch}` : ""}
-                        {w.is_current ? " (this one)" : ""}
-                      </span>
-                      {w.is_current ? null : (
-                        <span className="branch-actions">
-                          <button onClick={() => void openInWorktree(w.path)}>
-                            Open here
-                          </button>
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : null}
-          </aside>
+        {panel === "review" && versioning ? (
+          <BranchesPanel
+            versioning={versioning}
+            actions={{
+              newReviewBranch,
+              doMerge,
+              openInWorktree,
+              deleteBranch,
+              switchBranch,
+            }}
+          />
         ) : null}
 
         {panel === "notes" ? (
-          <aside className="side-panel">
-            <h3>Notes</h3>
-            <button className="wide" onClick={addNote} disabled={!!viewing}>
-              Add note at cursor (⌘⇧M)
-            </button>
-            <button
-              className="wide"
-              onClick={addSuggestion}
-              disabled={!!viewing}
-            >
-              Suggest edit to selection (⌘⇧U)
-            </button>
-            {notes.length === 0 ? (
-              <p className="muted">
-                No notes. Select text and press ⌘⇧M to annotate it or ⌘⇧U to
-                suggest a rewording; both are stored as CriticMarkup in the
-                document and removed from PDF export.
-              </p>
-            ) : null}
-            <ul className="note-list">
-              {notes.map((n, i) => (
-                <li key={`${n.from}-${i}`} onClick={() => jumpToNote(n)}>
-                  {n.kind === "suggestion" ? (
-                    <>
-                      <span className="note-excerpt note-old">
-                        {n.oldText ? `“${clip(n.oldText)}”` : "(insertion)"}
-                      </span>
-                      <span className="note-comment">
-                        {n.newText ? `→ ${clip(n.newText)}` : "→ (deletion)"}
-                      </span>
-                      <span className="branch-actions">
-                        <button
-                          disabled={!!viewing}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            applySuggestion(n, true);
-                          }}
-                        >
-                          Accept
-                        </button>
-                        <button
-                          disabled={!!viewing}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            applySuggestion(n, false);
-                          }}
-                        >
-                          Reject
-                        </button>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      {n.highlighted ? (
-                        <span className="note-excerpt">
-                          “{clip(n.excerpt)}”
-                        </span>
-                      ) : (
-                        <span className="note-excerpt muted">(standalone)</span>
-                      )}
-                      <span className="note-comment">
-                        {n.comment.trim() || "(empty)"}
-                      </span>
-                      <span className="branch-actions">
-                        <button
-                          disabled={!!viewing}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            dismissNote(n);
-                          }}
-                        >
-                          Dismiss
-                        </button>
-                        <button
-                          disabled={!!viewing || drafting !== null}
-                          title="Ask the model to turn this note into suggestions"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void draftEdits(n);
-                          }}
-                        >
-                          {drafting === n.from ? "Drafting…" : "Draft edits"}
-                        </button>
-                      </span>
-                    </>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </aside>
+          <NotesPanel
+            notes={notes}
+            readOnly={!!viewing}
+            drafting={drafting}
+            actions={{
+              addNote,
+              addSuggestion,
+              jumpToNote,
+              applySuggestion,
+              dismissNote,
+              draftEdits,
+            }}
+          />
         ) : null}
 
         {panel === "help" ? (
@@ -2938,7 +2387,7 @@ function App() {
         <CommandPalette
           commands={paletteCommands}
           onRun={execCommand}
-          onClose={() => setPaletteOpen(false)}
+          onClose={closePalette}
         />
       ) : null}
       <div id="print-root" />

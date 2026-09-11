@@ -11,15 +11,9 @@
  * note bubble — or, for suggestions, the old text struck through beside
  * the proposed text; placing the cursor inside reveals the raw markup.
  */
-import {
-  Decoration,
-  DecorationSet,
-  EditorView,
-  ViewPlugin,
-  ViewUpdate,
-  WidgetType,
-} from "@codemirror/view";
-import { EditorState, Range } from "@codemirror/state";
+import { Decoration, EditorView, WidgetType } from "@codemirror/view";
+import { EditorState, StateField } from "@codemirror/state";
+import { hiddenDecorations, selectionTouches } from "./decorations";
 import { getCM } from "@replit/codemirror-vim";
 
 interface NoteBase {
@@ -153,17 +147,54 @@ export function scanNotes(text: string, base = 0): NoteMatch[] {
   return out;
 }
 
-/** Remove all notes for export: comments dropped, highlights unwrapped,
- *  unaccepted suggestions keep the original text (so insertions drop
- *  and deletions keep what they would remove). */
+export const notesField = StateField.define<NoteMatch[]>({
+  create: (state) => scanNotes(state.doc.toString()),
+  update: (notes, tr) =>
+    tr.docChanged ? scanNotes(tr.newDoc.toString()) : notes,
+});
+
+/** Prose keeps the original side of unaccepted suggestions. */
+export function hiddenSpans(
+  notes: readonly NoteMatch[],
+): { from: number; to: number; trimSpace?: boolean }[] {
+  return notes.flatMap((note) => {
+    const from = note.kind === "suggestion" ? note.oldFrom : note.hlFrom;
+    const to = note.kind === "suggestion" ? note.oldTo : note.hlTo;
+    return from < 0 || from === to
+      ? [
+          {
+            from: note.from,
+            to: note.to,
+            trimSpace:
+              note.kind === "comment"
+                ? !note.highlighted
+                : note.raw.startsWith("{++"),
+          },
+        ]
+      : [
+          { from: note.from, to: from },
+          ...hiddenSpans(
+            scanNotes(
+              note.kind === "suggestion" ? note.oldText : note.excerpt,
+              from,
+            ),
+          ),
+          { from: to, to: note.to },
+        ];
+  });
+}
+
+/** Drop annotations for export, without leaving a space for a removed note. */
 export function stripCriticMarkup(text: string): string {
-  return text
-    .replace(/\{==([\s\S]*?)==\}\s*\{>>[\s\S]*?<<\}/g, "$1")
-    .replace(/\{==([\s\S]*?)==\}/g, "$1")
-    .replace(/ ?\{>>[\s\S]*?<<\}/g, "")
-    .replace(/\{~~([\s\S]*?)~>[\s\S]*?~~\}/g, "$1")
-    .replace(/ ?\{\+\+[\s\S]*?\+\+\}/g, "")
-    .replace(/\{--([\s\S]*?)--\}/g, "$1");
+  let result = "";
+  let end = 0;
+  for (const span of hiddenSpans(scanNotes(text))) {
+    const from =
+      span.trimSpace && text[span.from - 1] === " " ? span.from - 1 : span.from;
+    result += text.slice(end, Math.max(end, from));
+    end = span.to;
+  }
+  return result + text.slice(end);
 }
 
 /** Wrap the selection in a note (or insert a standalone one) and place
@@ -344,8 +375,9 @@ export function matchEditPairs(
   doc: string,
   pairs: { find: string; replace: string }[],
   source?: CommentNote,
+  notes = scanNotes(doc),
 ): { changes: { from: number; to: number; insert: string }[]; missed: number } {
-  const taken: [number, number][] = scanNotes(doc).map((n) => [n.from, n.to]);
+  const taken: [number, number][] = notes.map((n) => [n.from, n.to]);
   const overlaps = (from: number, to: number) =>
     taken.some(([f, t]) => from < t && to > f);
   const changes: { from: number; to: number; insert: string }[] = [];
@@ -447,6 +479,7 @@ export function applyEditsAsSuggestions(
     view.state.doc.toString(),
     pairs,
     source,
+    view.state.field(notesField),
   );
   if (changes.length) {
     // Land on the earliest suggestion so the result is immediately visible;
@@ -465,7 +498,7 @@ export function applyEditsAsSuggestions(
 /** Move the cursor to the next note or suggestion after it, wrapping to
  *  the first — one key cycles through everything awaiting review. */
 export function gotoNextNote(view: EditorView): boolean {
-  const notes = scanNotes(view.state.doc.toString());
+  const notes = view.state.field(notesField);
   if (notes.length === 0) return false;
   const head = view.state.selection.main.head;
   const next = notes.find((n) => n.from > head) ?? notes[0];
@@ -509,35 +542,9 @@ class NoteWidget extends WidgetType {
   }
 }
 
-function selectionTouches(
-  state: EditorState,
-  from: number,
-  to: number,
-): boolean {
-  return state.selection.ranges.some((r) => r.from <= to && r.to >= from);
-}
-
-interface NoteSets {
-  decorations: DecorationSet;
-  atomic: DecorationSet;
-}
-
-function buildDecorations(view: EditorView): NoteSets {
-  const decos: Range<Decoration>[] = [];
-  const hides: Range<Decoration>[] = [];
-  const state = view.state;
-  const hide = (
-    from: number,
-    to: number,
-    spec: Parameters<typeof Decoration.replace>[0] = {},
-  ) => {
-    const d = Decoration.replace(spec).range(from, to);
-    decos.push(d);
-    hides.push(d);
-  };
-  for (const range of view.visibleRanges) {
-    const text = state.sliceDoc(range.from, range.to);
-    for (const n of scanNotes(text, range.from)) {
+function noteDecorations(state: EditorState) {
+  return hiddenDecorations(({ decos, hide }) => {
+    for (const n of state.field(notesField)) {
       if (selectionTouches(state, n.from, n.to)) {
         // Cursor inside: show the raw markup, lightly tinted.
         decos.push(
@@ -580,32 +587,19 @@ function buildDecorations(view: EditorView): NoteSets {
         });
       }
     }
-  }
-  return {
-    decorations: Decoration.set(decos, true),
-    atomic: Decoration.set(hides, true),
-  };
+  });
 }
 
-class CriticMarkupPlugin {
-  decorations: DecorationSet;
-  atomic: DecorationSet;
-  constructor(view: EditorView) {
-    ({ decorations: this.decorations, atomic: this.atomic } =
-      buildDecorations(view));
-  }
-  update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.viewportChanged) {
-      ({ decorations: this.decorations, atomic: this.atomic } =
-        buildDecorations(update.view));
-    }
-  }
-}
-
-export const criticMarkup = ViewPlugin.fromClass(CriticMarkupPlugin, {
-  decorations: (v) => v.decorations,
-  provide: (plugin) =>
-    EditorView.atomicRanges.of(
-      (view) => view.plugin(plugin)?.atomic ?? Decoration.none,
-    ),
+// Comments may hide line breaks; these decorations must exist before
+// CodeMirror computes the viewport, just like rendered tables.
+export const criticMarkup = StateField.define<
+  ReturnType<typeof noteDecorations>
+>({
+  create: noteDecorations,
+  update: (value, tr) =>
+    tr.docChanged || tr.selection ? noteDecorations(tr.state) : value,
+  provide: (field) => [
+    EditorView.decorations.from(field, (value) => value.decorations),
+    EditorView.atomicRanges.of((view) => view.state.field(field).atomic),
+  ],
 });

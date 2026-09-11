@@ -74,6 +74,7 @@ changing the storage model.
 npm install
 npm run tauri dev      # run the app
 npm run build          # typecheck + bundle frontend
+npm test               # editor, document session, and app regression tests
 cd src-tauri && cargo test   # git engine end-to-end tests
 ```
 

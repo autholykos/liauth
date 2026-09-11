@@ -7,6 +7,8 @@
  * decoration, link targets, and CriticMarkup comments from what's shown.
  */
 
+import { hiddenSpans, scanNotes, type NoteMatch } from "./notes";
+
 export interface RsvpWord {
   text: string;
   offset: number; // position of the raw token in the document
@@ -26,8 +28,7 @@ export function orpIndex(word: string): number {
 
 function cleanToken(tok: string): string {
   let t = tok;
-  // CriticMarkup and emphasis/code decoration anywhere in the token.
-  t = t.replace(/\{==|==\}|\{>>|<<\}|\{\+\+|\+\+\}|\{--|--\}/g, "");
+  // Emphasis/code decoration anywhere in the token.
   t = t.replace(/[*_`~]+/g, "");
   // Links/images: drop the (target), keep the text.
   t = t.replace(/\]\([^)]*\)?/g, "]");
@@ -39,12 +40,16 @@ function cleanToken(tok: string): string {
   return t;
 }
 
-export function buildRsvpWords(text: string): RsvpWord[] {
+export function buildRsvpWords(
+  text: string,
+  notes: readonly NoteMatch[] = scanNotes(text),
+): RsvpWord[] {
+  const hidden = hiddenSpans(notes);
+  let hiddenIndex = 0;
   const words: RsvpWord[] = [];
   const re = /\S+/g;
   let m: RegExpExecArray | null;
   let lastEnd = 0;
-  let skippingComment = false;
 
   while ((m = re.exec(text))) {
     const raw = m[0];
@@ -52,27 +57,20 @@ export function buildRsvpWords(text: string): RsvpWord[] {
     lastEnd = m.index + raw.length;
     const paragraphBreak = /\n[ \t]*\n/.test(gap);
 
-    // Skip CriticMarkup comment bodies entirely — notes aren't prose —
-    // but keep any prose sharing a token with the comment delimiters.
-    let body = raw;
-    if (skippingComment) {
-      const ci = body.indexOf("<<}");
-      if (ci < 0) continue;
-      skippingComment = false;
-      body = body.slice(ci + 3);
-      if (!body) continue;
+    // Subtract annotation spans from the raw token, keeping source offsets.
+    while (hiddenIndex < hidden.length && hidden[hiddenIndex].to <= m.index)
+      hiddenIndex++;
+    let body = "";
+    let visibleFrom = m.index;
+    for (
+      let i = hiddenIndex;
+      i < hidden.length && hidden[i].from < lastEnd;
+      i++
+    ) {
+      body += text.slice(visibleFrom, Math.max(visibleFrom, hidden[i].from));
+      visibleFrom = Math.min(lastEnd, hidden[i].to);
     }
-    const oi = body.indexOf("{>>");
-    if (oi >= 0) {
-      const ci = body.indexOf("<<}", oi);
-      if (ci >= 0) {
-        body = body.slice(0, oi) + body.slice(ci + 3);
-      } else {
-        body = body.slice(0, oi);
-        skippingComment = true;
-      }
-      if (!body) continue;
-    }
+    body += text.slice(visibleFrom, lastEnd);
 
     const cleaned = cleanToken(body);
     if (!cleaned) continue;

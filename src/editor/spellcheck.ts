@@ -2,6 +2,7 @@ import { Decoration, EditorView, ViewPlugin } from "@codemirror/view";
 import type { DecorationSet, ViewUpdate } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import type { Range } from "@codemirror/state";
+import { decorationsChanged } from "./decorations";
 
 /**
  * Native spell checking. WebKit checks the contenteditable with the macOS
@@ -52,11 +53,7 @@ const exclusions = ViewPlugin.fromClass(
     update(update: ViewUpdate) {
       // The parser finishes large documents asynchronously, in updates that
       // change neither the document nor the viewport.
-      if (
-        update.docChanged ||
-        update.viewportChanged ||
-        syntaxTree(update.startState) !== syntaxTree(update.state)
-      ) {
+      if (decorationsChanged(update)) {
         this.decorations = excludedRanges(update.view);
       }
     }

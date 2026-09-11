@@ -66,6 +66,8 @@ interface KeylogEntry {
   /** Cursor-layer census, for ghost-cursor diagnosis. */
   layers?: string;
   detail?: string;
+  search?: string;
+  reversed?: boolean;
 }
 
 type Recorded = Omit<KeylogEntry, "t">;
@@ -139,6 +141,8 @@ function context(view: EditorView): Context {
     sel,
     focus: view.hasFocus,
     cmComposing: view.composing || undefined,
+    search: clip(vim?.searchState_?.getQuery()?.source),
+    reversed: vim?.searchState_?.isReversed() || undefined,
   };
 }
 
@@ -221,23 +225,50 @@ function hookVim(view: EditorView): void {
  */
 export const keylogRecorder = ViewPlugin.define((view) => {
   const onEvent = (e: Event) => recordKeylog(describeEvent(e, view));
+  const onError = (event: ErrorEvent) =>
+    recordKeylogError(event.error ?? event.message);
   for (const type of DOM_EVENTS) {
     document.addEventListener(type, onEvent, true);
   }
   hookVim(view);
+  let hooked = getCM(view);
+  window.addEventListener("error", onError);
   recordKeylog({
     ...context(view),
     type: "editor:state",
     layers: layerCensus(view),
   });
   return {
+    update() {
+      const cm = getCM(view);
+      if (cm !== hooked) {
+        hooked = cm;
+        hookVim(view);
+      }
+    },
     destroy() {
+      window.removeEventListener("error", onError);
       for (const type of DOM_EVENTS) {
         document.removeEventListener(type, onEvent, true);
       }
       recordKeylog({ type: "editor:destroy", layers: layerCensus(view) });
     },
   };
+});
+
+/** CodeMirror catches command/plugin exceptions before window receives them. */
+function recordKeylogError(error: unknown): void {
+  recordKeylog({
+    type: "editor:error",
+    detail: String(
+      error instanceof Error ? (error.stack ?? error.message) : error,
+    ).slice(0, 2000),
+  });
+}
+
+export const keylogErrors = EditorView.exceptionSink.of((error) => {
+  recordKeylogError(error);
+  console.error(error);
 });
 
 /** Write the buffer as JSON lines behind a header; resolves to the path. */
