@@ -506,7 +506,6 @@ export function createEditorState(
       livePreview,
       tableRendering,
       criticMarkup,
-      notesField,
       historyDiff,
       keymap.of([
         {
