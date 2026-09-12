@@ -1147,19 +1147,35 @@ function App() {
       const view = viewRef.current;
       let snapshot = session.getSnapshot();
       if (!view) return;
-      if (
-        !snapshot.filePath &&
-        openFolder &&
-        isInFolder(openFolder, folder) &&
-        view.state.doc.length > 0
-      ) {
-        await doSave();
-        if (session.getSnapshot().id !== snapshot.id) return;
-        snapshot = session.getSnapshot();
-        if (!snapshot.filePath) return;
-      }
       setSavingFolder(folder);
       try {
+        if (
+          !snapshot.filePath &&
+          openFolder &&
+          isInFolder(openFolder, folder) &&
+          view.state.doc.length > 0
+        ) {
+          const path = await saveDialog({
+            filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+            defaultPath: openFolder,
+          });
+          if (
+            !path ||
+            !session.sameDocument(snapshot) ||
+            session.getSnapshot().viewing
+          )
+            return;
+          // Only the folder operation commits: a normal Save here would
+          // capture unrelated entries from the repository's staging index.
+          const named = await session.save(
+            view.state.doc.toString(),
+            false,
+            undefined,
+            path,
+          );
+          if (!named.current) return;
+          snapshot = session.getSnapshot();
+        }
         const saved = await session.saveFolder(
           folder,
           view.state.doc.toString(),
@@ -1189,7 +1205,6 @@ function App() {
       savingFolder,
       session,
       openFolder,
-      doSave,
       flash,
       refreshGit,
       refreshProject,

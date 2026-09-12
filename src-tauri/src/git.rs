@@ -345,6 +345,11 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
     }
     let parent = head_commit(&repo)?.map(|head| head.id());
     let mut index = repo.index().map_err(err)?;
+    if index.has_conflicts() {
+        return Err(
+            "Resolve and save conflicted files individually before using Save all".to_string(),
+        );
+    }
     for path in &paths {
         match fs::symlink_metadata(root.join(path)) {
             Ok(_) => index.add_path(path).map_err(err)?,
@@ -1863,6 +1868,47 @@ mod tests {
         assert!(save_folder(p(dir.path())).unwrap().is_none());
         assert!(!dir.path().join(".git").exists());
         assert!(save_folder(p(&dir.path().join("chapter.md"))).is_err());
+    }
+
+    #[test]
+    fn folder_save_preserves_unresolved_merge_files_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = [p(&dir.path().join("a.md")), p(&dir.path().join("b.md"))];
+        init_repo(files[0].clone()).unwrap();
+        for path in &files {
+            save_document(path.clone(), "base\n".into(), None, true).unwrap();
+        }
+        let main = repo_info(files[0].clone()).branch.unwrap();
+        create_branch(files[0].clone(), "review".into(), true).unwrap();
+        for path in &files {
+            save_document(path.clone(), "theirs\n".into(), None, true).unwrap();
+        }
+        checkout_branch(files[0].clone(), main).unwrap();
+        for path in &files {
+            save_document(path.clone(), "ours\n".into(), None, true).unwrap();
+        }
+        assert_eq!(
+            merge_branch(files[0].clone(), "review".into())
+                .unwrap()
+                .status,
+            "conflicts"
+        );
+        let repo = Repository::open(dir.path()).unwrap();
+        let head = repo.head().unwrap().target().unwrap();
+        let index_before = fs::read(repo.path().join("index")).unwrap();
+        let contents: Vec<_> = files
+            .iter()
+            .map(|path| fs::read_to_string(path).unwrap())
+            .collect();
+        assert_eq!(repo.index().unwrap().conflicts().unwrap().count(), 2);
+        let error = save_folder(p(dir.path())).err().unwrap();
+        assert!(error.contains("conflicted files"), "{error}");
+        assert_eq!(repo.head().unwrap().target().unwrap(), head);
+        assert_eq!(repo.state(), RepositoryState::Merge);
+        assert_eq!(fs::read(repo.path().join("index")).unwrap(), index_before);
+        for (path, content) in files.iter().zip(contents) {
+            assert_eq!(fs::read_to_string(path).unwrap(), content);
+        }
     }
 
     #[test]

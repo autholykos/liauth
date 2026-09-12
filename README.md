@@ -56,7 +56,8 @@ git engine for versioning and asynchronous review.
   folder (including the project heading) and choose **Save all** to save its
   open buffer and commit changed Markdown/text documents recursively. Other
   folders' staged changes remain separate; ignored files and nested repositories
-  are excluded. As with a file save, a resolved merge is committed as a whole.
+  are excluded. Resolve and save conflicted files individually first; a resolved
+  merge is committed as a whole.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 

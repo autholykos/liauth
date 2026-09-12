@@ -317,8 +317,11 @@ it("uses the normal Save As dialog for an untitled buffer when saving its folder
     "/novel/new.md",
     "New chapter",
     undefined,
-    true,
+    false,
   );
+  expect(
+    vi.mocked(api.saveDocument).mock.calls.every((call) => call[3] === false),
+  ).toBe(true);
   expect(api.saveFolder).toHaveBeenCalledWith("/novel");
   expect(editor().state.doc.toString()).toBe("New chapter");
 });
