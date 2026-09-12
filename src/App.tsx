@@ -1175,6 +1175,8 @@ function App() {
           );
           if (!named.current) return;
           snapshot = session.getSnapshot();
+          await watchFile(path);
+          if (!session.sameDocument(snapshot)) return;
         }
         const saved = await session.saveFolder(
           folder,
@@ -1205,6 +1207,7 @@ function App() {
       savingFolder,
       session,
       openFolder,
+      watchFile,
       flash,
       refreshGit,
       refreshProject,

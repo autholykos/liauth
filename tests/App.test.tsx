@@ -289,42 +289,58 @@ it("shows folder groups for global search and opens a match", async () => {
   expect(api.readDocument).toHaveBeenCalledWith("/novel/part/second.md");
 });
 
-it("uses the normal Save As dialog for an untitled buffer when saving its folder", async () => {
-  vi.mocked(api.listProjectFiles).mockResolvedValue({
-    root: "/novel",
-    name: "Novel",
-    files: [],
-    truncated: false,
-  });
-  vi.mocked(openDialog).mockResolvedValue("/novel");
-  await run("open-folder");
-  await act(async () =>
-    editor().dispatch({ changes: { from: 0, insert: "New chapter" } }),
-  );
-  vi.mocked(saveDialog).mockResolvedValue("/novel/new.md");
-  await act(async () =>
-    host
-      .querySelector(".nav-root button")!
-      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
-  );
-  await act(async () => {
-    vi.mocked(showNavigatorFolderMenu).mock.calls.at(-1)![3]!();
-  });
-  expect(saveDialog).toHaveBeenCalledWith(
-    expect.objectContaining({ defaultPath: "/novel" }),
-  );
-  expect(api.saveDocument).toHaveBeenCalledWith(
-    "/novel/new.md",
-    "New chapter",
-    undefined,
-    false,
-  );
-  expect(
-    vi.mocked(api.saveDocument).mock.calls.every((call) => call[3] === false),
-  ).toBe(true);
-  expect(api.saveFolder).toHaveBeenCalledWith("/novel");
-  expect(editor().state.doc.toString()).toBe("New chapter");
-});
+it.each([false, true])(
+  "watches a newly named folder-save document (commit fails: %s)",
+  async (commitFails) => {
+    vi.mocked(api.listProjectFiles).mockResolvedValue({
+      root: "/novel",
+      name: "Novel",
+      files: [],
+      truncated: false,
+    });
+    vi.mocked(openDialog).mockResolvedValue("/novel");
+    await run("open-folder");
+    await act(async () =>
+      editor().dispatch({ changes: { from: 0, insert: "New chapter" } }),
+    );
+    vi.mocked(saveDialog).mockResolvedValue("/novel/new.md");
+    if (commitFails)
+      vi.mocked(api.saveFolder).mockRejectedValueOnce(
+        new Error("index locked"),
+      );
+    await act(async () =>
+      host
+        .querySelector(".nav-root button")!
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
+    );
+    await act(async () => {
+      vi.mocked(showNavigatorFolderMenu).mock.calls.at(-1)![3]!();
+    });
+    expect(saveDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "/novel" }),
+    );
+    expect(api.saveDocument).toHaveBeenCalledWith(
+      "/novel/new.md",
+      "New chapter",
+      undefined,
+      false,
+    );
+    expect(
+      vi.mocked(api.saveDocument).mock.calls.every((call) => call[3] === false),
+    ).toBe(true);
+    expect(api.saveFolder).toHaveBeenCalledWith("/novel");
+    expect(editor().state.doc.toString()).toBe("New chapter");
+    const newFileWatch = vi
+      .mocked(watch)
+      .mock.calls.find(([path]) => path === "/novel/new.md");
+    expect(newFileWatch).toBeDefined();
+    vi.mocked(api.readDocument).mockResolvedValue("Externally edited chapter");
+    await act(async () => {
+      newFileWatch![1]({} as never);
+    });
+    expect(editor().state.doc.toString()).toBe("Externally edited chapter");
+  },
+);
 
 it("handles a disk conflict through merge and leaves the merged text pending a save", async () => {
   await act(async () =>
