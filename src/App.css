@@ -383,7 +383,8 @@ button.wide {
   text-overflow: ellipsis;
 }
 
-.nav-file.dirty .nav-file-name {
+.nav-file.dirty .nav-file-name,
+.nav-folder-toggle.dirty .nav-file-name {
   font-style: italic;
 }
 
@@ -409,8 +410,28 @@ button.wide {
   font-weight: 600;
 }
 
-.nav-list li.nested {
-  padding-left: 20px;
+.nav-folder-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
+.nav-folder-toggle:hover:not(:disabled) {
+  background: transparent;
+}
+
+.nav-root .nav-folder-toggle {
+  padding: 3px 0;
 }
 
 .nav-list li.nav-dir {
@@ -427,6 +448,13 @@ button.wide {
 .nav-dir-chevron {
   display: inline-block;
   width: 13px;
+  flex: 0 0 13px;
+}
+
+.nav-search-folder {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .nav-search {

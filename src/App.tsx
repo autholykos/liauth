@@ -76,6 +76,9 @@ import { NotesPanel } from "./NotesPanel";
 import { HistoryPanel } from "./HistoryPanel";
 import { BranchesPanel } from "./BranchesPanel";
 import { FileNavigator } from "./FileNavigator";
+import { SearchResults } from "./SearchResults";
+import { useFolderExpansion } from "./useFolderExpansion";
+import { isInFolder } from "./folders";
 import "./App.css";
 
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
@@ -224,9 +227,12 @@ function App() {
     (stored) => stored === "1",
   );
   const [project, setProject] = useState<api.ProjectFiles | null>(null);
-  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(
-    () => new Set(),
+  const [collapsedDirs, toggleNavigatorFolder] = useFolderExpansion(
+    project?.root,
+    filePath,
+    navOpen && navigatorView === "files",
   );
+  const [savingFolder, setSavingFolder] = useState<string | null>(null);
   const projectRequestRef = useRef(0);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [workspaceSearch, setWorkspaceSearch] =
@@ -476,10 +482,6 @@ function App() {
     },
     [navOpen, showHiddenFiles],
   );
-
-  useEffect(() => {
-    setCollapsedDirs(new Set());
-  }, [project?.root]);
 
   // Navigator contents: the markdown files of the document's project
   // (its git repo, or just its folder when unversioned). Re-roots when
@@ -1016,7 +1018,7 @@ function App() {
   );
 
   const pasteNavigatorFile = useCallback(
-    async (destination: api.ProjectFile) => {
+    async (destinationPath: string) => {
       const staged = fileClipboard;
       if (!staged) return;
       const action = staged.mode === "cut" ? "moving" : "copying";
@@ -1024,7 +1026,7 @@ function App() {
       try {
         const newPath = await api.pasteProjectFile(
           staged.path,
-          destination.path,
+          destinationPath,
           staged.mode === "cut",
         );
         const sourceIsCurrent = session.getSnapshot().filePath === staged.path;
@@ -1119,7 +1121,7 @@ function App() {
             stageNavigatorFile(file, action);
             break;
           case "paste":
-            void pasteNavigatorFile(file);
+            void pasteNavigatorFile(file.path);
             break;
           case "delete":
             void deleteNavigatorFile(file);
@@ -1139,25 +1141,75 @@ function App() {
     ],
   );
 
-  const toggleNavigatorFolder = useCallback((dir: string) => {
-    setCollapsedDirs((current) => {
-      const next = new Set(current);
-      if (next.has(dir)) next.delete(dir);
-      else next.add(dir);
-      return next;
-    });
-  }, []);
+  const saveFolder = useCallback(
+    async (folder: string) => {
+      if (savingFolder) return;
+      const view = viewRef.current;
+      let snapshot = session.getSnapshot();
+      if (!view) return;
+      if (
+        !snapshot.filePath &&
+        openFolder &&
+        isInFolder(openFolder, folder) &&
+        view.state.doc.length > 0
+      ) {
+        await doSave();
+        if (session.getSnapshot().id !== snapshot.id) return;
+        snapshot = session.getSnapshot();
+        if (!snapshot.filePath) return;
+      }
+      setSavingFolder(folder);
+      try {
+        const saved = await session.saveFolder(
+          folder,
+          view.state.doc.toString(),
+        );
+        if (!saved.current) return;
+        if (snapshot.filePath) await refreshGit(snapshot.filePath);
+        if (!session.sameDocument(snapshot)) return;
+        await refreshProject(projectAnchor());
+        if (!session.sameDocument(snapshot)) return;
+        if (snapshot.filePath && isInFolder(snapshot.filePath, folder)) {
+          session.setLastSave(
+            saved.commit
+              ? `committed ${saved.commit.id.slice(0, 7)} · ${timeNow()}`
+              : `saved ${timeNow()}`,
+          );
+        }
+        flash(`Saved all documents in ${baseName(folder)}`);
+      } catch (e) {
+        flash(`Save all failed: ${e}`);
+        if (session.sameDocument(snapshot))
+          await refreshProject(projectAnchor());
+      } finally {
+        setSavingFolder(null);
+      }
+    },
+    [
+      savingFolder,
+      session,
+      openFolder,
+      doSave,
+      flash,
+      refreshGit,
+      refreshProject,
+      projectAnchor,
+    ],
+  );
 
   const openNavigatorFolderMenu = useCallback(
-    (dir: string, destination: api.ProjectFile) => {
+    (dir: string) => {
       void showNavigatorFolderMenu(
         () => toggleNavigatorFolder(dir),
         collapsedDirs.has(dir),
-        fileClipboard ? () => void pasteNavigatorFile(destination) : null,
+        fileClipboard ? () => void pasteNavigatorFile(dir) : null,
+        savingFolder ? null : () => void saveFolder(dir),
       ).catch((e) => flash(`Could not open folder menu: ${e}`));
     },
     [
       collapsedDirs,
+      savingFolder,
+      saveFolder,
       fileClipboard,
       toggleNavigatorFolder,
       pasteNavigatorFile,
@@ -2212,24 +2264,11 @@ function App() {
                     {workspaceSearch.matches.length === 1 ? "" : "s"}
                     {workspaceSearch.truncated ? " (first matches)" : ""}
                   </p>
-                  <ul className="nav-search-results">
-                    {workspaceSearch.matches.map((match) => (
-                      <li key={`${match.path}:${match.line}:${match.column}`}>
-                        <button
-                          className="nav-search-result"
-                          title={`${match.rel}:${match.line}`}
-                          onClick={() => void openWorkspaceSearchMatch(match)}
-                        >
-                          <span className="nav-search-path">
-                            {match.rel}:{match.line}
-                          </span>
-                          <span className="nav-search-preview">
-                            {match.preview}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <SearchResults
+                    matches={workspaceSearch.matches}
+                    rootName={project?.name ?? "Project"}
+                    onOpen={(match) => void openWorkspaceSearchMatch(match)}
+                  />
                 </>
               ) : null}
             </div>

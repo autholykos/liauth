@@ -6,9 +6,13 @@ import { undo } from "@codemirror/commands";
 import { Vim, getCM } from "@replit/codemirror-vim";
 import App from "../src/App";
 import * as api from "../src/api";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
 import { watch } from "@tauri-apps/plugin-fs";
 import type { AppCommand } from "../src/commands";
+import { showNavigatorFolderMenu } from "../src/menu";
 
 const native = vi.hoisted(() => ({
   commands: [] as AppCommand[],
@@ -50,11 +54,13 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("../src/api", () => ({
   readDocument: vi.fn(),
   saveDocument: vi.fn(),
+  saveFolder: vi.fn(),
   repoInfo: vi.fn(),
   takePendingOpen: vi.fn(),
   readVimConfig: vi.fn(),
   warmNoteCache: vi.fn(),
   listProjectFiles: vi.fn(),
+  searchProjectFiles: vi.fn(),
   fileHistory: vi.fn(),
   listBranches: vi.fn(),
   listWorktrees: vi.fn(),
@@ -96,6 +102,7 @@ beforeEach(async () => {
   localStorage.setItem("liauth.lastFile", "/novel/first.md");
   vi.mocked(api.readDocument).mockResolvedValue("First {>>note<<}");
   vi.mocked(api.saveDocument).mockResolvedValue(null);
+  vi.mocked(api.saveFolder).mockResolvedValue(null);
   vi.mocked(api.repoInfo).mockResolvedValue({
     repo_root: "/novel",
     branch: "main",
@@ -114,6 +121,9 @@ beforeEach(async () => {
   document.body.append(host);
   root = createRoot(host);
   await act(async () => root.render(<App />));
+  await act(async () => {
+    await new Promise(requestAnimationFrame);
+  });
 });
 afterEach(async () => {
   await act(async () => root.unmount());
@@ -183,6 +193,134 @@ it("clears document and history when opening a folder", async () => {
   expect(localStorage.getItem("liauth.lastFile")).toBeNull();
   expect(native.commands.some((c) => c.id === "panel-history")).toBe(false);
   expect(host.querySelector(".statusbar")?.textContent).not.toContain("main");
+});
+
+it("runs Save all from the folder menu, writes the buffer, and refreshes folder indicators", async () => {
+  const files = [
+    { path: "/novel/first.md", rel: "first.md", dirty: true, has_notes: true },
+    {
+      path: "/novel/part/second.md",
+      rel: "part/second.md",
+      dirty: true,
+      has_notes: false,
+    },
+  ];
+  vi.mocked(api.listProjectFiles).mockResolvedValue({
+    root: "/novel",
+    name: "Novel",
+    files,
+    truncated: false,
+  });
+  await run("toggle-nav");
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "New " } }),
+  );
+  const rootFolder = host.querySelector(".nav-root button")!;
+  await act(async () =>
+    rootFolder.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
+  );
+  const saveAll = vi.mocked(showNavigatorFolderMenu).mock.calls.at(-1)![3]!;
+  vi.mocked(api.listProjectFiles).mockResolvedValue({
+    root: "/novel",
+    name: "Novel",
+    files: files.map((file) => ({ ...file, dirty: false })),
+    truncated: false,
+  });
+  await act(async () => {
+    saveAll();
+  });
+  expect(api.saveDocument).toHaveBeenCalledWith(
+    "/novel/first.md",
+    "New First {>>note<<}",
+    undefined,
+    false,
+  );
+  expect(api.saveFolder).toHaveBeenCalledWith("/novel");
+  expect(host.querySelector(".nav-folder-toggle.dirty")).toBeNull();
+  expect(host.querySelector(".nav-root .nav-note-dot")).not.toBeNull();
+});
+
+it("shows folder groups for global search and opens a match", async () => {
+  vi.mocked(api.searchProjectFiles).mockResolvedValue({
+    matches: [
+      {
+        path: "/novel/first.md",
+        rel: "first.md",
+        line: 1,
+        column: 0,
+        length: 5,
+        preview: "First",
+      },
+      {
+        path: "/novel/part/second.md",
+        rel: "part/second.md",
+        line: 1,
+        column: 0,
+        length: 5,
+        preview: "First",
+      },
+    ],
+    truncated: false,
+  });
+  await click("Search");
+  const input = host.querySelector<HTMLInputElement>(".nav-search-input")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(input, "First");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  expect(
+    [...host.querySelectorAll(".nav-search-group")].map((group) =>
+      group.getAttribute("aria-label"),
+    ),
+  ).toEqual(["Project", "part"]);
+  await act(async () =>
+    (
+      host.querySelector(
+        'button[title="part/second.md:1"]',
+      ) as HTMLButtonElement
+    ).click(),
+  );
+  expect(api.readDocument).toHaveBeenCalledWith("/novel/part/second.md");
+});
+
+it("uses the normal Save As dialog for an untitled buffer when saving its folder", async () => {
+  vi.mocked(api.listProjectFiles).mockResolvedValue({
+    root: "/novel",
+    name: "Novel",
+    files: [],
+    truncated: false,
+  });
+  vi.mocked(openDialog).mockResolvedValue("/novel");
+  await run("open-folder");
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "New chapter" } }),
+  );
+  vi.mocked(saveDialog).mockResolvedValue("/novel/new.md");
+  await act(async () =>
+    host
+      .querySelector(".nav-root button")!
+      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
+  );
+  await act(async () => {
+    vi.mocked(showNavigatorFolderMenu).mock.calls.at(-1)![3]!();
+  });
+  expect(saveDialog).toHaveBeenCalledWith(
+    expect.objectContaining({ defaultPath: "/novel" }),
+  );
+  expect(api.saveDocument).toHaveBeenCalledWith(
+    "/novel/new.md",
+    "New chapter",
+    undefined,
+    true,
+  );
+  expect(api.saveFolder).toHaveBeenCalledWith("/novel");
+  expect(editor().state.doc.toString()).toBe("New chapter");
 });
 
 it("handles a disk conflict through merge and leaves the merged text pending a save", async () => {

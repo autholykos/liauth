@@ -223,7 +223,31 @@ pub fn save_document(
         Err(_) => return Ok(None), // not versioned: plain save
     };
     let rel = workdir_rel(&repo, &file_path)?;
+    let parent = head_commit(&repo)?.map(|head| head.id());
 
+    let mut index = repo.index().map_err(err)?;
+    index.add_path(&rel).map_err(err)?;
+    index.write().map_err(err)?;
+    let tree_id = index.write_tree().map_err(err)?;
+
+    let default_msg = format!(
+        "Save {}",
+        rel.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default()
+    );
+    let msg = message.unwrap_or(default_msg);
+
+    commit_tree(&mut repo, tree_id, msg, parent)
+}
+
+/// Both file and folder saves preserve merge parents and skip empty commits.
+fn commit_tree(
+    repo: &mut Repository,
+    tree_id: Oid,
+    msg: String,
+    parent: Option<Oid>,
+) -> Result<Option<CommitInfo>, String> {
     let merging = repo.state() == RepositoryState::Merge;
     let mut merge_heads: Vec<Oid> = Vec::new();
     if merging {
@@ -234,23 +258,12 @@ pub fn save_document(
         .map_err(err)?;
     }
 
-    let mut index = repo.index().map_err(err)?;
-    index.add_path(&rel).map_err(err)?;
-    index.write().map_err(err)?;
-    let tree_id = index.write_tree().map_err(err)?;
-
-    let sig = signature(&repo)?;
-    let default_msg = format!(
-        "Save {}",
-        rel.file_name()
-            .map(|n| n.to_string_lossy())
-            .unwrap_or_default()
-    );
-    let msg = message.unwrap_or(default_msg);
-
+    let sig = signature(repo)?;
     let oid = {
         let tree = repo.find_tree(tree_id).map_err(err)?;
-        let parent = head_commit(&repo)?;
+        let parent = parent
+            .map(|id| repo.find_commit(id).map_err(err))
+            .transpose()?;
 
         // Skip empty commits outside of a merge.
         if !merging {
@@ -280,6 +293,93 @@ pub fn save_document(
         author: sig.name().unwrap_or("").to_string(),
         time: sig.when().seconds(),
     }))
+}
+
+/// Commit every changed document under a folder, including descendants and
+/// removals, without rewriting closed files or capturing another folder's index.
+#[tauri::command]
+pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
+    let folder = fs::canonicalize(&folder_path).map_err(|e| e.to_string())?;
+    if !folder.is_dir() {
+        return Err("folder no longer exists".to_string());
+    }
+    let mut repo = match Repository::discover(&folder) {
+        Ok(repo) => repo,
+        Err(e) if e.code() == ErrorCode::NotFound => return Ok(None),
+        Err(e) => return Err(err(e)),
+    };
+    let root = workdir(&repo).ok_or_else(|| "repository has no working directory".to_string())?;
+    let relative = folder.strip_prefix(&root).map_err(|e| e.to_string())?;
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false)
+        .renames_head_to_index(false)
+        .renames_index_to_workdir(false);
+    let paths = {
+        let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
+        let mut paths = Vec::new();
+        for entry in statuses.iter() {
+            let path = Path::new(entry.path().map_err(err)?);
+            if !path.starts_with(relative) || !crate::is_markdown(path) {
+                continue;
+            }
+            let absolute = root.join(path);
+            if absolute.is_dir()
+                || absolute
+                    .parent()
+                    .into_iter()
+                    .flat_map(Path::ancestors)
+                    .take_while(|parent| *parent != root)
+                    .any(|parent| parent.join(".git").exists())
+            {
+                continue;
+            }
+            paths.push(path.to_path_buf());
+        }
+        paths
+    };
+    if paths.is_empty() && repo.state() != RepositoryState::Merge {
+        return Ok(None);
+    }
+    let parent = head_commit(&repo)?.map(|head| head.id());
+    let mut index = repo.index().map_err(err)?;
+    for path in &paths {
+        match fs::symlink_metadata(root.join(path)) {
+            Ok(_) => index.add_path(path).map_err(err)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if index.get_path(path, 0).is_some() {
+                    index.remove_path(path).map_err(err)?;
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let tree_id = if repo.state() == RepositoryState::Merge {
+        // A merge commit covers the repository, just as a normal file save
+        // does. Unresolved conflicts elsewhere still prevent write_tree.
+        index.write_tree().map_err(err)?
+    } else {
+        let mut selected = git2::Index::new().map_err(err)?;
+        if let Some(id) = parent {
+            let head = repo.find_commit(id).map_err(err)?;
+            selected
+                .read_tree(&head.tree().map_err(err)?)
+                .map_err(err)?;
+        }
+        for path in &paths {
+            if let Some(entry) = index.get_path(path, 0) {
+                selected.add(&entry).map_err(err)?;
+            } else if selected.get_path(path, 0).is_some() {
+                selected.remove_path(path).map_err(err)?;
+            }
+        }
+        selected.write_tree_to(&repo).map_err(err)?
+    };
+    index.write().map_err(err)?;
+    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    commit_tree(&mut repo, tree_id, format!("Save all {name}"), parent)
 }
 
 /// Commits that changed this file, newest first.
@@ -1673,5 +1773,158 @@ mod tests {
         assert_eq!(head.parent_id(0).unwrap(), base_oid);
         assert_eq!(read_document(doc_s).unwrap(), "v2\n");
         assert_eq!(read_document(p(&notes)).unwrap(), "notes\n");
+    }
+    #[test]
+    fn folder_save_commits_descendants_and_removals_but_preserves_other_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("part[1]");
+        fs::create_dir_all(folder.join("sub")).unwrap();
+        fs::create_dir(dir.path().join("part[1]-other")).unwrap();
+        let inside = folder.join("chapter.md");
+        let removed = folder.join("removed.md");
+        let outside = dir.path().join("other.md");
+        Repository::init(dir.path()).unwrap();
+        for file in [&inside, &removed, &outside] {
+            save_document(p(file), "original\n".into(), None, true).unwrap();
+        }
+        fs::write(&inside, "new chapter\n").unwrap();
+        fs::write(folder.join("sub/new.txt"), "new scene\n").unwrap();
+        fs::write(folder.join("image.svg"), "not prose\n").unwrap();
+        fs::write(dir.path().join("part[1]-other/keep.md"), "untouched\n").unwrap();
+        fs::remove_file(&removed).unwrap();
+        fs::write(&outside, "staged outside\n").unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("other.md")).unwrap();
+        index.write().unwrap();
+        let outside_staged = index.get_path(Path::new("other.md"), 0).unwrap().id;
+
+        let commit = save_folder(p(&folder)).unwrap().unwrap();
+        let tree = repo
+            .find_commit(Oid::from_str(&commit.id).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        let blob = |path: &str| {
+            let entry = tree.get_path(Path::new(path)).unwrap();
+            String::from_utf8(repo.find_blob(entry.id()).unwrap().content().to_vec()).unwrap()
+        };
+        assert_eq!(blob("part[1]/chapter.md"), "new chapter\n");
+        assert_eq!(blob("part[1]/sub/new.txt"), "new scene\n");
+        assert_eq!(blob("other.md"), "original\n");
+        assert!(tree.get_path(Path::new("part[1]/removed.md")).is_err());
+        assert!(tree.get_path(Path::new("part[1]/image.svg")).is_err());
+        assert!(tree.get_path(Path::new("part[1]-other/keep.md")).is_err());
+        assert_eq!(
+            repo.index()
+                .unwrap()
+                .get_path(Path::new("other.md"), 0)
+                .unwrap()
+                .id,
+            outside_staged
+        );
+        assert!(save_folder(p(&folder)).unwrap().is_none());
+    }
+
+    #[test]
+    fn folder_save_has_no_navigator_cap_and_skips_ignored_and_nested_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join(".gitignore"), "ignored.md\n").unwrap();
+        fs::write(dir.path().join("ignored.md"), "private\n").unwrap();
+        fs::create_dir(dir.path().join(".hidden")).unwrap();
+        fs::write(dir.path().join(".hidden/note.md"), "note\n").unwrap();
+        Repository::init(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/keep.md"), "nested\n").unwrap();
+        for i in 0..501 {
+            fs::write(dir.path().join(format!("chapter-{i}.md")), "prose\n").unwrap();
+        }
+        let commit = save_folder(p(dir.path())).unwrap().unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let tree = repo
+            .find_commit(Oid::from_str(&commit.id).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(tree.get_path(Path::new("chapter-500.md")).is_ok());
+        assert!(tree.get_path(Path::new(".hidden/note.md")).is_ok());
+        assert!(tree.get_path(Path::new("ignored.md")).is_err());
+        assert!(tree.get_path(Path::new("nested/keep.md")).is_err());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("ignored.md")).unwrap(),
+            "private\n"
+        );
+    }
+
+    #[test]
+    fn folder_save_does_not_create_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("chapter.md"), "prose\n").unwrap();
+        assert!(save_folder(p(dir.path())).unwrap().is_none());
+        assert!(!dir.path().join(".git").exists());
+        assert!(save_folder(p(&dir.path().join("chapter.md"))).is_err());
+    }
+
+    #[test]
+    fn folder_save_finishes_an_already_resolved_merge_with_both_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = p(&dir.path().join("doc.md"));
+        init_repo(doc.clone()).unwrap();
+        save_document(doc.clone(), "base\n".into(), None, true).unwrap();
+        let main = repo_info(doc.clone()).branch.unwrap();
+        create_branch(doc.clone(), "review".into(), true).unwrap();
+        let theirs = save_document(doc.clone(), "theirs\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        checkout_branch(doc.clone(), main).unwrap();
+        let ours = save_document(doc.clone(), "ours\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            merge_branch(doc.clone(), "review".into()).unwrap().status,
+            "conflicts"
+        );
+        fs::write(&doc, "ours\n").unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("doc.md")).unwrap();
+        index.write().unwrap();
+        assert!(repo.statuses(None).unwrap().is_empty());
+        let saved = save_folder(p(dir.path())).unwrap().unwrap();
+        let commit = repo.find_commit(Oid::from_str(&saved.id).unwrap()).unwrap();
+        assert_eq!(commit.parent_count(), 2);
+        assert_eq!(commit.parent_id(0).unwrap().to_string(), ours.id);
+        assert_eq!(commit.parent_id(1).unwrap().to_string(), theirs.id);
+        assert_eq!(repo.state(), RepositoryState::Clean);
+    }
+
+    #[test]
+    fn commit_tree_rejects_a_parent_changed_after_preparing_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = p(&dir.path().join("doc.md"));
+        init_repo(doc.clone()).unwrap();
+        let first = save_document(doc.clone(), "first\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        let mut repo = Repository::open(dir.path()).unwrap();
+        fs::write(&doc, "prepared\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("doc.md")).unwrap();
+        let tree = index.write_tree().unwrap();
+        let latest = save_document(doc.clone(), "latest\n".into(), None, true)
+            .unwrap()
+            .unwrap();
+        assert!(commit_tree(
+            &mut repo,
+            tree,
+            "Save folder".into(),
+            Some(Oid::from_str(&first.id).unwrap())
+        )
+        .is_err());
+        assert_eq!(
+            repo.head().unwrap().target().unwrap().to_string(),
+            latest.id
+        );
+        assert_eq!(fs::read_to_string(doc).unwrap(), "latest\n");
     }
 }

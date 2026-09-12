@@ -60,6 +60,9 @@ export const saveDocument = (
     commit,
   });
 
+export const saveFolder = (folderPath: string) =>
+  invoke<CommitInfo | null>("save_folder", { folderPath });
+
 /** Squash the commits after `base` (or after the last squash / pull). */
 export const squashRecentCommits = (filePath: string, base?: string) =>
   invoke<CommitInfo>("squash_recent_commits", { filePath, base: base ?? null });
