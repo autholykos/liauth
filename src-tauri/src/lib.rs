@@ -467,6 +467,7 @@ pub fn run() {
             git::init_repo,
             git::read_document,
             git::save_document,
+            git::save_folder,
             git::file_history,
             git::file_at_commit,
             git::history_diff,

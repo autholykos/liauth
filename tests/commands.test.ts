@@ -5,12 +5,17 @@ import {
   type CommandActions,
   type CommandSnapshot,
 } from "../src/commands";
-import { buildAppMenu } from "../src/menu";
+import { buildAppMenu, showNavigatorFolderMenu } from "../src/menu";
 import { Menu } from "@tauri-apps/api/menu";
 
 vi.mock("@tauri-apps/api/menu", () => {
   const factory = {
-    new: vi.fn(async (options) => ({ ...options, setAsAppMenu: vi.fn() })),
+    new: vi.fn(async (options) => ({
+      ...options,
+      setAsAppMenu: vi.fn(),
+      popup: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    })),
   };
   return {
     Menu: { ...factory },
@@ -39,6 +44,21 @@ const snapshot: CommandSnapshot = {
 };
 
 describe("shared commands", () => {
+  it("offers Save all in the native folder menu and disables it while busy", async () => {
+    const save = vi.fn();
+    await showNavigatorFolderMenu(() => {}, false, null, save);
+    const items = vi.mocked(Menu.new).mock.calls.at(-1)![0]!.items as any[];
+    const item = items.find((item) => item.id === "navigator-folder-save-all");
+    expect(item.text).toBe("Save all");
+    expect(item.enabled).toBe(true);
+    item.action();
+    expect(save).toHaveBeenCalledOnce();
+    await showNavigatorFolderMenu(() => {}, false, null, null);
+    const disabled = (
+      vi.mocked(Menu.new).mock.calls.at(-1)![0]!.items as any[]
+    ).find((item) => item.id === "navigator-folder-save-all");
+    expect(disabled.enabled).toBe(false);
+  });
   it("uses the same command through menu, palette and keyboard fallback", async () => {
     const room = vi.fn();
     const actions = new Proxy(

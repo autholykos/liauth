@@ -5,6 +5,7 @@ import * as api from "../src/api";
 vi.mock("../src/api", () => ({
   readDocument: vi.fn(),
   saveDocument: vi.fn(),
+  saveFolder: vi.fn(),
   repoInfo: vi.fn(),
   fileHistory: vi.fn(),
   listBranches: vi.fn(),
@@ -39,6 +40,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.readDocument).mockResolvedValue("original");
   vi.mocked(api.saveDocument).mockResolvedValue(commit);
+  vi.mocked(api.saveFolder).mockResolvedValue(commit);
   vi.mocked(api.repoInfo).mockResolvedValue(info);
   vi.mocked(api.fileHistory).mockResolvedValue([commit]);
   vi.mocked(api.listBranches).mockResolvedValue([]);
@@ -179,6 +181,80 @@ describe("versioning", () => {
 });
 
 describe("saving", () => {
+  it("saves the current buffer before committing its folder and preserves typing during the commit", async () => {
+    const session = new DocumentSession();
+    await session.open("/project/part/chapter.md");
+    session.edit();
+    const slow = deferred<api.CommitInfo | null>();
+    vi.mocked(api.saveFolder).mockReturnValueOnce(slow.promise);
+    const save = session.saveFolder("/project/part", "changed");
+    await vi.waitFor(() =>
+      expect(api.saveFolder).toHaveBeenCalledWith("/project/part"),
+    );
+    expect(api.saveDocument).toHaveBeenCalledWith(
+      "/project/part/chapter.md",
+      "changed",
+      undefined,
+      false,
+    );
+    session.edit();
+    const next = session.save("newer typing", false);
+    expect(api.saveDocument).toHaveBeenCalledTimes(1);
+    slow.resolve(commit);
+    await save;
+    await next;
+    expect(session.getSnapshot()).toMatchObject({
+      lastDisk: "newer typing",
+      dirty: true,
+      diskDirty: false,
+    });
+  });
+
+  it("does not save a similarly prefixed sibling folder's buffer", async () => {
+    const session = new DocumentSession();
+    await session.open("/project/part-two/chapter.md");
+    session.edit();
+    await session.saveFolder("/project/part", "changed");
+    expect(api.saveDocument).not.toHaveBeenCalled();
+    expect(api.saveFolder).toHaveBeenCalledWith("/project/part");
+    expect(session.getSnapshot().diskDirty).toBe(true);
+  });
+
+  it("blocks folder saves of historical text or a conflicted buffer", async () => {
+    const session = new DocumentSession();
+    await session.open("/project/chapter.md");
+    session.setConflict("disk");
+    await expect(session.saveFolder("/project", "mine")).rejects.toThrow(
+      "disk conflict",
+    );
+    session.setConflict(null);
+    session.setViewing({
+      ...commit,
+      currentContent: "current",
+      historicalContent: "old",
+      hunks: [],
+    });
+    await expect(session.saveFolder("/project", "old")).rejects.toThrow(
+      "current document",
+    );
+    expect(api.saveDocument).not.toHaveBeenCalled();
+    expect(api.saveFolder).not.toHaveBeenCalled();
+  });
+
+  it("keeps uncommitted changes when folder commit fails after writing the buffer", async () => {
+    const session = new DocumentSession();
+    await session.open("/project/chapter.md");
+    session.edit();
+    vi.mocked(api.saveFolder).mockRejectedValueOnce(new Error("index locked"));
+    await expect(session.saveFolder("/project", "new text")).rejects.toThrow(
+      "index locked",
+    );
+    expect(session.getSnapshot()).toMatchObject({
+      lastDisk: "new text",
+      diskDirty: false,
+      dirty: true,
+    });
+  });
   it("autosaves the disk baseline without clearing uncommitted changes", async () => {
     const session = new DocumentSession();
     await session.open("/first.md");

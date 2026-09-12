@@ -1,4 +1,5 @@
 import * as api from "./api";
+import { isInFolder } from "./folders";
 
 export type ViewedVersion = api.CommitInfo & {
   currentContent: string;
@@ -150,6 +151,41 @@ export class DocumentSession {
     }
     this.saved(snapshot, content, commit, path);
     return { commit: result, current: true };
+  }
+
+  async saveFolder(folder: string, content: string) {
+    const snapshot = this.state;
+    const path = snapshot.filePath;
+    const includesCurrent = path !== null && isInFolder(path, folder);
+    if (includesCurrent && snapshot.viewing)
+      throw new Error(
+        "Return to the current document before saving its folder",
+      );
+    if (includesCurrent && snapshot.extConflict !== null)
+      throw new Error("Resolve the disk conflict before saving this folder");
+    const write = this.writes.then(async () => {
+      if (includesCurrent) {
+        if (!this.sameDocument(snapshot))
+          throw new Error("Document changed before saving");
+        if (this.state.viewing)
+          throw new Error(
+            "Return to the current document before saving its folder",
+          );
+        if (this.state.extConflict !== null)
+          throw new Error(
+            "Resolve the disk conflict before saving this folder",
+          );
+        await api.saveDocument(path, content, undefined, false);
+        if (this.sameDocument(snapshot))
+          this.saved(snapshot, content, false, path);
+      }
+      const commit = await api.saveFolder(folder);
+      const current = this.sameDocument(snapshot);
+      if (current && includesCurrent) this.saved(snapshot, content, true, path);
+      return { commit, current };
+    });
+    this.writes = write.catch(() => {});
+    return write;
   }
   acceptDisk(content: string) {
     this.update({
