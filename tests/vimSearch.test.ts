@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 import { getCM, Vim } from "@replit/codemirror-vim";
-import { createEditorState } from "../src/editor/setup";
+import { createEditorState, setEditorOption } from "../src/editor/setup";
 import { applyVimrc } from "../src/editor/vimrc";
 import { clearKeylog, saveKeylog } from "../src/editor/keylog";
 import { writeKeylog } from "../src/api";
@@ -15,9 +15,114 @@ vi.mock("../src/api", () => ({
 
 let view: EditorView;
 beforeEach(() => {
+  Vim.resetVimGlobalState_();
   clearKeylog();
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Range.prototype.getBoundingClientRect = () => new DOMRect();
+});
+
+it("searches after replacing a long document with a shorter one", () => {
+  const original = "word\n".repeat(100);
+  const callbacks = { onChange() {}, onSave() {} };
+  view = new EditorView({
+    parent: document.body,
+    state: createEditorState(original, callbacks, { vim: true }),
+  });
+  applyVimrc("test", "nnoremap n nzzzv\nnnoremap N Nzzzv");
+  const previous = getCM(view)!;
+  previous.setCursor({ line: 90, ch: 0 });
+  for (const key of ['"', "a", "y", "y"]) Vim.handleKey(previous, key, "user");
+  const bookmark = previous.setBookmark({ line: 0, ch: 0 });
+  Vim.handleKey(previous, "*", "user");
+  view.setState(
+    createEditorState("word one\nword two\nword three", callbacks, {
+      vim: true,
+    }),
+  );
+  expect(bookmark.find()).toBeNull();
+  expect(Vim.getRegisterController().getRegister("a").toString()).toBe(
+    "word\n",
+  );
+  const current = getCM(view)!;
+  Vim.handleKey(current, "/", "user");
+  const input = view.dom.querySelector("input")!;
+  input.value = "word";
+  input.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      keyCode: 13,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  expect(input.isConnected).toBe(false);
+  expect(current.getCursor()).toEqual({ line: 1, ch: 0 });
+  const next = new KeyboardEvent("keydown", {
+    key: "n",
+    keyCode: 78,
+    bubbles: true,
+    cancelable: true,
+  });
+  view.contentDOM.dispatchEvent(next);
+  expect(next.defaultPrevented).toBe(true);
+  expect(current.getCursor()).toEqual({ line: 2, ch: 0 });
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "N",
+      keyCode: 78,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  expect(current.getCursor()).toEqual({ line: 1, ch: 0 });
+});
+
+it("repeats the existing search after disabling Vim and shortening the document", () => {
+  view = new EditorView({
+    parent: document.body,
+    state: createEditorState(
+      "word\n".repeat(100),
+      { onChange() {}, onSave() {} },
+      { vim: true },
+    ),
+  });
+  const previous = getCM(view)!;
+  previous.setCursor({ line: 90, ch: 0 });
+  Vim.handleKey(previous, "*", "user");
+  setEditorOption(view, "vim", false);
+  view.dispatch({
+    changes: {
+      from: 0,
+      to: view.state.doc.length,
+      insert: "word one\nword two",
+    },
+    selection: { anchor: 0 },
+  });
+  setEditorOption(view, "vim", true);
+  const current = getCM(view)!;
+  expect(Vim.handleKey(current, "n", "user")).toBe(true);
+  expect(current.getCursor()).toEqual({ line: 1, ch: 0 });
+});
+
+it("keeps active bookmarks mapped through edits and ordinary option changes", () => {
+  view = new EditorView({
+    parent: document.body,
+    state: createEditorState(
+      "one\ntwo",
+      { onChange() {}, onSave() {} },
+      { vim: true },
+    ),
+  });
+  const cm = getCM(view)!;
+  const bookmark = cm.setBookmark({ line: 1, ch: 1 });
+  view.dispatch({ changes: { from: 0, insert: "prefix\n" } });
+  setEditorOption(view, "lineNumbers", true);
+  expect(bookmark.find()).toEqual({ line: 2, ch: 1 });
+  view.dispatch({
+    changes: { from: view.state.doc.line(3).from, to: view.state.doc.length },
+  });
+  expect(bookmark.find()).toBeNull();
 });
 afterEach(() => {
   view?.destroy();
