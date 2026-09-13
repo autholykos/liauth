@@ -430,12 +430,30 @@ const optionCompartments = {
 
 type ToggleOption = keyof typeof optionCompartments;
 
+// The global Vim jump list retains bookmarks from retired adapters. Their
+// offsets stop tracking edits, yet find() reads the view's current document.
+// clear() only unregisters a bookmark; null its offset so retained references
+// are also invalid after a document replacement or disabling Vim.
+const vimBookmarkCleanup = ViewPlugin.define((view) => {
+  const cm = getCM(view);
+  return {
+    destroy() {
+      if (!cm) return;
+      for (const bookmark of Object.values(cm.marks)) {
+        bookmark.offset = null;
+        bookmark.clear();
+      }
+    },
+  };
+});
+
 function optionExtension(name: ToggleOption, on: boolean) {
   if (!on) return [];
   switch (name) {
     case "vim":
       return [
         vim(),
+        vimBookmarkCleanup,
         strayTextGuard,
         EditorState.allowMultipleSelections.of(true),
       ];
