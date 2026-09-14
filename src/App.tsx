@@ -284,6 +284,7 @@ function App() {
   }, []);
 
   const updateCounts = useCallback(() => {
+    window.clearTimeout(countsTimerRef.current);
     const view = viewRef.current;
     if (!view) return;
     const text = view.state.doc.toString();
@@ -297,8 +298,6 @@ function App() {
     window.clearTimeout(countsTimerRef.current);
     countsTimerRef.current = window.setTimeout(updateCounts, 300);
   }, [updateCounts]);
-
-  useEffect(updateCounts, [filePath, updateCounts]);
 
   useEffect(() => {
     const name = fileName ?? "Untitled";
@@ -415,7 +414,7 @@ function App() {
       comparison: ViewedVersion | null = null,
     ) => {
       // Loads, reloads, history views, and branch switches all pass through
-      // here, so the Notes panel and navigator badge update in the same frame.
+      // here, so notes and document counts follow the installed text.
       setRephrase(null);
       const view = viewRef.current;
       if (!view) return;
@@ -445,13 +444,21 @@ function App() {
           },
         ),
       );
+      updateCounts();
       refreshNotes();
       displayHistoryDiff(view, comparison);
       sweepGhostCursorLayers(view);
       bindVimAutosave(view);
       loadingRef.current = false;
     },
-    [bindVimAutosave, displayHistoryDiff, flash, refreshNotes, scheduleCounts],
+    [
+      bindVimAutosave,
+      displayHistoryDiff,
+      flash,
+      refreshNotes,
+      scheduleCounts,
+      updateCounts,
+    ],
   );
 
   useEffect(() => {
@@ -1284,6 +1291,7 @@ function App() {
     viewRef.current = view;
     setEditorContent("");
     return () => {
+      window.clearTimeout(countsTimerRef.current);
       view.destroy();
       viewRef.current = null;
     };
