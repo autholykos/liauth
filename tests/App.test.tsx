@@ -78,6 +78,11 @@ const run = async (id: string) => {
   });
 };
 const editor = () => EditorView.findFromDOM(host.querySelector(".cm-editor")!)!;
+const expectCounts = (words: number, chars: number) => {
+  expect(host.querySelector(".statusbar")?.textContent).toContain(
+    `${words.toLocaleString()} words · ${chars.toLocaleString()} chars`,
+  );
+};
 const click = async (label: string) => {
   const button = [...host.querySelectorAll("button")].find(
     (b) => b.textContent?.trim() === label,
@@ -127,6 +132,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await act(async () => root.unmount());
+  vi.useRealTimers();
   host.remove();
   vi.unstubAllGlobals();
 });
@@ -193,6 +199,64 @@ it("clears document and history when opening a folder", async () => {
   expect(localStorage.getItem("liauth.lastFile")).toBeNull();
   expect(native.commands.some((c) => c.id === "panel-history")).toBe(false);
   expect(host.querySelector(".statusbar")?.textContent).not.toContain("main");
+  expectCounts(0, 0);
+});
+
+it("counts the newly opened chapter without requiring an edit", async () => {
+  for (const words of [1984, 3852, 1390]) {
+    const content = "word ".repeat(words).trim();
+    vi.mocked(openDialog).mockResolvedValue(`/novel/chapter-${words}.md`);
+    vi.mocked(api.readDocument).mockResolvedValue(content);
+    await run("open");
+    expect(editor().state.doc.toString()).toBe(content);
+    expectCounts(words, content.length);
+  }
+});
+
+it("refreshes counts when reloading the same file", async () => {
+  const content = "One two three four";
+  vi.mocked(api.readDocument).mockResolvedValue(content);
+  await run("reload");
+  expect(editor().state.doc.toString()).toBe(content);
+  expectCounts(4, content.length);
+});
+
+it("refreshes counts after typing and during a pending update", async () => {
+  expectCounts(2, "First {>>note<<}".length);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "New " } }),
+  );
+  await act(async () => {
+    vi.advanceTimersByTime(300);
+  });
+  expectCounts(3, "New First {>>note<<}".length);
+
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "Another " } }),
+  );
+  vi.mocked(openDialog).mockResolvedValue("/novel/next.md");
+  vi.mocked(api.readDocument).mockResolvedValue("Next chapter has four");
+  await run("open");
+  expectCounts(4, "Next chapter has four".length);
+  await act(async () => {
+    vi.advanceTimersByTime(300);
+  });
+  expectCounts(4, "Next chapter has four".length);
+});
+
+it("counts a historical version and the current text when returning", async () => {
+  const content = "Older text with five words";
+  vi.mocked(api.fileAtCommit).mockResolvedValue(content);
+  vi.mocked(api.historyDiff).mockResolvedValue([]);
+  await run("panel-history");
+  await act(async () =>
+    (host.querySelector(".commit-list li") as HTMLElement).click(),
+  );
+  expect(editor().state.doc.toString()).toBe(content);
+  expectCounts(5, content.length);
+  await click("Back to current");
+  expectCounts(2, "First {>>note<<}".length);
 });
 
 it("runs Save all from the folder menu, writes the buffer, and refreshes folder indicators", async () => {
@@ -339,6 +403,7 @@ it.each([false, true])(
       newFileWatch![1]({} as never);
     });
     expect(editor().state.doc.toString()).toBe("Externally edited chapter");
+    expectCounts(3, "Externally edited chapter".length);
   },
 );
 
