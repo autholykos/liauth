@@ -1,4 +1,5 @@
-import { EditorView, ViewPlugin } from "@codemirror/view";
+import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { Transaction } from "@codemirror/state";
 import { getCM } from "@replit/codemirror-vim";
 import { getVersion } from "@tauri-apps/api/app";
 import { writeKeylog } from "../api";
@@ -31,6 +32,7 @@ const DOM_EVENTS = [
   "focusin",
   "focusout",
   "mousedown",
+  "mouseup",
 ];
 
 interface KeylogEntry {
@@ -68,6 +70,13 @@ interface KeylogEntry {
   detail?: string;
   search?: string;
   reversed?: boolean;
+  button?: number;
+  buttons?: number;
+  clicks?: number;
+  x?: number;
+  y?: number;
+  scrollTop?: number;
+  scrollLeft?: number;
 }
 
 type Recorded = Omit<KeylogEntry, "t">;
@@ -140,6 +149,8 @@ function context(view: EditorView): Context {
     pending: vim?.status || undefined,
     sel,
     focus: view.hasFocus,
+    scrollTop: view.scrollDOM.scrollTop,
+    scrollLeft: view.scrollDOM.scrollLeft,
     cmComposing: view.composing || undefined,
     search: clip(vim?.searchState_?.getQuery()?.source),
     reversed: vim?.searchState_?.isReversed() || undefined,
@@ -158,7 +169,7 @@ function layerCensus(view: EditorView): string {
   return `layers=${layers.length} vim=${vim} cursors=${cursors} ranges=${ranges}`;
 }
 
-function modifiers(e: KeyboardEvent): string | undefined {
+function modifiers(e: KeyboardEvent | MouseEvent): string | undefined {
   const mods =
     (e.ctrlKey ? "C" : "") +
     (e.altKey ? "A" : "") +
@@ -176,6 +187,13 @@ function describeEvent(e: Event, view: EditorView): Recorded {
     specifics.mods = modifiers(e);
     specifics.repeat = e.repeat || undefined;
     specifics.composing = e.isComposing || undefined;
+  } else if (e instanceof MouseEvent) {
+    specifics.button = e.button;
+    specifics.buttons = e.buttons;
+    specifics.clicks = e.detail;
+    specifics.x = e.clientX;
+    specifics.y = e.clientY;
+    specifics.mods = modifiers(e);
   } else if (e instanceof InputEvent) {
     specifics.inputType = e.inputType;
     specifics.data = clip(e.data);
@@ -239,11 +257,20 @@ export const keylogRecorder = ViewPlugin.define((view) => {
     layers: layerCensus(view),
   });
   return {
-    update() {
+    update(update: ViewUpdate) {
       const cm = getCM(view);
       if (cm !== hooked) {
         hooked = cm;
         hookVim(view);
+      }
+      if (update.selectionSet) {
+        recordKeylog({
+          type: "editor:selection",
+          ...context(view),
+          detail: update.transactions
+            .map((tr) => tr.annotation(Transaction.userEvent) ?? "programmatic")
+            .join(","),
+        });
       }
     },
     destroy() {

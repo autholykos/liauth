@@ -233,6 +233,21 @@ function installFindPosVFix(): void {
 
 installFindPosVFix();
 
+// Run after CodeMirror flushes pending DOM edits, but before its first mouse
+// hit test. WebKit may scroll on focus despite preventScroll; focusing between
+// the two hit tests makes one click look like a drag across different lines.
+const focusBeforePointerSelection = EditorView.mouseSelectionStyle.of(
+  (view, event) => {
+    if (event.button === 0 && !view.hasFocus) {
+      const { scrollTop, scrollLeft } = view.scrollDOM;
+      view.focus();
+      view.scrollDOM.scrollTop = scrollTop;
+      view.scrollDOM.scrollLeft = scrollLeft;
+    }
+    return null; // Keep CodeMirror's click, drag, multi-click and modifier behavior.
+  },
+);
+
 /**
  * The content is a centred column narrower than the scroller, so a click
  * in the margins lands on the scroller itself; WebKit then focuses the
@@ -516,6 +531,7 @@ export function createEditorState(
       history(),
       drawSelection(),
       EditorView.lineWrapping,
+      focusBeforePointerSelection,
       marginClick,
       placeholder("Start writing…"),
       markdown({ base: markdownLanguage }),

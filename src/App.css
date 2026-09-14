@@ -771,6 +771,11 @@ button.wide {
   padding: 2.2cm 2cm 5cm;
 }
 
+/* The drawn selection must let clicks reach the text beneath it. */
+.editor-wrap .cm-selectionLayer {
+  pointer-events: none;
+}
+
 /* Vim visual mode uses CodeMirror's drawn selection layer. In page layout,
    the paper background on .cm-content otherwise paints over that layer. */
 [data-page="1"]
