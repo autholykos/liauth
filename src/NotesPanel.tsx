@@ -40,9 +40,15 @@ export function NotesPanel({
       </button>
       {notes.length === 0 ? (
         <p className="muted">
-          No notes. Select text and press ⌘⇧M to annotate it or ⌘⇧U to suggest a
-          rewording; both are stored as CriticMarkup in the document and removed
-          from PDF export.
+          No notes.
+          {!readOnly ? (
+            <>
+              {" "}
+              Select text and press ⌘⇧M to annotate it or ⌘⇧U to suggest a
+              rewording; both are stored as CriticMarkup in the document and
+              removed from PDF export.
+            </>
+          ) : null}
         </p>
       ) : null}
       <ul className="note-list">

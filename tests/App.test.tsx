@@ -13,6 +13,8 @@ import {
 import { watch } from "@tauri-apps/plugin-fs";
 import type { AppCommand } from "../src/commands";
 import { showNavigatorFolderMenu } from "../src/menu";
+import { wrappedMarkdown } from "./fixtures/wrappedMarkdown";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 const native = vi.hoisted(() => ({
   commands: [] as AppCommand[],
@@ -44,6 +46,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   watch: vi.fn().mockResolvedValue(() => {}),
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
@@ -176,6 +181,150 @@ it("returns keyboard focus to the editor when closing the command palette", asyn
   expect(editor().hasFocus).toBe(true);
 });
 
+it("renders a read-only Markdown preview and preserves the editable document and Undo", async () => {
+  const source =
+    "First line\ncontinues here.\n\nForced break  \nstays separate.\n\n```text\ncode one\ncode two\n```\n\n| Name | Value |\n| --- | --- |\n| a | b |\n\n- one\n- two";
+  vi.mocked(api.readDocument).mockResolvedValue(source);
+  await run("reload");
+  const view = editor();
+  await act(async () =>
+    view.dispatch({
+      changes: { from: 0, insert: "Edited " },
+      selection: { anchor: 7 },
+    }),
+  );
+  const edited = view.state.doc.toString();
+  await run("toggle-markdown-preview");
+  await act(async () => {
+    await new Promise(requestAnimationFrame);
+  });
+  const preview = host.querySelector(".markdown-preview-screen")!;
+  const paragraphs = preview.querySelectorAll("p");
+  expect(paragraphs[0].textContent?.replace(/\s+/g, " ")).toBe(
+    "Edited First line continues here.",
+  );
+  expect(paragraphs[0].querySelector("br")).toBeNull();
+  expect(paragraphs[1].querySelector("br")).not.toBeNull();
+  expect(preview.querySelector("pre code")?.textContent).toBe(
+    "code one\ncode two\n",
+  );
+  expect(preview.querySelectorAll("table tr")).toHaveLength(2);
+  expect(preview.querySelectorAll("ul li")).toHaveLength(2);
+  expect(host.querySelector(".editor-wrap")?.hasAttribute("inert")).toBe(true);
+  expect(document.activeElement).toBe(
+    host.querySelector(".markdown-preview-scroll"),
+  );
+  for (const id of ["bold", "italic", "insert-note", "insert-suggestion"]) {
+    expect(native.commands.find((command) => command.id === id)?.enabled).toBe(
+      false,
+    );
+    await run(id);
+  }
+  expect(view.state.doc.toString()).toBe(edited);
+  await click("Back to editor");
+  await act(async () => {
+    await new Promise(requestAnimationFrame);
+  });
+  expect(host.querySelector(".markdown-preview-screen")).toBeNull();
+  expect(editor()).toBe(view);
+  expect(view.state.selection.main.head).toBe(7);
+  expect(document.activeElement).toBe(view.contentDOM);
+  await act(async () => {
+    expect(undo(view)).toBe(true);
+  });
+  expect(view.state.doc.toString()).toBe(source);
+});
+
+it("switches between Markdown and novel previews without overlapping modes", async () => {
+  await run("toggle-markdown-preview");
+  await run("toggle-novel-proof");
+  expect(host.querySelector(".markdown-preview-screen")).toBeNull();
+  expect(host.querySelector(".novel-proof-screen")).not.toBeNull();
+  expect(
+    native.commands.find((command) => command.id === "toggle-markdown-preview")
+      ?.checked,
+  ).toBe(false);
+  expect(
+    native.commands.find((command) => command.id === "toggle-novel-proof")
+      ?.checked,
+  ).toBe(true);
+  await run("toggle-markdown-preview");
+  expect(host.querySelector(".novel-proof-screen")).toBeNull();
+  expect(host.querySelector(".markdown-preview-screen")).not.toBeNull();
+  await run("toggle-markdown-preview");
+  expect(host.querySelector(".proof-hidden")).toBeNull();
+});
+
+it("refreshes Markdown preview when loading another file or receiving disk changes", async () => {
+  await run("toggle-markdown-preview");
+  vi.mocked(openDialog).mockResolvedValue("/novel/next.md");
+  vi.mocked(api.readDocument).mockResolvedValue(
+    "New file\nwith soft wrapping.",
+  );
+  await run("open");
+  expect(host.querySelector(".markdown-preview-screen")?.textContent).toContain(
+    "New file\nwith soft wrapping.",
+  );
+  vi.mocked(api.readDocument).mockResolvedValue("Updated on disk.");
+  await act(async () => {
+    vi.mocked(watch).mock.calls.at(-1)![1]({} as never);
+  });
+  expect(host.querySelector(".markdown-preview-screen")?.textContent).toContain(
+    "Updated on disk.",
+  );
+  expect(host.querySelector(".proof-hidden")).not.toBeNull();
+});
+
+it("disables note edits in preview and returns to the editor when navigating to a note", async () => {
+  await run("panel-notes");
+  await run("toggle-markdown-preview");
+  const dismiss = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Dismiss",
+  )!;
+  expect(dismiss.disabled).toBe(true);
+  await act(async () =>
+    (host.querySelector(".note-list li") as HTMLElement).click(),
+  );
+  expect(host.querySelector(".proof-hidden")).toBeNull();
+  expect(dismiss.disabled).toBe(false);
+});
+
+it("opens preview web links externally without navigating away from the document", async () => {
+  vi.mocked(api.readDocument).mockResolvedValue(
+    "[Documentation](https://example.com/docs)",
+  );
+  await run("reload");
+  await run("toggle-markdown-preview");
+  const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+  await act(async () => {
+    host.querySelector(".markdown-preview-screen a")!.dispatchEvent(event);
+  });
+  expect(event.defaultPrevented).toBe(true);
+  expect(openUrl).toHaveBeenCalledWith("https://example.com/docs");
+  expect(editor().state.doc.toString()).toBe(
+    "[Documentation](https://example.com/docs)",
+  );
+});
+
+it("adapts a wrapped document and remembers the manual layout override across files", async () => {
+  const doc = wrappedMarkdown();
+  vi.mocked(api.readDocument).mockResolvedValue(doc);
+  await run("reload");
+  expect(editor().dom.classList.contains("cm-adaptive-layout")).toBe(true);
+  expect(editor().state.readOnly).toBe(false);
+  await run("toggle-adaptive-layout");
+  expect(localStorage.getItem("liauth.adaptiveLayout")).toBe("0");
+  expect(editor().dom.classList.contains("cm-adaptive-layout")).toBe(false);
+  await run("reload");
+  expect(editor().dom.classList.contains("cm-adaptive-layout")).toBe(false);
+  expect(editor().state.doc.toString()).toBe(doc);
+  await run("toggle-adaptive-layout");
+  expect(editor().dom.classList.contains("cm-adaptive-layout")).toBe(true);
+  vi.mocked(api.readDocument).mockResolvedValue("Normal prose.");
+  await run("reload");
+  expect(editor().dom.classList.contains("cm-adaptive-layout")).toBe(false);
+});
+
 it("keeps the Vim leave-insert autosave connected after enabling Vim", async () => {
   await run("toggle-vim");
   await act(async () => {
@@ -305,6 +454,7 @@ it("runs Save all from the folder menu, writes the buffer, and refreshes folder 
 });
 
 it("shows folder groups for global search and opens a match", async () => {
+  await run("toggle-markdown-preview");
   vi.mocked(api.searchProjectFiles).mockResolvedValue({
     matches: [
       {
@@ -351,6 +501,7 @@ it("shows folder groups for global search and opens a match", async () => {
     ).click(),
   );
   expect(api.readDocument).toHaveBeenCalledWith("/novel/part/second.md");
+  expect(host.querySelector(".proof-hidden")).toBeNull();
 });
 
 it.each([false, true])(

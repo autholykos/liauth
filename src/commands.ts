@@ -19,7 +19,10 @@ export interface CommandSnapshot {
   lineNumbers: boolean;
   spellcheck: boolean;
   pageLayout: boolean;
+  adaptiveLayout: boolean;
   novelProof: boolean;
+  markdownPreview: boolean;
+  readOnly: boolean;
   room: boolean;
   navOpen: boolean;
   showHiddenFiles: boolean;
@@ -37,6 +40,7 @@ interface CommandDefinition {
   checked?: boolean;
   palette?: boolean;
   visible?: boolean;
+  enabled?: boolean;
   fallback?: boolean;
 }
 
@@ -57,16 +61,28 @@ const definitions = (s: CommandSnapshot) =>
       accelerator: "CmdOrCtrl+Shift+E",
     },
     { id: "check-updates", title: "Check for Updates…" },
-    { id: "bold", title: "Bold", accelerator: "CmdOrCtrl+B" },
-    { id: "italic", title: "Italic", accelerator: "CmdOrCtrl+I" },
+    {
+      id: "bold",
+      title: "Bold",
+      accelerator: "CmdOrCtrl+B",
+      enabled: !s.readOnly,
+    },
+    {
+      id: "italic",
+      title: "Italic",
+      accelerator: "CmdOrCtrl+I",
+      enabled: !s.readOnly,
+    },
     {
       id: "insert-note",
       title: "Insert Note",
+      enabled: !s.readOnly,
       accelerator: "CmdOrCtrl+Shift+M",
     },
     {
       id: "insert-suggestion",
       title: "Insert Suggestion",
+      enabled: !s.readOnly,
       accelerator: "CmdOrCtrl+Shift+U",
     },
     {
@@ -107,6 +123,20 @@ const definitions = (s: CommandSnapshot) =>
       menuTitle: "Page Layout",
       checked: s.pageLayout,
       accelerator: "CmdOrCtrl+Shift+P",
+    },
+    {
+      id: "toggle-adaptive-layout",
+      title: s.adaptiveLayout
+        ? "Disable Adaptive Layout"
+        : "Enable Adaptive Layout",
+      menuTitle: "Adaptive Layout",
+      checked: s.adaptiveLayout,
+    },
+    {
+      id: "toggle-markdown-preview",
+      title: s.markdownPreview ? "Exit Markdown Preview" : "Markdown Preview",
+      menuTitle: "Markdown Preview",
+      checked: s.markdownPreview,
     },
     {
       id: "toggle-novel-proof",
@@ -235,7 +265,7 @@ export function createCommands(
       .map((c) => ({
         ...c,
         shortcut: shortcutLabel(c.accelerator),
-        run: actions[c.id as CommandId],
+        run: c.enabled === false ? () => {} : actions[c.id as CommandId],
       })),
     ...THEMES.map((t) => ({
       id: `theme:${t.id}`,

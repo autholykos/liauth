@@ -5,6 +5,7 @@ import { createEditorState, setEditorOption } from "../src/editor/setup";
 import { applyVimrc } from "../src/editor/vimrc";
 import { clearKeylog, saveKeylog } from "../src/editor/keylog";
 import { writeKeylog } from "../src/api";
+import { wrappedMarkdown } from "./fixtures/wrappedMarkdown";
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("test"),
@@ -76,6 +77,55 @@ it("searches after replacing a long document with a shorter one", () => {
     }),
   );
   expect(current.getCursor()).toEqual({ line: 1, ch: 0 });
+});
+
+it("keeps search and n/N working across adaptive layout changes", () => {
+  const doc = wrappedMarkdown();
+  view = new EditorView({
+    parent: document.body,
+    state: createEditorState(
+      doc,
+      { onChange() {}, onSave() {} },
+      { vim: true },
+    ),
+  });
+  expect(view.dom.classList.contains("cm-adaptive-layout")).toBe(true);
+  Vim.handleKey(getCM(view)!, "/", "user");
+  const input = view.dom.querySelector("input")!;
+  input.value = "service";
+  input.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      keyCode: 13,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  const first = doc.indexOf("service");
+  const second = doc.indexOf("service", first + 1);
+  expect(view.state.selection.main.head).toBe(first);
+  setEditorOption(view, "adaptiveLayout", false);
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "n",
+      keyCode: 78,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  expect(view.state.selection.main.head).toBe(second);
+  setEditorOption(view, "adaptiveLayout", true);
+  view.contentDOM.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "N",
+      keyCode: 78,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  expect(view.state.selection.main.head).toBe(first);
+  expect(view.state.doc.toString()).toBe(doc);
 });
 
 it("repeats the existing search after disabling Vim and shortening the document", () => {

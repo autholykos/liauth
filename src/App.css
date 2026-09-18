@@ -93,7 +93,9 @@
 
 /* Light-on-dark text smears bolder on macOS without this. */
 [data-theme="dark"] .cm-editor,
-[data-theme="room"] .cm-editor {
+[data-theme="room"] .cm-editor,
+[data-theme="dark"] .markdown-preview-screen,
+[data-theme="room"] .markdown-preview-screen {
   -webkit-font-smoothing: antialiased;
 }
 
@@ -693,9 +695,10 @@ button.wide {
   display: none;
 }
 
-/* ---------- novel proof ---------- */
+/* ---------- reading views ---------- */
 
-.novel-proof-scroll {
+.novel-proof-scroll,
+.markdown-preview-scroll {
   flex: 1;
   min-width: 0;
   overflow: auto;
@@ -703,7 +706,8 @@ button.wide {
   background: color-mix(in srgb, var(--c-text) 7%, var(--c-bg));
 }
 
-.novel-proof-screen {
+.novel-proof-screen,
+.markdown-preview-screen {
   width: min(21cm, 100%);
   min-height: 29.7cm;
   margin: 0 auto;
@@ -717,6 +721,75 @@ button.wide {
   color: var(--c-text);
   font-family: var(--font-prose);
   font-size: calc(var(--editor-base) * var(--editor-zoom));
+}
+
+.markdown-preview-screen {
+  width: min(88ch, 100%);
+  min-height: 100%;
+  padding: clamp(20px, 4vw, 56px);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.markdown-preview-screen p {
+  margin: 0 0 1em;
+}
+
+.markdown-preview-screen a {
+  color: var(--c-accent);
+}
+
+.markdown-preview-screen h1,
+.markdown-preview-screen h2,
+.markdown-preview-screen h3 {
+  line-height: 1.25;
+  margin-block: 1.2em 0.5em;
+}
+
+.markdown-preview-screen > :first-child {
+  margin-top: 0;
+}
+
+.markdown-preview-screen code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--c-code-bg);
+  padding: 0.1em 0.25em;
+  border-radius: 3px;
+}
+
+.markdown-preview-screen pre {
+  white-space: pre;
+  overflow-x: auto;
+  background: var(--c-code-bg);
+  padding: 1em;
+}
+
+.markdown-preview-screen pre code {
+  padding: 0;
+}
+
+.markdown-preview-screen table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-block: 1em;
+}
+
+.markdown-preview-screen th,
+.markdown-preview-screen td {
+  border: 1px solid var(--c-border);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+
+.markdown-preview-screen blockquote {
+  border-left: 3px solid var(--c-border);
+  margin-left: 0;
+  padding-left: 1em;
+}
+
+.markdown-preview-screen img {
+  max-width: 100%;
 }
 
 .novel-proof {
@@ -769,6 +842,22 @@ button.wide {
     0 1px 3px rgb(0 0 0 / 0.1),
     0 8px 28px rgb(0 0 0 / 0.12);
   padding: 2.2cm 2cm 5cm;
+}
+
+/* Pre-wrapped documents keep each source line on one visual line. Intrinsic
+   sizing follows the actual font; narrow windows scroll without shrinking it. */
+.editor-wrap .cm-editor.cm-adaptive-layout .cm-content,
+.app.room .editor-wrap .cm-editor.cm-adaptive-layout .cm-content,
+[data-page="1"]
+  .app:not(.room)
+  .editor-wrap
+  .cm-editor.cm-adaptive-layout
+  .cm-content {
+  width: max-content;
+  min-width: calc(var(--wrapped-width) + 64px);
+  max-width: none;
+  flex-grow: 0;
+  padding-inline: 32px;
 }
 
 /* The drawn selection must let clicks reach the text beneath it. */
