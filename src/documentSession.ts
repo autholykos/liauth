@@ -63,8 +63,12 @@ export class DocumentSession {
     );
   }
 
-  async open(path: string): Promise<string | null> {
-    const request = ++this.openRequest;
+  /** Reserve the open before asynchronous probing or autosaving begins. */
+  beginOpen = () => ++this.openRequest;
+  isOpenRequest = (request: number) => request === this.openRequest;
+
+  async open(path: string, request = this.beginOpen()): Promise<string | null> {
+    if (!this.isOpenRequest(request)) return null;
     const previous = this.state;
     const content = await api.readDocument(path);
     if (request !== this.openRequest || !this.isCurrent(previous)) return null;
@@ -179,7 +183,10 @@ export class DocumentSession {
         if (this.sameDocument(snapshot))
           this.saved(snapshot, content, false, path);
       }
-      const commit = await api.saveFolder(folder);
+      const commit = await api.saveFolder(
+        folder,
+        includesCurrent ? path : undefined,
+      );
       const current = this.sameDocument(snapshot);
       if (current && includesCurrent) this.saved(snapshot, content, true, path);
       return { commit, current };

@@ -120,7 +120,7 @@ export function FileNavigator({
         <p className="muted">Open a document to list its project.</p>
       ) : null}
       {project?.truncated ? (
-        <p className="muted">Showing first 500 markdown files.</p>
+        <p className="muted">Showing first 500 documents.</p>
       ) : null}
       <ul className="nav-list">{entries(tree, 0)}</ul>
     </aside>
