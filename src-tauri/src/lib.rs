@@ -561,7 +561,7 @@ mod tests {
             ("code.py", "# Code\nneedle = 1"),
             ("settings.json", "{\"needle\":1}"),
             ("binary.md", "needle\0binary"),
-            (".private.custom", "# Hidden\nneedle"),
+            (".private.md", "# Hidden\nneedle"),
         ] {
             std::fs::write(dir.path().join(name), content).unwrap();
         }
@@ -600,7 +600,7 @@ mod tests {
             .unwrap()
             .files
             .iter()
-            .any(|file| file.rel == ".private.custom"));
+            .any(|file| file.rel == ".private.md"));
     }
 
     #[test]

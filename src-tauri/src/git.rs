@@ -1924,6 +1924,8 @@ mod tests {
             fs::write(dir.path().join("code.py"), "# Example\nx = 1").unwrap();
             fs::write(dir.path().join(".gitignore"), "# Generated files\n").unwrap();
             fs::write(dir.path().join(".env.local"), "# Environment\nKEY=value\n").unwrap();
+            fs::write(dir.path().join(".envrc"), "# Environment\nexport KEY=value\n").unwrap();
+            fs::write(dir.path().join("prod.env"), "# Environment\nKEY=value\n").unwrap();
             fs::write(dir.path().join("binary.md"), b"text\0binary").unwrap();
             save_folder(p(dir.path()), None).unwrap().unwrap();
             fs::remove_file(dir.path().join("chapter.custom")).unwrap();
@@ -1948,6 +1950,8 @@ mod tests {
                 "binary.md",
                 ".gitignore",
                 ".env.local",
+                ".envrc",
+                "prod.env",
             ] {
                 assert!(tree.get_path(Path::new(excluded)).is_err(), "{excluded}");
             }
