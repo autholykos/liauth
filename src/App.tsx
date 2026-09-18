@@ -787,9 +787,9 @@ function App() {
   }, [flash]);
 
   const loadFile = useCallback(
-    async (path: string) => {
+    async (path: string, request?: number) => {
       try {
-        const content = await session.open(path);
+        const content = await session.open(path, request);
         if (content === null) return false;
         const snapshot = session.getSnapshot();
         setEditorContent(content);
@@ -841,15 +841,17 @@ function App() {
   );
 
   const openPath = useCallback(
-    async (path: string) => {
+    async (path: string, request = session.beginOpen()) => {
+      if (!session.isOpenRequest(request)) return false;
       if (!(await leaveCurrentDocument("Open file"))) return false;
-      if (!(await loadFile(path))) return false;
+      if (!session.isOpenRequest(request)) return false;
+      if (!(await loadFile(path, request))) return false;
       // Opening is a deliberate switch to this document: keys should reach
       // it at once rather than the sidebar item or body that was clicked.
       viewRef.current?.focus();
       return true;
     },
-    [leaveCurrentDocument, loadFile],
+    [session, leaveCurrentDocument, loadFile],
   );
 
   const openWorkspaceSearchMatch = useCallback(
@@ -909,8 +911,7 @@ function App() {
     let path = start.filePath;
     if (!path) {
       path = await saveDialog({
-        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-        defaultPath: openFolder ?? undefined,
+        defaultPath: openFolder ? `${openFolder}/Untitled.md` : "Untitled.md",
       });
       if (
         !path ||
@@ -956,8 +957,7 @@ function App() {
     const start = session.getSnapshot();
     if (!view || start.viewing) return;
     const path = await saveDialog({
-      filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-      defaultPath: start.filePath ? baseName(start.filePath) : "Untitled",
+      defaultPath: start.filePath ? baseName(start.filePath) : "Untitled.md",
     });
     if (!path || !session.sameDocument(start) || session.getSnapshot().viewing)
       return;
@@ -1193,8 +1193,7 @@ function App() {
           view.state.doc.length > 0
         ) {
           const path = await saveDialog({
-            filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
-            defaultPath: openFolder,
+            defaultPath: `${openFolder}/Untitled.md`,
           });
           if (
             !path ||
@@ -1338,10 +1337,7 @@ function App() {
   useEffect(() => {
     void (async () => {
       const pending = await api.takePendingOpen().catch(() => null);
-      if (pending) {
-        await loadFile(pending);
-        return;
-      }
+      if (pending && (await loadFile(pending))) return;
       const last = localStorage.getItem("liauth.lastFile");
       if (!last) return;
       try {
@@ -1366,17 +1362,37 @@ function App() {
     };
   }, [openPath]);
 
-  // Drop a markdown file anywhere on the window to open it.
+  // Drop a text file anywhere on the window. Probe contents rather than names,
+  // and discard a late probe if a newer drop or document change superseded it.
   useEffect(() => {
+    let active = true;
     const un = getCurrentWebview().onDragDropEvent((e) => {
-      if (e.payload.type !== "drop") return;
-      const path = e.payload.paths.find((p) => /\.(md|markdown|txt)$/i.test(p));
-      if (path) void openPath(path);
+      if (!active || e.payload.type !== "drop") return;
+      const current = session.beginOpen();
+      const document = session.getSnapshot();
+      void api
+        .findTextDocument(e.payload.paths)
+        .then((path) => {
+          if (
+            !active ||
+            !session.isOpenRequest(current) ||
+            !session.sameDocument(document) ||
+            session.getSnapshot().revision !== document.revision
+          )
+            return;
+          if (path) return openPath(path, current);
+          flash("No readable UTF-8 text file in the dropped items");
+        })
+        .catch((error) => {
+          if (active && session.isOpenRequest(current))
+            flash(`Could not open dropped file: ${error}`);
+        });
     });
     return () => {
+      active = false;
       void un.then((f) => f());
     };
-  }, [openPath]);
+  }, [openPath, session, flash]);
 
   // Closing/quitting: a named document autosaves to disk; an untitled
   // buffer with content asks before being discarded.
@@ -1433,7 +1449,7 @@ function App() {
   const doOpen = useCallback(async () => {
     const path = await openDialog({
       multiple: false,
-      filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
+      title: "Open a text or Markdown document",
     });
     if (typeof path === "string") await openPath(path);
   }, [openPath]);
@@ -1443,11 +1459,13 @@ function App() {
   // autosave — nothing exists on disk until the user names the file.
   const openFolderPath = useCallback(
     async (dir: string) => {
+      const request = session.beginOpen();
       if (!(await leaveCurrentDocument("Open folder"))) return;
+      if (!session.isOpenRequest(request)) return;
       closeDocument(dir);
       setNavOpen(true);
     },
-    [leaveCurrentDocument, closeDocument],
+    [session, leaveCurrentDocument, closeDocument],
   );
 
   const doOpenFolder = useCallback(async () => {
@@ -1702,8 +1720,8 @@ function App() {
     root.classList.toggle("novel-proof", novelProof);
     if (novelProof) root.lang = rendered.lang;
     else root.removeAttribute("lang");
-    document.title =
-      fileName?.replace(/\.(md|markdown|txt)$/i, "") ?? "document";
+    const extension = fileName.lastIndexOf(".");
+    document.title = extension > 0 ? fileName.slice(0, extension) : fileName;
     // Give the DOM a frame to flush #print-root before the native snapshot.
     requestAnimationFrame(() => {
       api.printPage().catch(() => window.print());

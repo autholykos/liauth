@@ -9,6 +9,15 @@ git engine for versioning and asynchronous review.
   markers (`#`, `**`, `` ` ``, `[]()`, `>`, `-`) render in place and reveal
   themselves only where your cursor is, Typora-style. Task-list checkboxes are
   clickable.
+- **Text document support** — Open, Save As, and file drops support UTF-8 text
+  regardless of extension, including extensionless files. The navigator and
+  project search recognize Markdown/text extensions, names such as `README`
+  and `LICENSE`, and Markdown structure near the start of unfamiliar files.
+  Common code/configuration formats stay out of automatic discovery; an
+  explicitly opened text file is included while current, respecting hidden-file
+  rules. Save all includes discovered documents and its current buffer, including
+  new formats and deletions, while preserving other staging. Binary/unsupported
+  input is rejected without replacing the current document.
 - **Adaptive layout** — documents with prose wrapped at a consistent source
   width use a wider editing column, keeping each source line on one visual line.
   Font and zoom stay at your chosen values; narrow windows scroll horizontally.
@@ -80,7 +89,7 @@ git engine for versioning and asynchronous review.
 | Editor | CodeMirror 6 + Lezer markdown | text stays the document model, so git diffs stay meaningful — `src/editor/` |
 | UI | React + TypeScript | toolbar, history/review panels — `src/App.tsx` |
 
-Documents stay **plain `.md` files on disk**; the repo lives in the document's
+Documents stay **plain UTF-8 text files on disk**; the repo lives in the document's
 folder. Files remain fully usable with any other tool, including plain `git`.
 
 Real-time co-editing is deliberately out of scope for v1; the document layer is

@@ -60,8 +60,11 @@ export const saveDocument = (
     commit,
   });
 
-export const saveFolder = (folderPath: string) =>
-  invoke<CommitInfo | null>("save_folder", { folderPath });
+export const saveFolder = (folderPath: string, currentFilePath?: string | null) =>
+  invoke<CommitInfo | null>("save_folder", {
+    folderPath,
+    currentFilePath: currentFilePath ?? null,
+  });
 
 /** Squash the commits after `base` (or after the last squash / pull). */
 export const squashRecentCommits = (filePath: string, base?: string) =>
@@ -154,6 +157,9 @@ export const writeKeylog = (content: string) =>
   invoke<string>("write_keylog", { content });
 
 export const takePendingOpen = () => invoke<string | null>("take_pending_open");
+
+export const findTextDocument = (paths: string[]) =>
+  invoke<string | null>("find_text_document", { paths });
 
 export interface EditPair {
   find: string;

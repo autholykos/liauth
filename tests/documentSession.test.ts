@@ -48,6 +48,18 @@ beforeEach(() => {
 });
 
 describe("document lifetime", () => {
+  it("reserves a newer open during probing before its target is known", async () => {
+    const session = new DocumentSession();
+    const old = deferred<string>();
+    vi.mocked(api.readDocument).mockReturnValueOnce(old.promise);
+    const older = session.open("/older.md");
+    const newer = session.beginOpen();
+    old.resolve("Older document");
+    expect(await older).toBeNull();
+    await session.open("/README", newer);
+    expect(session.getSnapshot().filePath).toBe("/README");
+  });
+
   it("shows the most recently requested historical version", async () => {
     const session = new DocumentSession();
     await session.open("/first.md");
@@ -189,7 +201,7 @@ describe("saving", () => {
     vi.mocked(api.saveFolder).mockReturnValueOnce(slow.promise);
     const save = session.saveFolder("/project/part", "changed");
     await vi.waitFor(() =>
-      expect(api.saveFolder).toHaveBeenCalledWith("/project/part"),
+      expect(api.saveFolder).toHaveBeenCalledWith("/project/part", "/project/part/chapter.md"),
     );
     expect(api.saveDocument).toHaveBeenCalledWith(
       "/project/part/chapter.md",
@@ -216,7 +228,7 @@ describe("saving", () => {
     session.edit();
     await session.saveFolder("/project/part", "changed");
     expect(api.saveDocument).not.toHaveBeenCalled();
-    expect(api.saveFolder).toHaveBeenCalledWith("/project/part");
+    expect(api.saveFolder).toHaveBeenCalledWith("/project/part", undefined);
     expect(session.getSnapshot().diskDirty).toBe(true);
   });
 

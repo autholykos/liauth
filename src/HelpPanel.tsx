@@ -42,13 +42,29 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
     {
       title: "Documents",
       search:
-        "documents plain markdown md files autosave disk save commit version buffer",
+        "documents plain markdown md text utf8 extension readme binary files open drop navigator autosave disk save commit version buffer",
       body: (
         <p>
-          Documents are plain <code>.md</code> files — usable with any other
+          Documents are plain UTF-8 text files — usable with any other
           tool. The buffer autosaves to disk when you switch apps (and when
           leaving vim insert mode). <kbd>⌘S</kbd> is more: it{" "}
           <em>commits a version</em>.
+        </p>
+      ),
+    },
+    {
+      title: "Opening text files",
+      search:
+        "open files readme license changelog extensions mdown mkd text utf8 binary navigator search save all",
+      body: (
+        <p>
+          Open and drag-and-drop accept text files with any extension or no
+          extension. The navigator recognizes Markdown/text formats, document
+          names such as <code>README</code>, and Markdown structure near the
+          start of unfamiliar files. Common source and configuration formats
+          appear when opened explicitly; hidden-file rules still apply.
+          Binary files and unsupported encodings are rejected while keeping
+          the current document. Save As preserves the name you choose.
         </p>
       ),
     },

@@ -1,12 +1,13 @@
 mod ai;
 mod config;
+mod document;
 mod git;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 /// File-open requests from the OS (Finder "Open with", double-click on an
-/// associated .md). Stored as well as emitted because the open event can
+/// associated document). Stored as well as emitted because the open event can
 /// arrive before the frontend has registered its listener.
 struct PendingOpen(Mutex<Option<String>>);
 
@@ -70,10 +71,11 @@ struct ProjectSearch {
 
 const PROJECT_SEARCH_LIMIT: usize = 250;
 
-fn is_markdown(p: &std::path::Path) -> bool {
-    p.extension()
-        .and_then(|x| x.to_str())
-        .is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "md" | "markdown" | "txt"))
+#[tauri::command]
+fn find_text_document(paths: Vec<String>) -> Option<String> {
+    paths
+        .into_iter()
+        .find(|path| document::probe_text(std::path::Path::new(path)).is_ok())
 }
 
 fn contains_block(text: &str, start: &str, end: &str) -> bool {
@@ -93,7 +95,7 @@ fn has_unresolved_notes(text: &str) -> bool {
         })
 }
 
-fn collect_markdown(
+fn collect_documents(
     dir: &std::path::Path,
     root: &std::path::Path,
     depth: usize,
@@ -127,14 +129,12 @@ fn collect_markdown(
             if p.join(".git").exists() {
                 continue;
             }
-            if collect_markdown(&p, root, depth + 1, show_hidden, out) {
+            if collect_documents(&p, root, depth + 1, show_hidden, out) {
                 return true;
             }
-        } else if is_markdown(&p) {
+        } else if let Some(content) = document::read_discovered(&p) {
             let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
-            let has_notes = std::fs::read_to_string(&p)
-                .map(|text| has_unresolved_notes(&text))
-                .unwrap_or(false);
+            let has_notes = has_unresolved_notes(&content);
             out.push(ProjectFile {
                 path: p.display().to_string(),
                 rel,
@@ -146,7 +146,7 @@ fn collect_markdown(
     false
 }
 
-/// Markdown files of the document's project, for the navigator. The
+/// Text documents of the current project, for the navigator. The
 /// project is the git repository containing the anchor (the same
 /// boundary versioning uses); without one, just the anchor's folder.
 /// The anchor may be a document path or a folder opened directly.
@@ -164,7 +164,29 @@ fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFil
         .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
         .unwrap_or_else(|| parent.to_path_buf());
     let mut files = Vec::new();
-    let truncated = collect_markdown(&root, &root, 0, show_hidden, &mut files);
+    let mut truncated = collect_documents(&root, &root, 0, show_hidden, &mut files);
+    // An explicitly opened text file remains reachable even when its format
+    // is not one we would discover automatically. Keep hidden/.git rules.
+    if let Ok(relative) = anchor.strip_prefix(&root) {
+        let visible = relative.components().all(|part| {
+            let name = part.as_os_str().to_string_lossy();
+            name != ".git" && (show_hidden || !name.starts_with('.'))
+        });
+        if visible && !files.iter().any(|file| file.path == file_path) {
+            if let Ok(content) = document::read_text(anchor) {
+                if files.len() == 500 {
+                    files.pop();
+                    truncated = true;
+                }
+                files.push(ProjectFile {
+                    path: file_path.clone(),
+                    rel: relative.display().to_string(),
+                    has_notes: has_unresolved_notes(&content),
+                    dirty: false,
+                });
+            }
+        }
+    }
     if let Some(repo) = &repo {
         for file in &mut files {
             file.dirty = repo
@@ -240,7 +262,7 @@ fn search_project_files(
         } else {
             None
         }
-        .or_else(|| std::fs::read_to_string(&file.path).ok());
+        .or_else(|| document::read_text(std::path::Path::new(&file.path)).ok());
         let Some(content) = content else {
             continue;
         };
@@ -492,6 +514,7 @@ pub fn run() {
             ai::rephrase_selection,
             squash_recent_commits,
             take_pending_open,
+            find_text_document,
             list_project_files,
             search_project_files,
             rename_project_file,
@@ -503,11 +526,15 @@ pub fn run() {
         .run(|app, event| {
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             if let tauri::RunEvent::Opened { urls } = event {
-                if let Some(path) = urls
+                let paths: Vec<_> = urls
                     .iter()
                     .filter_map(|u| u.to_file_path().ok())
                     .map(|p| p.display().to_string())
-                    .next()
+                    .collect();
+                // If every item is unsupported, forward the first one so the
+                // frontend can explain the rejection instead of silently ignoring it.
+                if let Some(path) =
+                    find_text_document(paths.clone()).or_else(|| paths.into_iter().next())
                 {
                     *app.state::<PendingOpen>().0.lock().unwrap() = Some(path.clone());
                     let _ = app.emit("open-file", path);
@@ -522,6 +549,74 @@ mod tests {
 
     fn p(path: &std::path::Path) -> String {
         path.display().to_string()
+    }
+
+    #[test]
+    fn discovers_and_searches_documents_without_requiring_md() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in [
+            ("README", "needle overview"),
+            ("chapter.MDOWN", "needle prose"),
+            ("chapter.custom", "# Chapter\nneedle {>>note<<}"),
+            ("code.py", "# Code\nneedle = 1"),
+            ("settings.json", "{\"needle\":1}"),
+            ("binary.md", "needle\0binary"),
+            (".private.custom", "# Hidden\nneedle"),
+        ] {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        let listing = list_project_files(p(dir.path()), false).unwrap();
+        assert_eq!(
+            listing
+                .files
+                .iter()
+                .map(|file| file.rel.as_str())
+                .collect::<Vec<_>>(),
+            ["README", "chapter.MDOWN", "chapter.custom"]
+        );
+        assert!(
+            listing
+                .files
+                .iter()
+                .find(|file| file.rel == "chapter.custom")
+                .unwrap()
+                .has_notes
+        );
+        let search =
+            search_project_files(p(dir.path()), "needle".into(), false, None, None).unwrap();
+        assert_eq!(search.matches.len(), 3);
+        let current = p(&dir.path().join("settings.json"));
+        let search = search_project_files(
+            current.clone(),
+            "unsaved".into(),
+            false,
+            Some(current.clone()),
+            Some("unsaved buffer".into()),
+        )
+        .unwrap();
+        assert_eq!(search.matches.len(), 1);
+        assert_eq!(search.matches[0].path, current);
+        assert!(list_project_files(p(dir.path()), true)
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.rel == ".private.custom"));
+    }
+
+    #[test]
+    fn drops_choose_text_by_content_instead_of_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("binary.md");
+        let document = dir.path().join("README");
+        std::fs::write(&binary, b"fake\0markdown").unwrap();
+        std::fs::write(&document, "# Real document").unwrap();
+        assert_eq!(
+            find_text_document(vec![p(dir.path()), p(&binary), p(&document)]),
+            Some(p(&document))
+        );
+        assert_eq!(find_text_document(vec![p(&binary)]), None);
+        assert_eq!(git::read_document(p(&document)).unwrap(), "# Real document");
+        assert!(git::read_document(p(&binary)).is_err());
     }
 
     #[test]

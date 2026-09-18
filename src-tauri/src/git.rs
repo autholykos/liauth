@@ -198,7 +198,7 @@ pub fn init_repo(file_path: String) -> Result<RepoInfo, String> {
 
 #[tauri::command]
 pub fn read_document(file_path: String) -> Result<String, String> {
-    fs::read_to_string(&file_path).map_err(|e| e.to_string())
+    crate::document::read_text(Path::new(&file_path))
 }
 
 /// Write the file and, when `commit` is set and it lives in a repository,
@@ -298,7 +298,10 @@ fn commit_tree(
 /// Commit every changed document under a folder, including descendants and
 /// removals, without rewriting closed files or capturing another folder's index.
 #[tauri::command]
-pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
+pub fn save_folder(
+    folder_path: String,
+    current_file_path: Option<String>,
+) -> Result<Option<CommitInfo>, String> {
     let folder = fs::canonicalize(&folder_path).map_err(|e| e.to_string())?;
     if !folder.is_dir() {
         return Err("folder no longer exists".to_string());
@@ -310,6 +313,14 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
     };
     let root = workdir(&repo).ok_or_else(|| "repository has no working directory".to_string())?;
     let relative = folder.strip_prefix(&root).map_err(|e| e.to_string())?;
+    let current = current_file_path.as_deref().and_then(|value| {
+        let path = Path::new(value);
+        let absolute = fs::canonicalize(path.parent()?)
+            .ok()?
+            .join(path.file_name()?);
+        absolute.strip_prefix(&root).ok().map(Path::to_path_buf)
+    });
+    let parent = head_commit(&repo)?.map(|head| head.id());
     let mut options = StatusOptions::new();
     options
         .include_untracked(true)
@@ -318,11 +329,16 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
         .renames_head_to_index(false)
         .renames_index_to_workdir(false);
     let paths = {
+        let index = repo.index().map_err(err)?;
+        let tree = parent
+            .map(|id| repo.find_commit(id).and_then(|commit| commit.tree()))
+            .transpose()
+            .map_err(err)?;
         let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
         let mut paths = Vec::new();
         for entry in statuses.iter() {
             let path = Path::new(entry.path().map_err(err)?);
-            if !path.starts_with(relative) || !crate::is_markdown(path) {
+            if !path.starts_with(relative) {
                 continue;
             }
             let absolute = root.join(path);
@@ -336,6 +352,24 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
             {
                 continue;
             }
+            let eligible = match fs::metadata(&absolute) {
+                Ok(_) if current.as_deref() == Some(path) => {
+                    crate::document::read_text(&absolute).is_ok()
+                }
+                Ok(_) => crate::document::read_discovered(&absolute).is_some(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    let id = index
+                        .get_path(path, 0)
+                        .map(|entry| entry.id)
+                        .or_else(|| tree.as_ref()?.get_path(path).ok().map(|entry| entry.id()));
+                    id.and_then(|id| repo.find_blob(id).ok())
+                        .is_some_and(|blob| crate::document::is_document(path, blob.content()))
+                }
+                Err(_) => false,
+            };
+            if !eligible {
+                continue;
+            }
             paths.push(path.to_path_buf());
         }
         paths
@@ -343,7 +377,6 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
     if paths.is_empty() && repo.state() != RepositoryState::Merge {
         return Ok(None);
     }
-    let parent = head_commit(&repo)?.map(|head| head.id());
     let mut index = repo.index().map_err(err)?;
     if index.has_conflicts() {
         return Err(
@@ -352,7 +385,25 @@ pub fn save_folder(folder_path: String) -> Result<Option<CommitInfo>, String> {
     }
     for path in &paths {
         match fs::symlink_metadata(root.join(path)) {
-            Ok(_) => index.add_path(path).map_err(err)?,
+            Ok(_) => {
+                index.add_path(path).map_err(err)?;
+                let entry = index
+                    .get_path(path, 0)
+                    .ok_or("File changed while saving folder")?;
+                let blob = repo.find_blob(entry.id).map_err(err)?;
+                let eligible =
+                    if current.as_deref() == Some(path.as_path()) || entry.mode == 0o120000 {
+                        crate::document::text(blob.content()).is_ok()
+                    } else {
+                        crate::document::is_document(path, blob.content())
+                    };
+                if !eligible {
+                    return Err(format!(
+                        "{} changed while saving the folder",
+                        path.display()
+                    ));
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if index.get_path(path, 0).is_some() {
                     index.remove_path(path).map_err(err)?;
@@ -1804,7 +1855,7 @@ mod tests {
         index.write().unwrap();
         let outside_staged = index.get_path(Path::new("other.md"), 0).unwrap().id;
 
-        let commit = save_folder(p(&folder)).unwrap().unwrap();
+        let commit = save_folder(p(&folder), None).unwrap().unwrap();
         let tree = repo
             .find_commit(Oid::from_str(&commit.id).unwrap())
             .unwrap()
@@ -1828,7 +1879,7 @@ mod tests {
                 .id,
             outside_staged
         );
-        assert!(save_folder(p(&folder)).unwrap().is_none());
+        assert!(save_folder(p(&folder), None).unwrap().is_none());
     }
 
     #[test]
@@ -1844,7 +1895,7 @@ mod tests {
         for i in 0..501 {
             fs::write(dir.path().join(format!("chapter-{i}.md")), "prose\n").unwrap();
         }
-        let commit = save_folder(p(dir.path())).unwrap().unwrap();
+        let commit = save_folder(p(dir.path()), None).unwrap().unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         let tree = repo
             .find_commit(Oid::from_str(&commit.id).unwrap())
@@ -1862,12 +1913,93 @@ mod tests {
     }
 
     #[test]
+    fn folder_save_handles_new_document_formats_and_deleted_content_detection() {
+        for staged_delete in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = Repository::init(dir.path()).unwrap();
+            fs::write(dir.path().join("README"), "overview").unwrap();
+            fs::write(dir.path().join("chapter.custom"), "# Chapter\n\nprose").unwrap();
+            fs::write(dir.path().join("draft.MDOWN"), "draft").unwrap();
+            fs::write(dir.path().join("settings.json"), "{}").unwrap();
+            fs::write(dir.path().join("code.py"), "# Example\nx = 1").unwrap();
+            fs::write(dir.path().join(".gitignore"), "# Generated files\n").unwrap();
+            fs::write(dir.path().join(".env.local"), "# Environment\nKEY=value\n").unwrap();
+            fs::write(dir.path().join("binary.md"), b"text\0binary").unwrap();
+            save_folder(p(dir.path()), None).unwrap().unwrap();
+            fs::remove_file(dir.path().join("chapter.custom")).unwrap();
+            if staged_delete {
+                let mut index = repo.index().unwrap();
+                index.remove_path(Path::new("chapter.custom")).unwrap();
+                index.write().unwrap();
+            }
+            fs::write(dir.path().join("README"), "updated").unwrap();
+            let commit = save_folder(p(dir.path()), None).unwrap().unwrap();
+            let tree = repo
+                .find_commit(Oid::from_str(&commit.id).unwrap())
+                .unwrap()
+                .tree()
+                .unwrap();
+            assert!(tree.get_path(Path::new("README")).is_ok());
+            assert!(tree.get_path(Path::new("draft.MDOWN")).is_ok());
+            for excluded in [
+                "chapter.custom",
+                "settings.json",
+                "code.py",
+                "binary.md",
+                ".gitignore",
+                ".env.local",
+            ] {
+                assert!(tree.get_path(Path::new(excluded)).is_err(), "{excluded}");
+            }
+        }
+    }
+
+    #[test]
+    fn folder_save_includes_the_explicit_open_file_but_not_other_code_or_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let folder = dir.path().join("docs");
+        fs::create_dir(&folder).unwrap();
+        let current = folder.join("chapter.custom");
+        fs::write(&current, "ordinary text without Markdown markers").unwrap();
+        fs::write(folder.join("config.json"), "{}").unwrap();
+        fs::write(dir.path().join("outside.json"), "{}").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("outside.json")).unwrap();
+        index.write().unwrap();
+        let staged = index.get_path(Path::new("outside.json"), 0).unwrap().id;
+        let commit = save_folder(p(&folder), Some(p(&current))).unwrap().unwrap();
+        let tree = repo
+            .find_commit(Oid::from_str(&commit.id).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(tree.get_path(Path::new("docs/chapter.custom")).is_ok());
+        assert!(tree.get_path(Path::new("docs/config.json")).is_err());
+        assert!(tree.get_path(Path::new("outside.json")).is_err());
+        assert_eq!(
+            repo.index()
+                .unwrap()
+                .get_path(Path::new("outside.json"), 0)
+                .unwrap()
+                .id,
+            staged
+        );
+        fs::write(dir.path().join("outside.json"), "changed").unwrap();
+        assert!(
+            save_folder(p(&folder), Some(p(&dir.path().join("outside.json"))))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn folder_save_does_not_create_a_repository() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("chapter.md"), "prose\n").unwrap();
-        assert!(save_folder(p(dir.path())).unwrap().is_none());
+        assert!(save_folder(p(dir.path()), None).unwrap().is_none());
         assert!(!dir.path().join(".git").exists());
-        assert!(save_folder(p(&dir.path().join("chapter.md"))).is_err());
+        assert!(save_folder(p(&dir.path().join("chapter.md")), None).is_err());
     }
 
     #[test]
@@ -1901,7 +2033,7 @@ mod tests {
             .map(|path| fs::read_to_string(path).unwrap())
             .collect();
         assert_eq!(repo.index().unwrap().conflicts().unwrap().count(), 2);
-        let error = save_folder(p(dir.path())).err().unwrap();
+        let error = save_folder(p(dir.path()), None).err().unwrap();
         assert!(error.contains("conflicted files"), "{error}");
         assert_eq!(repo.head().unwrap().target().unwrap(), head);
         assert_eq!(repo.state(), RepositoryState::Merge);
@@ -1936,7 +2068,7 @@ mod tests {
         index.add_path(Path::new("doc.md")).unwrap();
         index.write().unwrap();
         assert!(repo.statuses(None).unwrap().is_empty());
-        let saved = save_folder(p(dir.path())).unwrap().unwrap();
+        let saved = save_folder(p(dir.path()), None).unwrap().unwrap();
         let commit = repo.find_commit(Oid::from_str(&saved.id).unwrap()).unwrap();
         assert_eq!(commit.parent_count(), 2);
         assert_eq!(commit.parent_id(0).unwrap().to_string(), ours.id);

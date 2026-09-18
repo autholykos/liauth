@@ -19,6 +19,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 const native = vi.hoisted(() => ({
   commands: [] as AppCommand[],
   close: vi.fn(),
+  onDragDropEvent: vi.fn().mockResolvedValue(() => {}),
 }));
 vi.mock("../src/menu", () => ({
   buildAppMenu: vi.fn(async (commands) => {
@@ -38,7 +39,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({
-    onDragDropEvent: vi.fn().mockResolvedValue(() => {}),
+    onDragDropEvent: native.onDragDropEvent,
   }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -74,6 +75,7 @@ vi.mock("../src/api", () => ({
   historyDiff: vi.fn(),
   checkoutBranch: vi.fn(),
   draftNoteEdits: vi.fn(),
+  findTextDocument: vi.fn(),
 }));
 
 let root: Root;
@@ -121,6 +123,7 @@ beforeEach(async () => {
     file_dirty: false,
   });
   vi.mocked(api.takePendingOpen).mockResolvedValue(null);
+  vi.mocked(api.findTextDocument).mockResolvedValue(null);
   vi.mocked(api.readVimConfig).mockResolvedValue(null);
   vi.mocked(api.fileHistory).mockResolvedValue([
     { id: "1234567", summary: "First version", time: 1, author: "Writer" },
@@ -141,6 +144,199 @@ afterEach(async () => {
   vi.useRealTimers();
   host.remove();
   vi.unstubAllGlobals();
+});
+
+it.each(["README", "chapter.custom", "notes.MDOWN"])(
+  "opens %s as Markdown without an extension filter",
+  async (name) => {
+    const path = `/novel/${name}`;
+    vi.mocked(openDialog).mockResolvedValue(path);
+    vi.mocked(api.readDocument).mockResolvedValue("# Heading\n\n**Text**");
+    await run("open");
+    expect(
+      vi.mocked(openDialog).mock.calls.at(-1)![0]?.filters,
+    ).toBeUndefined();
+    expect(localStorage.getItem("liauth.lastFile")).toBe(path);
+    expect(editor().state.doc.toString()).toBe("# Heading\n\n**Text**");
+    expect(editor().dom.querySelector(".lp-heading")).not.toBeNull();
+  },
+);
+
+it("keeps the current document when content validation rejects an open", async () => {
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "Edited " } }),
+  );
+  const source = editor().state.doc.toString();
+  vi.mocked(openDialog).mockResolvedValue("/novel/binary.md");
+  vi.mocked(api.readDocument).mockRejectedValueOnce(
+    new Error("The file is not valid UTF-8 text"),
+  );
+  await run("open");
+  expect(editor().state.doc.toString()).toBe(source);
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/first.md");
+  expect(host.querySelector(".status-toast")?.textContent).toContain("UTF-8");
+});
+
+it("uses content probing for drops, including extensionless documents", async () => {
+  const paths = ["/novel/picture.png", "/novel/README"];
+  vi.mocked(api.findTextDocument).mockResolvedValue("/novel/README");
+  await act(async () => {
+    native.onDragDropEvent.mock.calls.at(-1)![0]({
+      payload: { type: "drop", paths },
+    });
+  });
+  expect(api.findTextDocument).toHaveBeenCalledWith(paths);
+  expect(api.readDocument).toHaveBeenCalledWith("/novel/README");
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/README");
+});
+
+it("ignores a late drop probe after the user edits the current document", async () => {
+  let finish!: (path: string) => void;
+  vi.mocked(api.findTextDocument).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await act(async () => {
+    native.onDragDropEvent.mock.calls.at(-1)![0]({
+      payload: { type: "drop", paths: ["/novel/README"] },
+    });
+  });
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "New " } }),
+  );
+  await act(async () => {
+    finish("/novel/README");
+  });
+  expect(api.readDocument).not.toHaveBeenCalledWith("/novel/README");
+  expect(editor().state.doc.toString()).toBe("New First {>>note<<}");
+});
+
+it("lets the latest drop win when probes finish out of order", async () => {
+  let finish!: (path: string) => void;
+  vi.mocked(api.findTextDocument)
+    .mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    )
+    .mockResolvedValueOnce("/novel/latest.custom");
+  const drop = native.onDragDropEvent.mock.calls.at(-1)![0];
+  await act(async () => {
+    drop({ payload: { type: "drop", paths: ["/novel/older"] } });
+  });
+  await act(async () => {
+    drop({ payload: { type: "drop", paths: ["/novel/latest.custom"] } });
+  });
+  await act(async () => {
+    finish("/novel/older");
+  });
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/latest.custom");
+  expect(api.readDocument).not.toHaveBeenCalledWith("/novel/older");
+});
+
+it("does not cancel a pending drop just because the current text was autosaved", async () => {
+  await act(async () =>
+    editor().dispatch({ changes: { from: 0, insert: "New " } }),
+  );
+  let finish!: (path: string) => void;
+  vi.mocked(api.findTextDocument).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await act(async () => {
+    native.onDragDropEvent.mock.calls.at(-1)![0]({
+      payload: { type: "drop", paths: ["/novel/README"] },
+    });
+  });
+  await act(async () => {
+    window.dispatchEvent(new Event("blur"));
+  });
+  expect(api.saveDocument).toHaveBeenCalledWith(
+    "/novel/first.md",
+    "New First {>>note<<}",
+    undefined,
+    false,
+  );
+  await act(async () => {
+    finish("/novel/README");
+  });
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/README");
+});
+
+it("does not let an older drop supersede a newer file-open request", async () => {
+  let finishProbe!: (path: string) => void;
+  let finishRead!: (text: string) => void;
+  vi.mocked(api.findTextDocument).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishProbe = resolve;
+    }),
+  );
+  await act(async () => {
+    native.onDragDropEvent.mock.calls.at(-1)![0]({
+      payload: { type: "drop", paths: ["/novel/older"] },
+    });
+  });
+  vi.mocked(openDialog).mockResolvedValue("/novel/newer");
+  vi.mocked(api.readDocument).mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishRead = resolve;
+    }),
+  );
+  await act(async () => {
+    native.commands.find((command) => command.id === "open")!.run();
+  });
+  expect(api.readDocument).toHaveBeenCalledWith("/novel/newer");
+  await act(async () => {
+    finishProbe("/novel/older");
+  });
+  expect(api.readDocument).not.toHaveBeenCalledWith("/novel/older");
+  await act(async () => {
+    finishRead("Newer document");
+  });
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/newer");
+});
+
+it("reports an unsupported drop without replacing the document", async () => {
+  const source = editor().state.doc.toString();
+  await act(async () => {
+    native.onDragDropEvent.mock.calls.at(-1)![0]({
+      payload: { type: "drop", paths: ["/novel/binary.md"] },
+    });
+  });
+  expect(editor().state.doc.toString()).toBe(source);
+  expect(api.readDocument).not.toHaveBeenCalledWith("/novel/binary.md");
+  expect(host.querySelector(".status-toast")?.textContent).toContain(
+    "No readable UTF-8 text file",
+  );
+});
+
+it("allows Save As to preserve an extensionless name", async () => {
+  vi.mocked(saveDialog).mockResolvedValue("/novel/README");
+  await run("save-as");
+  expect(vi.mocked(saveDialog).mock.calls.at(-1)![0]?.filters).toBeUndefined();
+  expect(api.saveDocument).toHaveBeenCalledWith(
+    "/novel/README",
+    "First {>>note<<}",
+    undefined,
+    true,
+  );
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/README");
+});
+
+it("reopens the last document when an OS startup file is rejected", async () => {
+  await act(async () => root.unmount());
+  vi.mocked(api.takePendingOpen).mockResolvedValue("/novel/binary.md");
+  vi.mocked(api.readDocument).mockImplementation(async (path) => {
+    if (path === "/novel/binary.md")
+      throw new Error("The file is not valid UTF-8 text");
+    return "Last document";
+  });
+  root = createRoot(host);
+  await act(async () => root.render(<App />));
+  expect(editor().state.doc.toString()).toBe("Last document");
+  expect(localStorage.getItem("liauth.lastFile")).toBe("/novel/first.md");
 });
 
 it("keeps Undo and notes in sync when options are changed through app commands", async () => {
@@ -479,7 +675,7 @@ it("runs Save all from the folder menu, writes the buffer, and refreshes folder 
     undefined,
     false,
   );
-  expect(api.saveFolder).toHaveBeenCalledWith("/novel");
+  expect(api.saveFolder).toHaveBeenCalledWith("/novel", "/novel/first.md");
   expect(host.querySelector(".nav-folder-toggle.dirty")).toBeNull();
   expect(host.querySelector(".nav-root .nav-note-dot")).not.toBeNull();
 });
@@ -563,7 +759,7 @@ it.each([false, true])(
       vi.mocked(showNavigatorFolderMenu).mock.calls.at(-1)![3]!();
     });
     expect(saveDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ defaultPath: "/novel" }),
+      expect.objectContaining({ defaultPath: "/novel/Untitled.md" }),
     );
     expect(api.saveDocument).toHaveBeenCalledWith(
       "/novel/new.md",
@@ -574,7 +770,7 @@ it.each([false, true])(
     expect(
       vi.mocked(api.saveDocument).mock.calls.every((call) => call[3] === false),
     ).toBe(true);
-    expect(api.saveFolder).toHaveBeenCalledWith("/novel");
+    expect(api.saveFolder).toHaveBeenCalledWith("/novel", "/novel/new.md");
     expect(editor().state.doc.toString()).toBe("New chapter");
     const newFileWatch = vi
       .mocked(watch)
