@@ -1915,7 +1915,7 @@ function App() {
   const draftEdits = useCallback(
     async (n: CommentNote) => {
       const view = viewRef.current;
-      if (!view || viewing || drafting !== null) return;
+      if (!view || viewing || previewHost.current || drafting !== null) return;
       const startDocument = session.getSnapshot();
       setDrafting(n.from);
       try {
@@ -1925,13 +1925,19 @@ function App() {
           view.state.doc.toString(),
           repo?.repo_root ?? null,
         );
-        // Inference takes a while; don't apply to a different document or
-        // to a read-only historical buffer opened meanwhile.
+        // The live preview ref avoids the render state captured before await.
+        // Late drafts must not edit another document or a read-only view.
+        const previewOpen = previewHost.current !== null;
         if (
           !session.sameDocument(startDocument) ||
-          session.getSnapshot().viewing
+          session.getSnapshot().viewing ||
+          previewOpen
         ) {
-          flash("Draft discarded — the document changed");
+          flash(
+            previewOpen
+              ? "Draft discarded — document is in a read-only preview"
+              : "Draft discarded — the document changed",
+          );
           return;
         }
         // The applier matches against the document as it is NOW, so edits

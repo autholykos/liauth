@@ -73,6 +73,7 @@ vi.mock("../src/api", () => ({
   fileAtCommit: vi.fn(),
   historyDiff: vi.fn(),
   checkoutBranch: vi.fn(),
+  draftNoteEdits: vi.fn(),
 }));
 
 let root: Root;
@@ -288,6 +289,36 @@ it("disables note edits in preview and returns to the editor when navigating to 
   expect(host.querySelector(".proof-hidden")).toBeNull();
   expect(dismiss.disabled).toBe(false);
 });
+
+it.each(["toggle-markdown-preview", "toggle-novel-proof", null])(
+  "only applies a delayed note draft while editing (preview: %s)",
+  async (preview) => {
+    const source = editor().state.doc.toString();
+    let finish!: (pairs: api.EditPair[]) => void;
+    vi.mocked(api.draftNoteEdits).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await run("panel-notes");
+    await click("Draft edits");
+    expect(api.draftNoteEdits).toHaveBeenCalledOnce();
+    if (preview) await run(preview);
+    await act(async () => {
+      finish([{ find: "First", replace: "Updated" }]);
+    });
+    if (preview) {
+      expect(editor().state.doc.toString()).toBe(source);
+      expect(host.querySelector(".status-toast")?.textContent).toContain(
+        "read-only preview",
+      );
+    } else {
+      expect(editor().state.doc.toString()).toBe(
+        "{~~First~>Updated~~} {>>note<<}",
+      );
+    }
+  },
+);
 
 it("opens preview web links externally without navigating away from the document", async () => {
   vi.mocked(api.readDocument).mockResolvedValue(
