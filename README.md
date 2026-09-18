@@ -9,10 +9,20 @@ git engine for versioning and asynchronous review.
   markers (`#`, `**`, `` ` ``, `[]()`, `>`, `-`) render in place and reveal
   themselves only where your cursor is, Typora-style. Task-list checkboxes are
   clickable.
+- **Adaptive layout** — documents with prose wrapped at a consistent source
+  width use a wider editing column, keeping each source line on one visual line.
+  Font and zoom stay at your chosen values; narrow windows scroll horizontally.
+  Ordinary prose keeps its usual layout. Detection runs when loading or pasting
+  text and stays stable while typing. Turn it off with **View > Adaptive Layout**.
 - **Novel proofing** — **View > Novel Proof** replaces the editor with a
   read-only fiction layout: first-line paragraph indents, flush openings after
   headings and scene breaks, and centered scene-break ornaments. The source
   stays unchanged, and PDF export uses the same layout while proofing is on.
+- **Markdown preview** — **View > Markdown Preview** shows a read-only document
+  with ordinary source line breaks flowing as spaces. Paragraphs, explicit line
+  breaks, lists, tables, and code blocks retain their structure. **Back to
+  editor** returns to the same buffer, selection, and undo history. Web links
+  open in the browser.
 - **Versioning built in** — every save is a git commit (skipped when nothing
   changed). The History panel lists versions of the open file; any version can
   be compared with the current document, with red/green changes and per-change

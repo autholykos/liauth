@@ -15,6 +15,7 @@ import {
   message,
 } from "@tauri-apps/plugin-dialog";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -156,11 +157,13 @@ function selectionContext(text: string, from: number, to: number): string {
 
 function App() {
   const editorHost = useRef<HTMLDivElement>(null);
+  const previewHost = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const loadingRef = useRef(false);
 
   const [session] = useState(() => new DocumentSession());
   const {
+    id: documentId,
     filePath,
     dirty,
     viewing,
@@ -194,7 +197,15 @@ function App() {
     "liauth.page",
     (stored) => stored === "1",
   );
-  const [novelProof, setNovelProof] = useState(false);
+  const [previewMode, setPreviewMode] = useState<"markdown" | "novel" | null>(
+    null,
+  );
+  const novelProof = previewMode === "novel";
+  const markdownPreview = previewMode === "markdown";
+  const [adaptiveLayout, setAdaptiveLayout] = usePersistedSetting(
+    "liauth.adaptiveLayout",
+    (stored) => stored !== "0",
+  );
   const [notes, setNotes] = useState<NoteMatch[]>([]);
   const [rsvp, setRsvp] = useState<{
     words: RsvpWord[];
@@ -205,6 +216,7 @@ function App() {
     typewriter: room,
     lineNumbers: lineNums,
     spellcheck,
+    adaptiveLayout,
   };
   const editorOptionsRef = useRef(editorOptions);
   editorOptionsRef.current = editorOptions;
@@ -384,6 +396,7 @@ function App() {
 
   const exitRsvp = useCallback((offset: number) => {
     setRsvp(null);
+    setPreviewMode(null);
     const view = viewRef.current;
     if (!view) return;
     const pos = Math.min(offset, view.state.doc.length);
@@ -622,16 +635,32 @@ function App() {
     if (view) setEditorOption(view, "spellcheck", spellcheck);
   }, [spellcheck]);
 
+  useEffect(() => {
+    const view = viewRef.current;
+    if (view) setEditorOption(view, "adaptiveLayout", adaptiveLayout);
+  }, [adaptiveLayout]);
+
   // Page layout: the content column styled as a paper sheet (pure CSS).
   useEffect(() => {
     document.documentElement.dataset.page = pageLayout ? "1" : "0";
   }, [pageLayout]);
 
   useEffect(() => {
-    if (!novelProof) {
-      requestAnimationFrame(() => viewRef.current?.focus());
-    }
-  }, [novelProof]);
+    if (previewMode) setRephrase(null);
+    const frame = requestAnimationFrame(() => {
+      if (previewMode) {
+        const preview = previewHost.current;
+        if (preview) {
+          preview.scrollTop = 0;
+          preview.scrollLeft = 0;
+          preview.focus({ preventScroll: true });
+        }
+      } else {
+        viewRef.current?.focus();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [previewMode, documentId, viewing?.id]);
 
   // Room mode: fullscreen, chrome hidden, typewriter scrolling. Theme and
   // font stay as they are — the Room theme is just an option in the picker.
@@ -840,6 +869,7 @@ function App() {
       }
       const view = viewRef.current;
       if (!view || match.line > view.state.doc.lines) return;
+      setPreviewMode(null);
       const line = view.state.doc.line(match.line);
       const from = Math.min(line.from + match.column, line.to);
       const to = Math.min(from + match.length, line.to);
@@ -1833,6 +1863,7 @@ function App() {
   const jumpToNote = useCallback((n: NoteMatch) => {
     const view = viewRef.current;
     if (!view) return;
+    setPreviewMode(null);
     view.dispatch({
       selection: { anchor: Math.min(n.from, view.state.doc.length) },
       effects: EditorView.scrollIntoView(
@@ -1884,7 +1915,7 @@ function App() {
   const draftEdits = useCallback(
     async (n: CommentNote) => {
       const view = viewRef.current;
-      if (!view || viewing || drafting !== null) return;
+      if (!view || viewing || previewHost.current || drafting !== null) return;
       const startDocument = session.getSnapshot();
       setDrafting(n.from);
       try {
@@ -1894,13 +1925,19 @@ function App() {
           view.state.doc.toString(),
           repo?.repo_root ?? null,
         );
-        // Inference takes a while; don't apply to a different document or
-        // to a read-only historical buffer opened meanwhile.
+        // The live preview ref avoids the render state captured before await.
+        // Late drafts must not edit another document or a read-only view.
+        const previewOpen = previewHost.current !== null;
         if (
           !session.sameDocument(startDocument) ||
-          session.getSnapshot().viewing
+          session.getSnapshot().viewing ||
+          previewOpen
         ) {
-          flash("Draft discarded — the document changed");
+          flash(
+            previewOpen
+              ? "Draft discarded — document is in a read-only preview"
+              : "Draft discarded — the document changed",
+          );
           return;
         }
         // The applier matches against the document as it is NOW, so edits
@@ -1977,7 +2014,10 @@ function App() {
       lineNumbers: lineNums,
       spellcheck,
       pageLayout,
+      adaptiveLayout,
       novelProof,
+      markdownPreview,
+      readOnly: previewMode !== null || viewing !== null,
       room,
       navOpen: filesNavigatorOpen,
       showHiddenFiles,
@@ -2013,6 +2053,7 @@ function App() {
       "insert-note": addNote,
       "insert-suggestion": addSuggestion,
       "next-note": () => {
+        setPreviewMode(null);
         if (viewRef.current) gotoNextNote(viewRef.current);
       },
       "zoom-in": () => setZoom((z) => clampZoom(z + ZOOM_STEP)),
@@ -2023,7 +2064,11 @@ function App() {
       "toggle-vim": () => setVimMode((v) => !v),
       "toggle-room": () => setRoom((v) => !v),
       "toggle-page": () => setPageLayout((v) => !v),
-      "toggle-novel-proof": () => setNovelProof((v) => !v),
+      "toggle-adaptive-layout": () => setAdaptiveLayout((v) => !v),
+      "toggle-markdown-preview": () =>
+        setPreviewMode((mode) => (mode === "markdown" ? null : "markdown")),
+      "toggle-novel-proof": () =>
+        setPreviewMode((mode) => (mode === "novel" ? null : "novel")),
       rsvp: () => {
         if (!rsvp) startRsvp();
       },
@@ -2081,7 +2126,10 @@ function App() {
     lineNums,
     spellcheck,
     pageLayout,
+    adaptiveLayout,
     novelProof,
+    markdownPreview,
+    viewing,
     room,
     navOpen,
     navigatorView,
@@ -2094,21 +2142,22 @@ function App() {
   ]);
 
   const paletteCommands = commands.filter(
-    (command) => command.palette !== false,
+    (command) => command.palette !== false && command.enabled !== false,
   );
 
   const closePalette = useCallback(() => {
     setPaletteOpen(false);
     // Release focus before the command runs, so it can focus its own UI.
-    viewRef.current?.focus();
-  }, []);
+    if (previewMode) previewHost.current?.focus({ preventScroll: true });
+    else viewRef.current?.focus();
+  }, [previewMode]);
 
-  const proofSource = novelProof
+  const previewSource = previewMode
     ? (viewRef.current?.state.doc.toString() ?? "")
     : "";
-  const proofDocument = useMemo(
-    () => (novelProof ? renderMarkdown(proofSource, true) : null),
-    [novelProof, proofSource],
+  const previewDocument = useMemo(
+    () => (previewMode ? renderMarkdown(previewSource, novelProof) : null),
+    [previewMode, novelProof, previewSource],
   );
 
   return (
@@ -2236,6 +2285,7 @@ function App() {
           (read-only)
           <button
             onClick={() => {
+              setPreviewMode(null);
               const view = viewRef.current;
               if (view) gotoNextHistoryChange(view);
             }}
@@ -2255,6 +2305,13 @@ function App() {
           >
             Back to current
           </button>
+        </div>
+      ) : null}
+
+      {previewMode ? (
+        <div className="banner">
+          {novelProof ? "Novel Proof" : "Markdown Preview"} · Read-only
+          <button onClick={() => setPreviewMode(null)}>Back to editor</button>
         </div>
       ) : null}
 
@@ -2317,21 +2374,44 @@ function App() {
           />
         ) : null}
 
-        {proofDocument ? (
-          <div className="novel-proof-scroll">
+        {previewDocument ? (
+          <div
+            className={
+              novelProof ? "novel-proof-scroll" : "markdown-preview-scroll"
+            }
+            ref={previewHost}
+            tabIndex={0}
+            aria-label={novelProof ? "Novel Proof" : "Markdown Preview"}
+            onClick={(event) => {
+              const link =
+                event.target instanceof Element
+                  ? event.target.closest<HTMLAnchorElement>("a[href]")
+                  : null;
+              const href = link?.getAttribute("href");
+              if (!href || href.startsWith("#")) return;
+              event.preventDefault();
+              void openUrl(href).catch((error) =>
+                flash(`Could not open link: ${error}`),
+              );
+            }}
+          >
             <article
-              className="novel-proof novel-proof-screen"
-              lang={proofDocument.lang}
-              dangerouslySetInnerHTML={{ __html: proofDocument.html }}
+              className={
+                novelProof
+                  ? "novel-proof novel-proof-screen"
+                  : "markdown-preview-screen"
+              }
+              lang={previewDocument.lang}
+              dangerouslySetInnerHTML={{ __html: previewDocument.html }}
             />
           </div>
         ) : null}
 
         <div
-          className={`editor-wrap${novelProof ? " proof-hidden" : ""}`}
+          className={`editor-wrap${previewMode ? " proof-hidden" : ""}`}
           ref={editorHost}
           onContextMenu={openEditorContextMenu}
-          inert={novelProof}
+          inert={previewMode !== null}
         />
 
         {panel === "history" && versioned ? (
@@ -2359,7 +2439,7 @@ function App() {
         {panel === "notes" ? (
           <NotesPanel
             notes={notes}
-            readOnly={!!viewing}
+            readOnly={!!viewing || previewMode !== null}
             drafting={drafting}
             actions={{
               addNote,

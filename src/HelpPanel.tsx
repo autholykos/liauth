@@ -126,7 +126,7 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       title: "Writing",
       search:
         "writing room fullscreen typewriter scrolling toolbar rsvp speed read themes fonts zoom view menu " +
-        "spelling spell check dictionary suggestions learn ignore",
+        "spelling spell check dictionary suggestions learn ignore adaptive layout wrap width horizontal",
       body: (
         <>
           <p>
@@ -141,7 +141,30 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
             marked word for suggestions, Ignore, or Learn Spelling. Toggle it
             with Check Spelling in the View menu.
           </p>
+          <p>
+            <strong>View ▸ Adaptive Layout</strong> is on by default. Documents
+            whose paragraphs already wrap at a consistent width use a wider
+            editing column, with horizontal scrolling when needed. Ordinary
+            prose keeps its usual layout. Detection runs when loading or pasting
+            text; typing keeps the layout stable. Font, zoom, and source text
+            remain as you chose them.
+          </p>
         </>
+      ),
+    },
+    {
+      title: "Markdown Preview",
+      search: "markdown preview reading read only soft line breaks paragraphs tables code editing",
+      body: (
+        <p>
+          Choose <strong>View ▸ Markdown Preview</strong> to read the document
+          with source line wrapping removed from ordinary paragraphs. Explicit
+          line breaks, code blocks, lists, and tables retain their structure.
+          The source stays unchanged and editing commands are disabled. Click{" "}
+          <strong>Back to editor</strong> to return to the same buffer and undo
+          history. Web links open in your browser. Markdown Preview and Novel
+          Proof are alternative reading views.
+        </p>
       ),
     },
     {

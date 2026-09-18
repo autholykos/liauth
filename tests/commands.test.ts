@@ -33,7 +33,10 @@ const snapshot: CommandSnapshot = {
   lineNumbers: false,
   spellcheck: true,
   pageLayout: false,
+  adaptiveLayout: true,
   novelProof: false,
+  markdownPreview: false,
+  readOnly: false,
   room: false,
   navOpen: false,
   showHiddenFiles: false,
@@ -44,6 +47,33 @@ const snapshot: CommandSnapshot = {
 };
 
 describe("shared commands", () => {
+  it("disables editing actions in the native menu and command registry while reading", async () => {
+    const edit = vi.fn();
+    const actions = new Proxy({}, { get: () => edit }) as CommandActions;
+    const commands = createCommands(
+      { ...snapshot, markdownPreview: true, readOnly: true },
+      actions,
+    );
+    await buildAppMenu(commands, (id) =>
+      commands.find((command) => command.id === id)!.run(),
+    );
+    const flatten = (items: any[]): any[] =>
+      items.flatMap((item) => [item, ...flatten(item.items ?? [])]);
+    const menu = flatten(
+      vi.mocked(Menu.new).mock.calls.at(-1)![0]!.items as any[],
+    );
+    for (const id of ["bold", "italic", "insert-note", "insert-suggestion"]) {
+      const command = commands.find((command) => command.id === id)!;
+      expect(command.enabled).toBe(false);
+      expect(menu.find((item) => item.id === id).enabled).toBe(false);
+      command.run();
+    }
+    expect(edit).not.toHaveBeenCalled();
+    expect(
+      menu.find((item) => item.id === "toggle-markdown-preview").checked,
+    ).toBe(true);
+  });
+
   it("offers Save all in the native folder menu and disables it while busy", async () => {
     const save = vi.fn();
     await showNavigatorFolderMenu(() => {}, false, null, save);

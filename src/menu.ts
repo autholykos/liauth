@@ -124,6 +124,7 @@ export async function buildAppMenu(
       id,
       text: command.menuTitle ?? command.title,
       accelerator: command.accelerator,
+      enabled: command.enabled,
       action: () => run(id),
     };
     return command.checked === undefined
@@ -207,6 +208,8 @@ export async function buildAppMenu(
             "toggle-lines",
             "toggle-spell",
             "toggle-page",
+            "toggle-adaptive-layout",
+            "toggle-markdown-preview",
             "toggle-novel-proof",
             "toggle-vim",
             "edit-vimrc",

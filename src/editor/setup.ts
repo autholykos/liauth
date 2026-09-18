@@ -23,6 +23,7 @@ import {
 } from "./notes";
 import { historyDiff } from "./historyDiff";
 import { spellcheck } from "./spellcheck";
+import { adaptiveLayout } from "./adaptiveLayout";
 
 import {
   keylogRecorder,
@@ -434,6 +435,7 @@ export interface EditorOptions {
   typewriter?: boolean;
   lineNumbers?: boolean;
   spellcheck?: boolean;
+  adaptiveLayout?: boolean;
 }
 
 const optionCompartments = {
@@ -441,6 +443,7 @@ const optionCompartments = {
   typewriter: new Compartment(),
   lineNumbers: new Compartment(),
   spellcheck: new Compartment(),
+  adaptiveLayout: new Compartment(),
 };
 
 type ToggleOption = keyof typeof optionCompartments;
@@ -463,6 +466,8 @@ const vimBookmarkCleanup = ViewPlugin.define((view) => {
 });
 
 function optionExtension(name: ToggleOption, on: boolean) {
+  if (name === "adaptiveLayout")
+    return on ? adaptiveLayout : EditorView.lineWrapping;
   if (!on) return [];
   switch (name) {
     case "vim":
@@ -523,14 +528,13 @@ export function createEditorState(
         compartment.of(
           optionExtension(
             name as ToggleOption,
-            opts[name as ToggleOption] ?? false,
+            opts[name as ToggleOption] ?? name === "adaptiveLayout",
           ),
         ),
       ),
       EditorState.readOnly.of(opts.readOnly ?? false),
       history(),
       drawSelection(),
-      EditorView.lineWrapping,
       focusBeforePointerSelection,
       marginClick,
       placeholder("Start writing…"),
