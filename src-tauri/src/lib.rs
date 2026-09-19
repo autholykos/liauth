@@ -216,20 +216,56 @@ fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFil
     })
 }
 
-fn search_preview(line: &str, byte_column: usize) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let match_column = line[..byte_column].chars().count();
-    let start = match_column.saturating_sub(60);
-    let end = (start + 180).min(chars.len());
-    let mut preview = String::new();
-    if start > 0 {
-        preview.push('…');
-    }
-    preview.extend(chars[start..end].iter());
-    if end < chars.len() {
-        preview.push('…');
-    }
-    preview
+fn search_preview(paragraph: &[(usize, &str)], matched_line: usize, byte_column: usize) -> String {
+    // Reserve space for an ellipsis at both ends of the 4 KiB preview.
+    const BUDGET: usize = 4096 - 2 * '…'.len_utf8();
+    let line = paragraph[matched_line].1;
+    let (text, before, after) = if line.len() > BUDGET {
+        let mut start = byte_column.saturating_sub(BUDGET / 2);
+        let mut end = (start + BUDGET).min(line.len());
+        while !line.is_char_boundary(start) {
+            start += 1;
+        }
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        (
+            line[start..end].to_string(),
+            matched_line > 0 || start > 0,
+            matched_line + 1 < paragraph.len() || end < line.len(),
+        )
+    } else {
+        let (mut start, mut end, mut bytes) = (matched_line, matched_line + 1, line.len());
+        loop {
+            let previous = (start, end);
+            if end < paragraph.len() && bytes + paragraph[end].1.len() + 1 <= BUDGET {
+                bytes += paragraph[end].1.len() + 1;
+                end += 1;
+            }
+            if start > 0 && bytes + paragraph[start - 1].1.len() + 1 <= BUDGET {
+                start -= 1;
+                bytes += paragraph[start].1.len() + 1;
+            }
+            if previous == (start, end) {
+                break;
+            }
+        }
+        (
+            paragraph[start..end]
+                .iter()
+                .map(|(_, text)| *text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            start > 0,
+            end < paragraph.len(),
+        )
+    };
+    format!(
+        "{}{}{}",
+        if before { "…" } else { "" },
+        text,
+        if after { "…" } else { "" }
+    )
 }
 
 /// Case-insensitive (for ASCII) text search across every document shown by
@@ -267,23 +303,26 @@ fn search_project_files(
             continue;
         };
 
-        for (line_index, line) in content.lines().enumerate() {
-            let searchable = line.to_ascii_lowercase();
-            let Some(byte_column) = searchable.find(&needle) else {
-                continue;
-            };
-            let byte_end = byte_column + query.len();
-            matches.push(ProjectSearchMatch {
-                path: file.path.clone(),
-                rel: file.rel.clone(),
-                line: line_index + 1,
-                column: line[..byte_column].encode_utf16().count(),
-                length: line[byte_column..byte_end].encode_utf16().count(),
-                preview: search_preview(line, byte_column),
-            });
-            if matches.len() == PROJECT_SEARCH_LIMIT {
-                truncated = true;
-                break 'files;
+        let lines: Vec<_> = content.lines().enumerate().collect();
+        for paragraph in lines.split(|(_, line)| line.trim().is_empty()) {
+            for (paragraph_index, &(line_index, line)) in paragraph.iter().enumerate() {
+                let searchable = line.to_ascii_lowercase();
+                let Some(byte_column) = searchable.find(&needle) else {
+                    continue;
+                };
+                let byte_end = byte_column + query.len();
+                matches.push(ProjectSearchMatch {
+                    path: file.path.clone(),
+                    rel: file.rel.clone(),
+                    line: line_index + 1,
+                    column: line[..byte_column].encode_utf16().count(),
+                    length: line[byte_column..byte_end].encode_utf16().count(),
+                    preview: search_preview(paragraph, paragraph_index, byte_column),
+                });
+                if matches.len() == PROJECT_SEARCH_LIMIT {
+                    truncated = true;
+                    break 'files;
+                }
             }
         }
     }
@@ -772,15 +811,66 @@ mod tests {
     }
 
     #[test]
+    fn project_search_keeps_the_complete_paragraph_and_source_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = dir.path().join("chapter.md");
+        let paragraph = format!(
+            "{}\r\nα 😀 Needle in a wrapped sentence\r\nthat continues to its full ending.",
+            "A long introduction to the sentence. ".repeat(12)
+        );
+        std::fs::write(
+            &document,
+            format!("Previous paragraph.\r\n\r\n{paragraph}\r\n \t\r\nNext paragraph."),
+        )
+        .unwrap();
+        let search = search_project_files(p(&document), "needle".into(), false, None, None).unwrap();
+        assert_eq!(search.matches.len(), 1);
+        let found = &search.matches[0];
+        assert_eq!(found.preview, paragraph.replace("\r\n", "\n"));
+        assert_eq!((found.line, found.column, found.length), (4, 5, 6));
+    }
+
+    #[test]
+    fn project_search_bounds_long_unicode_lines_around_the_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = dir.path().join("long.md");
+        let padding = "à😀".repeat(2000);
+        for content in [
+            format!("needle {padding}"),
+            format!("{padding} needle {padding}"),
+            format!("{padding} needle"),
+        ] {
+            std::fs::write(&document, &content).unwrap();
+            let search =
+                search_project_files(p(&document), "needle".into(), false, None, None).unwrap();
+            let found = &search.matches[0];
+            assert!(found.preview.len() <= 4096);
+            assert!(found.preview.contains("needle"));
+            assert!(found.preview.starts_with('…') || found.preview.ends_with('…'));
+            assert_eq!(
+                found.column,
+                content[..content.find("needle").unwrap()]
+                    .encode_utf16()
+                    .count()
+            );
+        }
+    }
+
+    #[test]
     fn project_search_caps_results() {
         let dir = tempfile::tempdir().unwrap();
         let document = dir.path().join("many.md");
-        std::fs::write(&document, "match\n".repeat(PROJECT_SEARCH_LIMIT + 1)).unwrap();
+        let row = format!("match {}\n", "context ".repeat(100));
+        std::fs::write(&document, row.repeat(PROJECT_SEARCH_LIMIT + 1)).unwrap();
 
         let search = search_project_files(p(&document), "match".into(), false, None, None).unwrap();
 
         assert_eq!(search.matches.len(), PROJECT_SEARCH_LIMIT);
         assert!(search.truncated);
+        assert!(search.matches.iter().all(|found| {
+            found.preview.len() <= 4096 && found.preview.contains("match")
+        }));
+        assert!(serde_json::to_vec(&search).unwrap().len() < 2_000_000);
     }
 
     #[test]

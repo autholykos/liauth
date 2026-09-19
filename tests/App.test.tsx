@@ -680,7 +680,7 @@ it("runs Save all from the folder menu, writes the buffer, and refreshes folder 
   expect(host.querySelector(".nav-root .nav-note-dot")).not.toBeNull();
 });
 
-it("shows folder groups for global search and opens a match", async () => {
+it("expands search files, opens occurrences, and keeps expansion until the query changes", async () => {
   await run("toggle-markdown-preview");
   vi.mocked(api.searchProjectFiles).mockResolvedValue({
     matches: [
@@ -699,6 +699,14 @@ it("shows folder groups for global search and opens a match", async () => {
         column: 0,
         length: 5,
         preview: "First",
+      },
+      {
+        path: "/novel/part/second.md",
+        rel: "part/second.md",
+        line: 3,
+        column: 0,
+        length: 5,
+        preview: "First in another paragraph.",
       },
     ],
     truncated: false,
@@ -720,15 +728,65 @@ it("shows folder groups for global search and opens a match", async () => {
       group.getAttribute("aria-label"),
     ),
   ).toEqual(["Project", "part"]);
+  const fileButton = (rel: string) =>
+    host.querySelector<HTMLButtonElement>(
+      `.nav-search-file[title="${rel}"]`,
+    )!;
+  expect(host.querySelectorAll(".nav-search-file")).toHaveLength(2);
+  expect(fileButton("part/second.md").textContent).toContain("(2)");
+  expect(fileButton("part/second.md").getAttribute("aria-expanded")).toBe("false");
+  expect(
+    [...host.querySelectorAll<HTMLUListElement>(".nav-search-results")].every(
+      (list) => list.hidden,
+    ),
+  ).toBe(true);
+  await act(async () => {
+    fileButton("first.md").click();
+    fileButton("part/second.md").click();
+  });
+  expect(fileButton("part/second.md").getAttribute("aria-expanded")).toBe("true");
+  expect(api.readDocument).not.toHaveBeenCalledWith("/novel/part/second.md");
+  vi.mocked(api.readDocument).mockResolvedValueOnce(
+    "First paragraph.\n\nFirst in another paragraph.",
+  );
   await act(async () =>
     (
       host.querySelector(
-        'button[title="part/second.md:1"]',
+        'button[title="part/second.md:3"]',
       ) as HTMLButtonElement
     ).click(),
   );
   expect(api.readDocument).toHaveBeenCalledWith("/novel/part/second.md");
   expect(host.querySelector(".proof-hidden")).toBeNull();
+  expect(editor().state.selection.main.from).toBe(editor().state.doc.line(3).from);
+  expect(
+    editor().state.sliceDoc(
+      editor().state.selection.main.from,
+      editor().state.selection.main.to,
+    ),
+  ).toBe("First");
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  expect(fileButton("part/second.md").getAttribute("aria-expanded")).toBe("true");
+  await act(async () => fileButton("part/second.md").click());
+  expect(fileButton("part/second.md").getAttribute("aria-expanded")).toBe("false");
+  expect(fileButton("first.md").getAttribute("aria-expanded")).toBe("true");
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(input, "Other");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 220));
+  });
+  expect(
+    [...host.querySelectorAll<HTMLUListElement>(".nav-search-results")].every(
+      (list) => list.hidden,
+    ),
+  ).toBe(true);
 });
 
 it.each([false, true])(

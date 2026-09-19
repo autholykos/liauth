@@ -232,11 +232,26 @@ it("groups search matches by folder while keeping each match navigable", async (
       length: 4,
       preview: "child",
     },
+    {
+      path: "/novel/part/b.md",
+      rel: "part/b.md",
+      line: 12,
+      column: 0,
+      length: 4,
+      preview: "another beta",
+    },
   ];
   const open = vi.fn();
   await act(async () =>
     root.render(
-      <SearchResults matches={matches} rootName="Novel" onOpen={open} />,
+      <SearchResults
+        matches={matches}
+        rootName="Novel"
+        query="beta"
+        expandedFiles={new Set(["/novel/part/b.md"])}
+        onToggleFile={vi.fn()}
+        onOpen={open}
+      />,
     ),
   );
   expect(
@@ -247,8 +262,16 @@ it("groups search matches by folder while keeping each match navigable", async (
   expect(
     host
       .querySelector('section[aria-label="part"]')
-      ?.querySelectorAll("button"),
+      ?.querySelectorAll(".nav-search-file"),
   ).toHaveLength(2);
+  const file = host.querySelector('button[title="part/b.md"]')!;
+  expect(file.textContent).toContain("(2)");
+  expect(file.getAttribute("aria-expanded")).toBe("true");
+  const occurrences = document.getElementById(
+    file.getAttribute("aria-controls")!,
+  )!;
+  expect(occurrences.querySelectorAll(".nav-search-result")).toHaveLength(2);
+  expect(occurrences.querySelectorAll("mark")).toHaveLength(2);
   await act(async () =>
     (
       host.querySelector('button[title="part/b.md:7"]') as HTMLButtonElement
@@ -256,3 +279,37 @@ it("groups search matches by folder while keeping each match navigable", async (
   );
   expect(open).toHaveBeenCalledWith(matches[2]);
 });
+
+it.each([
+  ["C++", "😀 C++ and c++ stay literal; <b> is text.", ["C++", "c++"]],
+  ["é", "é and É follow the search's ASCII-only case folding.", ["é"]],
+  ["", "No query highlights nothing.", []],
+])(
+  "highlights the literal search %s without changing the context",
+  async (query, preview, expected) => {
+    await act(async () =>
+      root.render(
+        <SearchResults
+          matches={[{
+            path: "/test.md",
+            rel: "test.md",
+            line: 1,
+            column: 0,
+            length: query.length,
+            preview,
+          }]}
+          rootName="Project"
+          query={query}
+          expandedFiles={new Set(["/test.md"])}
+          onToggleFile={vi.fn()}
+          onOpen={vi.fn()}
+        />,
+      ),
+    );
+    expect(host.querySelector(".nav-search-preview")?.textContent).toBe(preview);
+    expect(
+      [...host.querySelectorAll("mark")].map((mark) => mark.textContent),
+    ).toEqual(expected);
+    expect(host.querySelector("b")).toBeNull();
+  },
+);

@@ -469,10 +469,30 @@ button.wide {
   font-size: 11.5px;
 }
 
+.nav-search-files,
 .nav-search-results {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.nav-search-file {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 7px 4px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.nav-search-results {
+  margin-left: 10px;
+  border-left: 1px solid var(--c-border);
 }
 
 .nav-search-result {
@@ -484,28 +504,36 @@ button.wide {
   text-align: left;
 }
 
+.nav-search-file:hover:not(:disabled),
 .nav-search-result:hover:not(:disabled) {
   border-color: transparent;
   background: var(--c-bg);
 }
 
-.nav-search-path,
+.nav-search-line,
 .nav-search-preview {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.nav-search-path {
-  font-size: 11.5px;
-  font-weight: 600;
+.nav-search-line {
+  font-size: 10.5px;
+  color: var(--c-muted);
 }
 
 .nav-search-preview {
   margin-top: 2px;
-  color: var(--c-muted);
+  color: var(--c-text);
   font-size: 11.5px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.nav-search-preview mark {
+  color: inherit;
+  background: var(--c-selection);
+  border-radius: 2px;
+  font-weight: 600;
 }
 
 .side-panel h3 {

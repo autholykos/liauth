@@ -69,6 +69,21 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
+      title: "Workspace search",
+      search:
+        "global workspace search results folder file expand collapse occurrences context paragraph",
+      body: (
+        <p>
+          Search groups results by folder and file. Click a file name to expand
+          or collapse its matches. Results show the paragraph with the search
+          term highlighted, or nearby text with ellipses for very large blocks.
+          Click the text to open that point in the document.
+          Expanded files stay open while you navigate results
+          and reset when you change the query.
+        </p>
+      ),
+    },
+    {
       title: "Versioning",
       search:
         "versioning enable git repository folder save commit history panel restore version",
