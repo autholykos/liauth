@@ -247,6 +247,9 @@ function App() {
   const [savingFolder, setSavingFolder] = useState<string | null>(null);
   const projectRequestRef = useRef(0);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
+  const [expandedSearchFiles, setExpandedSearchFiles] = useState<Set<string>>(
+    new Set(),
+  );
   const [workspaceSearch, setWorkspaceSearch] =
     useState<WorkspaceSearchState>(null);
   const workspaceSearchRequestRef = useRef(0);
@@ -2343,7 +2346,10 @@ function App() {
                 className="nav-search-input"
                 type="search"
                 value={workspaceQuery}
-                onChange={(e) => setWorkspaceQuery(e.target.value)}
+                onChange={(e) => {
+                  setWorkspaceQuery(e.target.value);
+                  setExpandedSearchFiles(new Set());
+                }}
                 placeholder="Search file contents…"
                 aria-label="Search workspace contents"
                 spellCheck={false}
@@ -2368,6 +2374,16 @@ function App() {
                   <SearchResults
                     matches={workspaceSearch.matches}
                     rootName={project?.name ?? "Project"}
+                    query={workspaceQuery}
+                    expandedFiles={expandedSearchFiles}
+                    onToggleFile={(path) =>
+                      setExpandedSearchFiles((current) => {
+                        const next = new Set(current);
+                        if (next.has(path)) next.delete(path);
+                        else next.add(path);
+                        return next;
+                      })
+                    }
                     onOpen={(match) => void openWorkspaceSearchMatch(match)}
                   />
                 </>

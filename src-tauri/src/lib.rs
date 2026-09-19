@@ -216,22 +216,6 @@ fn list_project_files(file_path: String, show_hidden: bool) -> Option<ProjectFil
     })
 }
 
-fn search_preview(line: &str, byte_column: usize) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let match_column = line[..byte_column].chars().count();
-    let start = match_column.saturating_sub(60);
-    let end = (start + 180).min(chars.len());
-    let mut preview = String::new();
-    if start > 0 {
-        preview.push('…');
-    }
-    preview.extend(chars[start..end].iter());
-    if end < chars.len() {
-        preview.push('…');
-    }
-    preview
-}
-
 /// Case-insensitive (for ASCII) text search across every document shown by
 /// the project navigator. The open editor's buffer may replace its on-disk
 /// content so unsaved text participates in the same search.
@@ -267,23 +251,30 @@ fn search_project_files(
             continue;
         };
 
-        for (line_index, line) in content.lines().enumerate() {
-            let searchable = line.to_ascii_lowercase();
-            let Some(byte_column) = searchable.find(&needle) else {
-                continue;
-            };
-            let byte_end = byte_column + query.len();
-            matches.push(ProjectSearchMatch {
-                path: file.path.clone(),
-                rel: file.rel.clone(),
-                line: line_index + 1,
-                column: line[..byte_column].encode_utf16().count(),
-                length: line[byte_column..byte_end].encode_utf16().count(),
-                preview: search_preview(line, byte_column),
-            });
-            if matches.len() == PROJECT_SEARCH_LIMIT {
-                truncated = true;
-                break 'files;
+        let lines: Vec<_> = content.lines().enumerate().collect();
+        for paragraph in lines.split(|(_, line)| line.trim().is_empty()) {
+            for &(line_index, line) in paragraph {
+                let searchable = line.to_ascii_lowercase();
+                let Some(byte_column) = searchable.find(&needle) else {
+                    continue;
+                };
+                let byte_end = byte_column + query.len();
+                matches.push(ProjectSearchMatch {
+                    path: file.path.clone(),
+                    rel: file.rel.clone(),
+                    line: line_index + 1,
+                    column: line[..byte_column].encode_utf16().count(),
+                    length: line[byte_column..byte_end].encode_utf16().count(),
+                    preview: paragraph
+                        .iter()
+                        .map(|(_, text)| *text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                });
+                if matches.len() == PROJECT_SEARCH_LIMIT {
+                    truncated = true;
+                    break 'files;
+                }
             }
         }
     }
@@ -769,6 +760,26 @@ mod tests {
         assert_eq!(search.matches[1].column, 5);
         assert_eq!(search.matches[1].length, 6);
         assert!(!search.truncated);
+    }
+
+    #[test]
+    fn project_search_keeps_the_complete_paragraph_and_source_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let document = dir.path().join("chapter.md");
+        let paragraph = format!(
+            "{}\r\nα 😀 Needle in a wrapped sentence\r\nthat continues to its full ending.",
+            "A long introduction to the sentence. ".repeat(12)
+        );
+        std::fs::write(
+            &document,
+            format!("Previous paragraph.\r\n\r\n{paragraph}\r\n \t\r\nNext paragraph."),
+        )
+        .unwrap();
+        let search = search_project_files(p(&document), "needle".into(), false, None, None).unwrap();
+        assert_eq!(search.matches.len(), 1);
+        let found = &search.matches[0];
+        assert_eq!(found.preview, paragraph.replace("\r\n", "\n"));
+        assert_eq!((found.line, found.column, found.length), (4, 5, 6));
     }
 
     #[test]
