@@ -75,9 +75,10 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       body: (
         <p>
           Search groups results by folder and file. Click a file name to expand
-          or collapse its matches. Each result shows the complete paragraph
-          with the search term highlighted; click its text to open that point
-          in the document. Expanded files stay open while you navigate results
+          or collapse its matches. Results show the paragraph with the search
+          term highlighted, or nearby text with ellipses for very large blocks.
+          Click the text to open that point in the document.
+          Expanded files stay open while you navigate results
           and reset when you change the query.
         </p>
       ),

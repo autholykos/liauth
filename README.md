@@ -69,9 +69,10 @@ git engine for versioning and asynchronous review.
   offer Merge-with-markers / Keep mine / Take disk. A toolbar ↻ reloads on
   demand.
 - **Project folders** — global search groups matches by folder and file. Click a
-  file name to expand or collapse its results, read the full matching paragraphs
-  with the search term highlighted, and click a result to jump to it. Expansion
-  is retained while navigating results and resets for a new query. The navigator
+  file name to expand or collapse its results, read matching paragraphs
+  with the search term highlighted, and click a result to jump to it. Very large
+  blocks show nearby context with ellipses; open the result to read the rest.
+  Expansion is retained while navigating results and resets for a new query. The navigator
   remembers collapsed folders across launches and expands the current file's
   ancestors when opening it or returning to the Files sidebar. Folders inherit
   their descendants' italic edited state and red note indicator. Right-click a
