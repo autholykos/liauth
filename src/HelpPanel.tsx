@@ -84,6 +84,23 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
+      title: "Find by meaning",
+      search:
+        "jev typesafe semantic meaning search current document passages api key",
+      body: (
+        <p>
+          Choose <strong>Search → Meaning</strong> or press <kbd>⌥⌘F</kbd>.
+          Describe what you want to find and click <strong>Find with Jev</strong>.
+          The current document, including unsaved text, is sent as passages to
+          TypeSafe. Results quote your text and open at the original position;
+          editing the text clears outdated results. Add your TypeSafe API key
+          in <strong>Jev settings</strong>. A search can return no convincing
+          matches; the results are suggestions to inspect. Less certain
+          candidates are marked <strong>Possible match</strong>.
+        </p>
+      ),
+    },
+    {
       title: "Versioning",
       search:
         "versioning enable git repository folder save commit history panel restore version",

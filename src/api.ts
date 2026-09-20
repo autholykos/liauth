@@ -161,6 +161,33 @@ export const takePendingOpen = () => invoke<string | null>("take_pending_open");
 export const findTextDocument = (paths: string[]) =>
   invoke<string | null>("find_text_document", { paths });
 
+export interface TypeSafeStatus {
+  configured: boolean;
+  from_environment: boolean;
+}
+
+export const typesafeStatus = () => invoke<TypeSafeStatus>("typesafe_status");
+export const writeTypesafeKey = (apiKey: string) =>
+  invoke<TypeSafeStatus>("write_typesafe_key", { apiKey });
+
+export interface SemanticMatch {
+  from: number;
+  to: number;
+  line: number;
+  preview: string;
+  relevance: number;
+}
+
+export interface SemanticResults {
+  matches: SemanticMatch[];
+  passages: number;
+}
+
+export const semanticSearch = (document: string, query: string, requestId: string) =>
+  invoke<SemanticResults>("semantic_search", { document, query, requestId });
+export const cancelSemanticSearch = (requestId: string) =>
+  invoke<void>("cancel_semantic_search", { requestId });
+
 export interface EditPair {
   find: string;
   replace: string;

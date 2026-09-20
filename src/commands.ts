@@ -62,6 +62,12 @@ const definitions = (s: CommandSnapshot) =>
     },
     { id: "check-updates", title: "Check for Updates…" },
     {
+      id: "find-by-meaning",
+      title: "Find by Meaning…",
+      accelerator: "CmdOrCtrl+Alt+F",
+      fallback: true,
+    },
+    {
       id: "bold",
       title: "Bold",
       accelerator: "CmdOrCtrl+B",
@@ -251,7 +257,7 @@ export function shortcutLabel(accelerator?: string): string | undefined {
   if (!accelerator) return undefined;
   const keys = accelerator.split("+");
   const key = keys[keys.length - 1].replace("=", "+").replace("-", "−");
-  return `${keys.includes("Shift") ? "⇧" : ""}${keys.includes("CmdOrCtrl") ? "⌘" : ""}${key}`;
+  return `${keys.includes("Shift") ? "⇧" : ""}${keys.includes("Alt") ? "⌥" : ""}${keys.includes("CmdOrCtrl") ? "⌘" : ""}${key}`;
 }
 
 export function createCommands(
@@ -295,12 +301,15 @@ export function fallbackCommand(
   commands: AppCommand[],
   event: KeyboardEvent,
 ): AppCommand | undefined {
-  if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+  if (!(event.metaKey || event.ctrlKey)) return;
   return commands.find((command) => {
     if (!command.fallback || !command.accelerator) return false;
     const keys = command.accelerator.split("+");
+    if (event.altKey !== keys.includes("Alt")) return false;
     const key = keys[keys.length - 1].toLowerCase();
-    const typed = event.key.toLowerCase();
+    const typed = event.altKey && event.code.startsWith("Key")
+      ? event.code.slice(3).toLowerCase()
+      : event.key.toLowerCase();
     if ((key === "=" && typed === "+") || (key === "-" && typed === "_"))
       return true;
     return typed === key && event.shiftKey === keys.includes("Shift");
