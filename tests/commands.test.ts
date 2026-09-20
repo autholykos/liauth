@@ -117,6 +117,11 @@ describe("shared commands", () => {
       new KeyboardEvent("keydown", { key: "F", metaKey: true, shiftKey: true }),
     )!.run();
     expect(room).toHaveBeenCalledTimes(3);
+    const semantic = commands.find((command) => command.id === "find-by-meaning")!;
+    expect(semantic.shortcut).toBe("⌥⌘F");
+    expect(fallbackCommand(commands, new KeyboardEvent("keydown", {
+      key: "ƒ", code: "KeyF", metaKey: true, altKey: true,
+    }))?.id).toBe("find-by-meaning");
     expect(
       fallbackCommand(
         commands,

@@ -2,6 +2,7 @@ mod ai;
 mod config;
 mod document;
 mod git;
+mod semantic;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -522,6 +523,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(PendingOpen(Mutex::new(None)))
+        .manage(semantic::Searches::default())
         .invoke_handler(tauri::generate_handler![
             print_page,
             git::repo_info,
@@ -547,6 +549,10 @@ pub fn run() {
             config::read_vim_config,
             config::write_vim_config,
             config::write_keylog,
+            config::typesafe_status,
+            config::write_typesafe_key,
+            semantic::semantic_search,
+            semantic::cancel_semantic_search,
             ai::draft_note_edits,
             ai::warm_note_cache,
             ai::list_rephrase_skills,

@@ -336,7 +336,7 @@ fn prompt_prefix(repo_root: Option<&str>, document: &str) -> String {
 /// reqwest's rustls-no-provider build panics (stranding the invoke
 /// promise) unless a process-level CryptoProvider exists; the updater
 /// plugin may have installed one already, hence the ignored error.
-fn ensure_tls() {
+pub(crate) fn ensure_tls() {
     static INIT_TLS: std::sync::Once = std::sync::Once::new();
     INIT_TLS.call_once(|| {
         rustls::crypto::ring::default_provider()

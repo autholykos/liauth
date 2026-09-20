@@ -242,7 +242,11 @@ function hookVim(view: EditorView): void {
  * capture-phase on document so it sees events wherever focus has wandered.
  */
 export const keylogRecorder = ViewPlugin.define((view) => {
-  const onEvent = (e: Event) => recordKeylog(describeEvent(e, view));
+  const onEvent = (e: Event) => {
+    if (e.target instanceof HTMLInputElement && e.target.type === "password")
+      return;
+    recordKeylog(describeEvent(e, view));
+  };
   const onError = (event: ErrorEvent) =>
     recordKeylogError(event.error ?? event.message);
   for (const type of DOM_EVENTS) {

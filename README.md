@@ -81,6 +81,18 @@ git engine for versioning and asynchronous review.
   folders' staged changes remain separate; ignored files and nested repositories
   are excluded. Resolve and save conflicted files individually first; a resolved
   merge is committed as a whole.
+- **Find by meaning** — choose **Search > Meaning**, or **Edit > Find by
+  Meaning…** (⌥⌘F), and describe the passage you want to find. Jev ranks original
+  passages from the current editor buffer, including unsaved text; clicking a
+  result selects that passage. Less certain candidates are marked **Possible
+  match**. Editing the document or query invalidates old
+  results. Searches run on request and can be cancelled. Add a TypeSafe API key
+  in **Jev settings**, or launch with `TYPESAFE_API_KEY`. The app stores an entered
+  key in `~/.config/liauth/typesafe-key`, readable only by its owner, and excludes
+  password fields from keylogs. Requests send passages to TypeSafe's official
+  API using `jev-1.13.0`. The first version supports documents up to 128 KB and
+  256 passages, returning up to 20 matches; larger documents are rejected before
+  sending. Cancel prevents further batches; an already sent batch may finish.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 
@@ -108,6 +120,13 @@ npm run tauri dev      # run the app
 npm run build          # typecheck + bundle frontend
 npm test               # editor, document session, and app regression tests
 cd src-tauri && cargo test   # git engine end-to-end tests
+```
+
+The opt-in Jev smoke test sends synthetic Italian fixtures to TypeSafe. With
+`TYPESAFE_API_KEY` in the environment, run from the repository root:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml live_jev_semantic_queries -- --ignored --nocapture
 ```
 
 ## Releases
