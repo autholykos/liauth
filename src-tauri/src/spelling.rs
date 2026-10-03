@@ -43,8 +43,14 @@ pub fn spelling_languages() -> Vec<SpellingLanguage> {
 // NSSpellChecker is not main-thread-only: Swift does not mark it @MainActor.
 #[tauri::command]
 pub async fn check_spelling(text: String, language: String) -> Result<SpellingResult, String> {
-    tauri::async_runtime::spawn_blocking(move || check(text, language))
-        .await
+    tauri::async_runtime::spawn_blocking(move || {
+        // Worker threads lack AppKit's per-event autorelease pool.
+        #[cfg(target_os = "macos")]
+        return objc2::rc::autoreleasepool(|_| check(text, language));
+        #[cfg(not(target_os = "macos"))]
+        check(text, language)
+    })
+    .await
         .map_err(|e| e.to_string())?
 }
 
