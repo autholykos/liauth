@@ -161,15 +161,6 @@ export const takePendingOpen = () => invoke<string | null>("take_pending_open");
 export const findTextDocument = (paths: string[]) =>
   invoke<string | null>("find_text_document", { paths });
 
-export interface TypeSafeStatus {
-  configured: boolean;
-  from_environment: boolean;
-}
-
-export const typesafeStatus = () => invoke<TypeSafeStatus>("typesafe_status");
-export const writeTypesafeKey = (apiKey: string) =>
-  invoke<TypeSafeStatus>("write_typesafe_key", { apiKey });
-
 export interface SpellingLanguage { code: string; name: string }
 export interface SpellingRange { from: number; to: number }
 export const spellingLanguages = () => invoke<SpellingLanguage[]>("spelling_languages");

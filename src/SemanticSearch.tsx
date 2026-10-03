@@ -28,16 +28,11 @@ export function SemanticSearch({
 }) {
   const document = useSyncExternalStore(session.subscribe, session.getSnapshot);
   const [query, setQuery] = useState("");
-  const [connection, setConnection] = useState<api.TypeSafeStatus | null>(null);
-  const [settings, setSettings] = useState(false);
-  const [apiKey, setApiKey] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<Results | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const request = useRef<string | null>(null);
-  const connectionRequest = useRef(0);
 
   const stop = useCallback(() => {
     const active = request.current;
@@ -46,29 +41,8 @@ export function SemanticSearch({
   }, []);
 
   useEffect(() => {
-    let active = true;
-    const load = ++connectionRequest.current;
     inputRef.current?.focus();
-    void api
-      .typesafeStatus()
-      .then((status) => {
-        if (active && connectionRequest.current === load) {
-          setConnection(status);
-          setSettings(!status.configured);
-        }
-      })
-      .catch(() => {
-        if (active && connectionRequest.current === load) {
-          setSettings(true);
-          setError(
-            "Could not read Jev settings. Save your API key to try again.",
-          );
-        }
-      });
-    return () => {
-      active = false;
-      stop();
-    };
+    return stop;
   }, [stop, inputRef]);
 
   useEffect(() => {
@@ -90,7 +64,7 @@ export function SemanticSearch({
 
   const find = async () => {
     const description = query.trim();
-    if (!description || busy || !connection?.configured) return;
+    if (!description || busy) return;
     const source = getText();
     if (!source.trim()) {
       setError("Open or write a document before searching by meaning.");
@@ -116,26 +90,6 @@ export function SemanticSearch({
         request.current = null;
         setBusy(false);
       }
-    }
-  };
-
-  const saveKey = async (key: string) => {
-    ++connectionRequest.current;
-    setSavingKey(true);
-    setError(null);
-    stop();
-    setBusy(false);
-    setResults(null);
-    try {
-      const status = await api.writeTypesafeKey(key);
-      setConnection(status);
-      setApiKey("");
-      setSettings(!status.configured);
-      inputRef.current?.focus();
-    } catch (error) {
-      setError(String(error));
-    } finally {
-      setSavingKey(false);
     }
   };
 
@@ -184,9 +138,7 @@ export function SemanticSearch({
         <div className="semantic-actions">
           <button
             type="submit"
-            disabled={
-              !connection?.configured || savingKey || busy || !query.trim()
-            }
+            disabled={busy || !query.trim()}
           >
             Find with Jev
           </button>
@@ -205,58 +157,8 @@ export function SemanticSearch({
         </div>
       </form>
       <p className="semantic-provider muted">
-        Search sends document passages to TypeSafe.
+        Search sends document passages to TypeSafe through Nanto’s model router.
       </p>
-      <button
-        className="semantic-settings-toggle"
-        onClick={() => setSettings((open) => !open)}
-        aria-expanded={settings}
-      >
-        Jev settings
-      </button>
-      {settings ? (
-        <form
-          className="semantic-settings"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void saveKey(apiKey);
-          }}
-        >
-          {connection?.from_environment ? (
-            <p className="muted">
-              Using the TypeSafe key configured for this app environment.
-            </p>
-          ) : (
-            <>
-              <label>
-                TypeSafe API key
-                <input
-                  type="password"
-                  disabled={savingKey}
-                  value={apiKey}
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-label="TypeSafe API key"
-                  onChange={(event) => setApiKey(event.target.value)}
-                />
-              </label>
-              <p className="muted">Saved privately on this Mac.</p>
-              <div className="semantic-actions">
-                <button disabled={savingKey || !apiKey.trim()}>Save key</button>
-                {connection?.configured ? (
-                  <button
-                    type="button"
-                    disabled={savingKey}
-                    onClick={() => void saveKey("")}
-                  >
-                    Remove key
-                  </button>
-                ) : null}
-              </div>
-            </>
-          )}
-        </form>
-      ) : null}
       {busy ? <p role="status">Searching with Jev…</p> : null}
       {error ? <p role="alert">{error}</p> : null}
       {notice ? (

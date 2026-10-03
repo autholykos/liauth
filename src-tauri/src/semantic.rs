@@ -6,8 +6,8 @@ use std::sync::{
     Arc, Mutex,
 };
 
-const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
-const MODEL: &str = "jev-1.13.0";
+const ENDPOINT: &str = "https://models.nanto.org/v1/systemone";
+const MODEL: &str = "jev";
 const MAX_DOCUMENT_BYTES: usize = 128_000;
 const MAX_PASSAGE_BYTES: usize = 2048;
 const MAX_PASSAGES: usize = 256;
@@ -170,7 +170,6 @@ fn read_scores(response: Response, offset: usize, count: usize) -> Result<Vec<f6
 async fn search(
     document: &str,
     query: &str,
-    key: &str,
     endpoint: &str,
     cancelled: &AtomicBool,
 ) -> Result<SemanticResults, String> {
@@ -212,7 +211,6 @@ async fn search(
         }
         let response = client
             .post(endpoint)
-            .bearer_auth(key)
             .timeout(remaining.min(std::time::Duration::from_secs(90)))
             .json(&request_body(query, &passages[offset..end], offset))
             .send()
@@ -229,9 +227,6 @@ async fn search(
         }
         match response.status().as_u16() {
             200 => (),
-            401 | 403 => {
-                return Err("TypeSafe rejected the API key. Update it in Jev settings.".into())
-            }
             429 | 529 => {
                 return Err("Jev is busy or rate limited. Wait a moment, then search again.".into())
             }
@@ -278,12 +273,7 @@ pub async fn semantic_search(
     searches: tauri::State<'_, Searches>,
 ) -> Result<SemanticResults, String> {
     let cancelled = searches.start(request_id.clone());
-    let result = async {
-        let key = crate::config::typesafe_key()?
-            .ok_or("Add your TypeSafe API key in Jev settings to search by meaning")?;
-        search(&document, &query, &key, ENDPOINT, &cancelled).await
-    }
-    .await;
+    let result = search(&document, &query, ENDPOINT, &cancelled).await;
     searches.cancel(&request_id);
     result
 }
@@ -298,10 +288,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    #[ignore = "Requires TYPESAFE_API_KEY; sends only synthetic Italian fixtures to TypeSafe"]
+    #[ignore = "Sends synthetic Italian fixtures to Jev through the Nanto model router"]
     fn live_jev_semantic_queries() {
-        let key =
-            std::env::var("TYPESAFE_API_KEY").expect("Set TYPESAFE_API_KEY for the live test");
         let fiction = [
             "La stazione era quasi vuota. Sulla pensilina il vento muoveva le pagine di un giornale abbandonato.",
             "«Dove eri ieri sera?» chiese Leo. Marta fissò la tazza. «Hai visto che domani nevica?», disse, e si mise a parlare del viaggio in montagna.",
@@ -353,7 +341,6 @@ mod tests {
             let result = tauri::async_runtime::block_on(search(
                 document,
                 query,
-                &key,
                 ENDPOINT,
                 &AtomicBool::new(false),
             ))
@@ -383,7 +370,6 @@ mod tests {
         let result = tauri::async_runtime::block_on(search(
             &paragraphs.join("\n\n"),
             "Una persona occulta qualcosa perché gli altri non lo trovino",
-            &key,
             ENDPOINT,
             &AtomicBool::new(false),
         ))
@@ -435,7 +421,7 @@ mod tests {
                     bytes.extend_from_slice(&chunk[..n]);
                     if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
                         let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
-                        assert!(headers.contains("authorization: bearer synthetic-key"));
+                        assert!(!headers.contains("authorization:"));
                         let length = headers
                             .lines()
                             .find_map(|line| line.strip_prefix("content-length:"))
@@ -527,7 +513,6 @@ mod tests {
         let result = tauri::async_runtime::block_on(search(
             &document,
             "personaggio elusivo",
-            "synthetic-key",
             &url,
             &AtomicBool::new(false),
         ))
@@ -563,7 +548,6 @@ mod tests {
         let result = tauri::async_runtime::block_on(search(
             "Una scena ordinaria.",
             "astronavi",
-            "synthetic-key",
             &url,
             &AtomicBool::new(false),
         ))
@@ -589,7 +573,6 @@ mod tests {
         let error = tauri::async_runtime::block_on(search(
             &document,
             "scena",
-            "synthetic-key",
             &url,
             &current,
         ))
@@ -603,7 +586,7 @@ mod tests {
     #[test]
     fn incomplete_scores_and_provider_errors_are_not_reported_as_no_matches() {
         for (status, body, message) in [
-            (401, json!({}), "API key"),
+            (401, json!({}), "could not complete"),
             (429, json!({}), "rate limited"),
             (200, json!({"answers":{}}), "incomplete"),
             (
@@ -621,7 +604,6 @@ mod tests {
             let error = tauri::async_runtime::block_on(search(
                 "Testo.",
                 "query",
-                "synthetic-key",
                 &url,
                 &AtomicBool::new(false),
             ))

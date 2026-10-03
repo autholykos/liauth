@@ -550,8 +550,6 @@ pub fn run() {
             config::read_vim_config,
             config::write_vim_config,
             config::write_keylog,
-            config::typesafe_status,
-            config::write_typesafe_key,
             spelling::spelling_languages,
             spelling::check_spelling,
             spelling::spelling_suggestions,

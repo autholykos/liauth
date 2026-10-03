@@ -15,7 +15,6 @@ import type { AppCommand } from "../src/commands";
 import { showNavigatorFolderMenu, showSpellingMenu, showEditorSelectionMenu } from "../src/menu";
 import { wrappedMarkdown } from "./fixtures/wrappedMarkdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { clearKeylog, saveKeylog } from "../src/editor/keylog";
 
 const native = vi.hoisted(() => ({
   commands: [] as AppCommand[],
@@ -78,8 +77,6 @@ vi.mock("../src/api", () => ({
   checkoutBranch: vi.fn(),
   draftNoteEdits: vi.fn(),
   findTextDocument: vi.fn(),
-  typesafeStatus: vi.fn(),
-  writeTypesafeKey: vi.fn(),
   semanticSearch: vi.fn(),
   cancelSemanticSearch: vi.fn(),
   writeKeylog: vi.fn(),
@@ -136,8 +133,6 @@ beforeEach(async () => {
   });
   vi.mocked(api.takePendingOpen).mockResolvedValue(null);
   vi.mocked(api.findTextDocument).mockResolvedValue(null);
-  vi.mocked(api.typesafeStatus).mockResolvedValue({ configured: true, from_environment: false });
-  vi.mocked(api.writeTypesafeKey).mockResolvedValue({ configured: true, from_environment: false });
   vi.mocked(api.semanticSearch).mockResolvedValue({ matches: [], passages: 1 });
   vi.mocked(api.cancelSemanticSearch).mockResolvedValue(undefined);
   vi.mocked(api.writeKeylog).mockResolvedValue("/tmp/synthetic-keylog.jsonl");
@@ -1090,40 +1085,6 @@ it("invalidates displayed meaning results on edits and distinguishes provider er
   await act(async () => editor().dispatch({ changes: { from: 0, insert: "New " } }));
   expect(host.querySelector(".semantic-results button")).toBeNull();
   expect(host.textContent).toContain("Document changed");
-});
-
-it("configures Jev without recording API-key input in the keylog", async () => {
-  vi.mocked(api.typesafeStatus).mockResolvedValueOnce({ configured: false, from_environment: false });
-  await run("find-by-meaning");
-  expect(host.querySelector('input[type="password"]')).not.toBeNull();
-  clearKeylog();
-  await changeField(".semantic-query", "visible query marker");
-  await changeField('input[type="password"]', "synthetic-private-key");
-  const field = host.querySelector<HTMLInputElement>('input[type="password"]')!;
-  field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "s", code: "KeyS" }));
-  await saveKeylog(editor());
-  const recorded = vi.mocked(api.writeKeylog).mock.calls.at(-1)![0];
-  expect(recorded).not.toContain("synthetic-private-key");
-  expect(recorded).not.toContain('"code":"KeyS"');
-  expect(recorded).toContain("visible query marker");
-  await click("Save key");
-  expect(api.writeTypesafeKey).toHaveBeenCalledWith("synthetic-private-key");
-  expect(host.querySelector('input[type="password"]')).toBeNull();
-  await click("Find with Jev");
-  expect(api.semanticSearch).toHaveBeenCalledOnce();
-});
-
-it("does not let an older settings lookup overwrite a saved TypeSafe connection", async () => {
-  let finish!: (status: api.TypeSafeStatus) => void;
-  vi.mocked(api.typesafeStatus).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
-  await run("find-by-meaning");
-  await click("Jev settings");
-  await changeField('input[type="password"]', "synthetic-key");
-  await click("Save key");
-  await act(async () => finish({ configured: false, from_environment: false }));
-  await changeField(".semantic-query", "a meaning");
-  await click("Find with Jev");
-  expect(api.semanticSearch).toHaveBeenCalledOnce();
 });
 
 it("persists the spelling dictionary and keeps spelling and Rephrase contexts distinct", async () => {
