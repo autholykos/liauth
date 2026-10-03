@@ -4,6 +4,7 @@ import { EditorView } from "@codemirror/view";
 import { undo } from "@codemirror/commands";
 import { getCM, Vim } from "@replit/codemirror-vim";
 import { createEditorState, setEditorOption } from "../src/editor/setup";
+import { setSpellingLanguage } from "../src/editor/spellcheck";
 import {
   applyEditsAsSuggestions,
   gotoNextNote,
@@ -25,6 +26,17 @@ function editor(doc: string, onSave = () => {}) {
 afterEach(() => views.splice(0).forEach((view) => view.destroy()));
 
 describe("editor options", () => {
+  it("keeps selection and Undo while changing the spelling dictionary", () => {
+    const view = editor("Opening.");
+    view.dispatch({ changes: { from: 8, insert: " Next." }, selection: { anchor: 3 } });
+    for (const language of ["it", "en_US", ""]) {
+      setSpellingLanguage(view, language);
+      expect(view.state.doc.toString()).toBe("Opening. Next.");
+      expect(view.state.selection.main.head).toBe(3);
+    }
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("Opening.");
+  });
   it.each(["vim", "lineNumbers", "typewriter", "spellcheck"] as const)(
     "%s preserves selection and Undo when toggled both ways",
     (option) => {

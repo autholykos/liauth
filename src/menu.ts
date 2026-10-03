@@ -23,6 +23,31 @@ export type NavigatorFileAction =
 
 const sep = () => PredefinedMenuItem.new({ item: "Separator" });
 
+export async function showSpellingMenu(
+  suggestions: string[],
+  replace: ((text: string) => void) | null,
+  ignore: () => void,
+  learn: () => void,
+  rephrase?: () => void,
+): Promise<void> {
+  const choices = suggestions.length ? await Promise.all(suggestions.map((text) => MenuItem.new({
+    text, enabled: replace !== null, action: () => replace?.(text),
+  }))) : [await MenuItem.new({ text: "No suggestions", enabled: false })];
+  const menu = await Menu.new({ items: [
+    ...choices,
+    await sep(),
+    await MenuItem.new({ text: "Ignore in This Document", action: ignore }),
+    await MenuItem.new({ text: "Learn Spelling", action: learn }),
+    ...(rephrase ? [await sep(), await MenuItem.new({ text: "Rephrase with Toki…", action: rephrase })] : []),
+    await sep(),
+    ...(replace ? [await PredefinedMenuItem.new({ item: "Cut" })] : []),
+    await PredefinedMenuItem.new({ item: "Copy" }),
+    ...(replace ? [await PredefinedMenuItem.new({ item: "Paste" })] : []),
+    await PredefinedMenuItem.new({ item: "SelectAll" }),
+  ] });
+  try { await menu.popup(); } finally { await menu.close().catch(() => {}); }
+}
+
 /** Native file menu for navigator rows. Cut/copy are app-level file
  * operations, so they intentionally use regular menu items rather than the
  * predefined text-editing commands. */
@@ -209,6 +234,11 @@ export async function buildAppMenu(
             "toggle-hidden-files",
             "toggle-lines",
             "toggle-spell",
+          )),
+          ...(registry.has("spelling:") ? [await Submenu.new({
+            text: "Spelling Language", items: await category("spelling:"),
+          })] : []),
+          ...(await items(
             "toggle-page",
             "toggle-adaptive-layout",
             "toggle-markdown-preview",

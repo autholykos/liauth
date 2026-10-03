@@ -32,6 +32,8 @@ const snapshot: CommandSnapshot = {
   vim: false,
   lineNumbers: false,
   spellcheck: true,
+  spellingLanguage: "",
+  spellingLanguages: [{ code: "it", name: "Italian" }],
   pageLayout: false,
   adaptiveLayout: true,
   novelProof: false,
@@ -72,6 +74,8 @@ describe("shared commands", () => {
     expect(
       menu.find((item) => item.id === "toggle-markdown-preview").checked,
     ).toBe(true);
+    expect(menu.find((item) => item.id === "spelling:it").text).toBe("Italian");
+    expect(menu.find((item) => item.id === "spelling:").checked).toBe(true);
   });
 
   it("offers Save all in the native folder menu and disables it while busy", async () => {

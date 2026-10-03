@@ -78,6 +78,7 @@ import { HistoryPanel } from "./HistoryPanel";
 import { BranchesPanel } from "./BranchesPanel";
 import { FileNavigator } from "./FileNavigator";
 import { SearchResults } from "./SearchResults";
+import { openSpellingContextMenu, setSpellingLanguage as updateSpellingLanguage } from "./editor/spellcheck";
 import { SemanticSearch } from "./SemanticSearch";
 import { useFolderExpansion } from "./useFolderExpansion";
 import { isInFolder } from "./folders";
@@ -194,6 +195,10 @@ function App() {
     "liauth.spell",
     (stored) => stored !== "0",
   );
+  const [spellingLanguage, setSpellingLanguage] = usePersistedSetting(
+    "liauth.spellLanguage", (stored) => stored ?? "",
+  );
+  const [spellingLanguages, setSpellingLanguages] = useState<api.SpellingLanguage[]>([]);
   const [pageLayout, setPageLayout] = usePersistedSetting(
     "liauth.page",
     (stored) => stored === "1",
@@ -217,6 +222,7 @@ function App() {
     typewriter: room,
     lineNumbers: lineNums,
     spellcheck,
+    spellingLanguage,
     adaptiveLayout,
   };
   const editorOptionsRef = useRef(editorOptions);
@@ -644,6 +650,15 @@ function App() {
     const view = viewRef.current;
     if (view) setEditorOption(view, "spellcheck", spellcheck);
   }, [spellcheck]);
+
+  useEffect(() => {
+    void api.spellingLanguages().then(setSpellingLanguages)
+      .catch((error) => flash(`Could not load spelling languages: ${error}`));
+  }, [flash]);
+
+  useEffect(() => {
+    if (viewRef.current) updateSpellingLanguage(viewRef.current, spellingLanguage);
+  }, [spellingLanguage]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -1795,8 +1810,24 @@ function App() {
 
   const openEditorContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented) return;
       const view = viewRef.current;
-      if (!view || viewing || view.state.readOnly) return;
+      if (!view) return;
+      const rephrase = (from: number, to: number, selection: string, document: string) => {
+        if (view.state.readOnly || previewHost.current) return;
+        const overlapsNote = view.state.field(notesField)
+          .some((note) => from < note.to && to > note.from);
+        if (overlapsNote) {
+          flash("Rephrase cannot cross an existing note or suggestion");
+          return;
+        }
+        startRephrase(from, to, selection, document);
+      };
+      if (openSpellingContextMenu(view, event.target, viewing ? undefined : rephrase)) {
+        event.preventDefault();
+        return;
+      }
+      if (viewing || view.state.readOnly) return;
       if (view.state.selection.ranges.length !== 1) return;
       const { from, to } = view.state.selection.main;
       if (from === to) return;
@@ -1805,15 +1836,8 @@ function App() {
       event.preventDefault();
       const document = view.state.doc.toString();
       const selection = view.state.sliceDoc(from, to);
-      const overlapsNote = view.state
-        .field(notesField)
-        .some((note) => from < note.to && to > note.from);
       void showEditorSelectionMenu(() => {
-        if (overlapsNote) {
-          flash("Rephrase cannot cross an existing note or suggestion");
-          return;
-        }
-        startRephrase(from, to, selection, document);
+        rephrase(from, to, selection, document);
       }).catch((error) => flash(`Could not open editor menu: ${error}`));
     },
     [viewing, startRephrase, flash],
@@ -2041,6 +2065,8 @@ function App() {
       vim: vimMode,
       lineNumbers: lineNums,
       spellcheck,
+      spellingLanguage,
+      spellingLanguages,
       pageLayout,
       adaptiveLayout,
       novelProof,
@@ -2129,6 +2155,7 @@ function App() {
       openRecent: openPath,
       theme: setTheme,
       font: setFont,
+      spellingLanguage: setSpellingLanguage,
     },
   );
   const commandsRef = useRef<AppCommand[]>(commands);
@@ -2160,6 +2187,8 @@ function App() {
     vimMode,
     lineNums,
     spellcheck,
+    spellingLanguage,
+    spellingLanguages,
     pageLayout,
     adaptiveLayout,
     novelProof,

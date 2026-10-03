@@ -3,6 +3,7 @@ mod config;
 mod document;
 mod git;
 mod semantic;
+mod spelling;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -551,6 +552,10 @@ pub fn run() {
             config::write_keylog,
             config::typesafe_status,
             config::write_typesafe_key,
+            spelling::spelling_languages,
+            spelling::check_spelling,
+            spelling::spelling_suggestions,
+            spelling::learn_spelling_word,
             semantic::semantic_search,
             semantic::cancel_semantic_search,
             ai::draft_note_edits,

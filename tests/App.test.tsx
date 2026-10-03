@@ -12,7 +12,7 @@ import {
 } from "@tauri-apps/plugin-dialog";
 import { watch } from "@tauri-apps/plugin-fs";
 import type { AppCommand } from "../src/commands";
-import { showNavigatorFolderMenu } from "../src/menu";
+import { showNavigatorFolderMenu, showSpellingMenu, showEditorSelectionMenu } from "../src/menu";
 import { wrappedMarkdown } from "./fixtures/wrappedMarkdown";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { clearKeylog, saveKeylog } from "../src/editor/keylog";
@@ -26,9 +26,10 @@ vi.mock("../src/menu", () => ({
   buildAppMenu: vi.fn(async (commands) => {
     native.commands = commands;
   }),
-  showEditorSelectionMenu: vi.fn(),
+  showEditorSelectionMenu: vi.fn().mockResolvedValue(undefined),
   showNavigatorFileMenu: vi.fn(),
   showNavigatorFolderMenu: vi.fn(),
+  showSpellingMenu: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
@@ -82,6 +83,11 @@ vi.mock("../src/api", () => ({
   semanticSearch: vi.fn(),
   cancelSemanticSearch: vi.fn(),
   writeKeylog: vi.fn(),
+  spellingLanguages: vi.fn(),
+  checkSpelling: vi.fn(),
+  spellingSuggestions: vi.fn(),
+  learnSpellingWord: vi.fn(),
+  listRephraseSkills: vi.fn(),
 }));
 
 let root: Root;
@@ -135,6 +141,11 @@ beforeEach(async () => {
   vi.mocked(api.semanticSearch).mockResolvedValue({ matches: [], passages: 1 });
   vi.mocked(api.cancelSemanticSearch).mockResolvedValue(undefined);
   vi.mocked(api.writeKeylog).mockResolvedValue("/tmp/synthetic-keylog.jsonl");
+  vi.mocked(api.spellingLanguages).mockResolvedValue([{ code: "it", name: "Italian" }]);
+  vi.mocked(api.checkSpelling).mockResolvedValue({ supported: true, ranges: [] });
+  vi.mocked(api.spellingSuggestions).mockResolvedValue([]);
+  vi.mocked(api.learnSpellingWord).mockResolvedValue(undefined);
+  vi.mocked(api.listRephraseSkills).mockResolvedValue([]);
   vi.mocked(api.readVimConfig).mockResolvedValue(null);
   vi.mocked(api.fileHistory).mockResolvedValue([
     { id: "1234567", summary: "First version", time: 1, author: "Writer" },
@@ -1113,4 +1124,33 @@ it("does not let an older settings lookup overwrite a saved TypeSafe connection"
   await changeField(".semantic-query", "a meaning");
   await click("Find with Jev");
   expect(api.semanticSearch).toHaveBeenCalledOnce();
+});
+
+it("persists the spelling dictionary and keeps spelling and Rephrase contexts distinct", async () => {
+  vi.mocked(api.checkSpelling).mockImplementation(async (text) => {
+    const from = text.indexOf("cosìgranitico");
+    return { supported: true, ranges: from < 0 ? [] : [{ from, to: from + "cosìgranitico".length }] };
+  });
+  await run("spelling:it");
+  expect(localStorage.getItem("liauth.spellLanguage")).toBe("it");
+  expect(native.commands.find((command) => command.id === "spelling:it")?.checked).toBe(true);
+  await act(async () => editor().dispatch({
+    changes: { from: 0, to: editor().state.doc.length, insert: "cosìgranitico" },
+    selection: { anchor: 0 },
+  }));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+  expect(api.checkSpelling).toHaveBeenLastCalledWith("cosìgranitico", "it");
+  const mark = host.querySelector(".cm-spelling-error");
+  expect(mark).not.toBeNull();
+  vi.spyOn(editor(), "posAtCoords").mockReturnValue(4);
+  await act(async () => mark!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })));
+  expect(showSpellingMenu).toHaveBeenCalledOnce();
+  expect(showEditorSelectionMenu).not.toHaveBeenCalled();
+  await act(async () => editor().dispatch({ selection: { anchor: 0, head: "cosìgranitico".length } }));
+  await act(async () => host.querySelector(".cm-spelling-error")!.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+  ));
+  expect(showSpellingMenu).toHaveBeenCalledTimes(2);
+  await act(async () => vi.mocked(showSpellingMenu).mock.calls.at(-1)![4]!());
+  expect(api.listRephraseSkills).toHaveBeenCalledWith("/novel");
 });
