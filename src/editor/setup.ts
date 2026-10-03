@@ -22,7 +22,7 @@ import {
   gotoNextNote,
 } from "./notes";
 import { historyDiff } from "./historyDiff";
-import { spellcheck } from "./spellcheck";
+import { spellcheck, spellingConfiguration } from "./spellcheck";
 import { adaptiveLayout } from "./adaptiveLayout";
 
 import {
@@ -435,6 +435,7 @@ export interface EditorOptions {
   typewriter?: boolean;
   lineNumbers?: boolean;
   spellcheck?: boolean;
+  spellingLanguage?: string;
   adaptiveLayout?: boolean;
 }
 
@@ -523,6 +524,7 @@ export function createEditorState(
   return EditorState.create({
     doc,
     extensions: [
+      spellingConfiguration(opts.spellingLanguage ?? "", cb.onNotice),
       // vim() must precede other keymaps to take precedence.
       ...Object.entries(optionCompartments).map(([name, compartment]) =>
         compartment.of(

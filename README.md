@@ -54,10 +54,15 @@ git engine for versioning and asynchronous review.
   pivot, sentence/paragraph-aware pacing, 100–900 WPM (↑/↓), arrows to step,
   Esc drops the cursor where you stopped. Markdown syntax and notes are
   stripped from the word stream.
-- **Spell checking** — native macOS dictionaries with automatic language
-  detection, on by default (View › Check Spelling). Code, URLs and HTML are
-  skipped; right-click a marked word for suggestions, Ignore, or Learn
-  Spelling.
+- **Spell checking** — macOS dictionaries check the visible source text and
+  CodeMirror keeps the underlines stable across live-preview rendering and
+  scrolling, including files opened without typing. On by default (View ›
+  Check Spelling). Choose an installed dictionary in **View › Spelling
+  Language**, or keep the system default. Code, URLs, HTML and hidden review
+  comments are skipped. Right-click a marked word for suggestions, Ignore in
+  This Document, or Learn Spelling. Corrections support Undo. This checks
+  spelling; an existing word used with the wrong meaning may require a
+  contextual review.
 - **Key log** — `:keylog` (or "Write Key Log" in the palette) dumps the last
   500 diagnostic events — keys, composition and focus changes, mouse presses
   and releases with coordinates and modifiers, selections, scroll positions,

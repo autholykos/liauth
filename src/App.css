@@ -111,6 +111,14 @@
   background: var(--c-selection);
 }
 
+.cm-spelling-error {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: #d33f49;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
 * {
   box-sizing: border-box;
 }

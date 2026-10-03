@@ -170,6 +170,15 @@ export const typesafeStatus = () => invoke<TypeSafeStatus>("typesafe_status");
 export const writeTypesafeKey = (apiKey: string) =>
   invoke<TypeSafeStatus>("write_typesafe_key", { apiKey });
 
+export interface SpellingLanguage { code: string; name: string }
+export interface SpellingRange { from: number; to: number }
+export const spellingLanguages = () => invoke<SpellingLanguage[]>("spelling_languages");
+export const checkSpelling = (text: string, language: string) =>
+  invoke<{ supported: boolean; ranges: SpellingRange[] }>("check_spelling", { text, language });
+export const spellingSuggestions = (word: string, language: string) =>
+  invoke<string[]>("spelling_suggestions", { word, language });
+export const learnSpellingWord = (word: string) => invoke<void>("learn_spelling_word", { word });
+
 export interface SemanticMatch {
   from: number;
   to: number;

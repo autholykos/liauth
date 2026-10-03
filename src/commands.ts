@@ -18,6 +18,8 @@ export interface CommandSnapshot {
   vim: boolean;
   lineNumbers: boolean;
   spellcheck: boolean;
+  spellingLanguage: string;
+  spellingLanguages: { code: string; name: string }[];
   pageLayout: boolean;
   adaptiveLayout: boolean;
   novelProof: boolean;
@@ -247,6 +249,7 @@ export type CommandActions = Record<CommandId, () => void> & {
   openRecent: (path: string) => void;
   theme: (theme: Theme) => void;
   font: (font: FontPref) => void;
+  spellingLanguage: (code: string) => void;
 };
 export interface AppCommand extends CommandDefinition {
   run: () => void;
@@ -286,6 +289,13 @@ export function createCommands(
       menuTitle: f.label,
       checked: s.font === f.id,
       run: () => actions.font(f.id),
+    })),
+    ...(s.spellingLanguages.length ? [{ code: "", name: "System default" }, ...s.spellingLanguages] : []).map((language) => ({
+      id: `spelling:${language.code}`,
+      title: `Spelling language: ${language.name}`,
+      menuTitle: language.name,
+      checked: s.spellingLanguage === language.code,
+      run: () => actions.spellingLanguage(language.code),
     })),
     ...s.recents.map((path) => ({
       id: `recent:${path}`,

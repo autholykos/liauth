@@ -184,10 +184,14 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
             zoom live in the View menu.
           </p>
           <p>
-            Spelling is checked with the macOS dictionaries, language detected
-            automatically; code, URLs and HTML are skipped. Right-click a
-            marked word for suggestions, Ignore, or Learn Spelling. Toggle it
-            with Check Spelling in the View menu.
+            Spelling is checked with the macOS dictionaries, including text
+            loaded from disk. Choose <strong>View ▸ Spelling Language</strong>
+            {" "}to select a dictionary such as Italian, or use the system
+            default. Code, URLs, HTML and hidden review comments are skipped.
+            Right-click a marked word for suggestions, Ignore in This Document,
+            or Learn Spelling. Corrections support Undo. Toggle checking with
+            Check Spelling in the View menu. Correctly spelled words used with
+            the wrong meaning may need a contextual review.
           </p>
           <p>
             <strong>View ▸ Adaptive Layout</strong> is on by default. Documents
