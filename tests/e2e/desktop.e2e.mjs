@@ -16,6 +16,8 @@ const results = [];
 const requests = [];
 const frontendLogs = [];
 let mode = 'matches';
+// Slow replies wait until the scenario has stopped the search, however long that took.
+const heldReplies = [];
 let app, browser;
 let starts = 0;
 // Fixture Git ignores user config: signing or hooks could prompt on the desktop.
@@ -42,7 +44,7 @@ const server = createServer(async (req, res) => {
       [id, { type: 'noul', noul: responseMode === 'none' ? 0.1 : text.includes('nascose la scatola') ? 0.96 : id === 'p0002' ? 0.55 : id === 'p0003' ? 0.49 : 0.1 }]));
     res.end(JSON.stringify({ answers }));
   };
-  if (mode === 'slow') setTimeout(reply, 1500); else reply();
+  if (mode === 'slow') heldReplies.push(reply); else reply();
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const portServer = createServer();
@@ -231,6 +233,9 @@ try {
         if (action === 'edit') await edit('Documento cambiato durante la ricerca.');
         if (action === 'query') await browser.$('.semantic-query').setValue('Nuova ricerca');
         if (action === 'switch') await open(join(repo, 'second.md'));
+        await wait(async () => !(await bodyText()).includes('Searching with Jev'), `Search still running after ${action}`);
+        await new Promise(r => setTimeout(r, 300));
+        heldReplies.splice(0).forEach(reply => reply());
         await new Promise(r => setTimeout(r, 1800));
         assert.equal(requests.length, before + 1, `Unexpected additional batch after ${action}`);
         assert.equal(await browser.$('.semantic-results button').isExisting(), false, `Stale results after ${action}`);
