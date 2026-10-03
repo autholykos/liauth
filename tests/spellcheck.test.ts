@@ -85,6 +85,23 @@ it("discards old responses after a document or dictionary change", async () => {
   expect(view.posAtDOM(view.dom.querySelector(".cm-spelling-error")!)).toBe(3);
 });
 
+it("keeps marks of untouched words visible while an edit is rechecked", async () => {
+  create(`Inizio ${typo} e ${typo}`);
+  await settle();
+  expect(marks()).toEqual([typo, typo]);
+  view.dispatch({ changes: { from: 0, insert: "Nuovo " } });
+  expect(marks()).toEqual([typo, typo]);
+  const end = view.state.doc.length;
+  view.dispatch({ changes: { from: end - 1, to: end, insert: "a" } });
+  expect(marks()).toEqual([typo]);
+  await settle();
+  expect(api.checkSpelling).toHaveBeenLastCalledWith(
+    `Nuovo Inizio ${typo} e ${typo.slice(0, -1)}a`,
+    "it",
+  );
+  expect(marks()).toEqual([typo]);
+});
+
 it("corrects with Undo and keeps ignored words across spelling toggles", async () => {
   create(typo);
   await settle();

@@ -38,10 +38,19 @@ pub fn spelling_languages() -> Vec<SpellingLanguage> {
     Vec::new()
 }
 
+// Each misspelling costs a blocking native call (tens of milliseconds for a
+// chunk checked in the wrong language), so keep it off the main thread.
+// NSSpellChecker is not main-thread-only: Swift does not mark it @MainActor.
+#[tauri::command]
+pub async fn check_spelling(text: String, language: String) -> Result<SpellingResult, String> {
+    tauri::async_runtime::spawn_blocking(move || check(text, language))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // Explicit-language checks must use this API: the unified async checker can
 // override an NSOrthography hint with automatic language detection.
-#[tauri::command]
-pub fn check_spelling(text: String, language: String) -> Result<SpellingResult, String> {
+fn check(text: String, language: String) -> Result<SpellingResult, String> {
     if text.encode_utf16().count() > 4000 {
         return Err("Spelling request is too large".into());
     }
