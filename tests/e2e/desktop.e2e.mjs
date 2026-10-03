@@ -301,7 +301,8 @@ try {
     await wait(() => git(repo, 'rev-list', '--count', 'HEAD') === '3', 'Review not committed');
     await browser.$('.branch-list').$('li*=main').$('button=Switch').click();
     await wait(() => git(repo, 'branch', '--show-current') === 'main', 'Switch failed');
-    assert.doesNotMatch(await text(), /Prima riga rivista/);
+    // The editor reloads main's version after Git reports the switch.
+    await wait(async () => !(await text()).includes('Prima riga rivista'), 'Switch did not reload the editor');
     await browser.$('.branch-list').$('li*=e2e-review').$('button=Merge in').click();
     await wait(async () => (await text()).includes('Prima riga rivista'), 'Merge did not update editor');
     assert.match(git(repo, 'show', 'HEAD:chapter.md'), /Prima riga rivista/);
