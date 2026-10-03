@@ -1,14 +1,17 @@
 {
   "name": "liauth",
   "private": true,
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run --environment jsdom"
+    "test": "npm run test:e2e",
+    "test:e2e": "node tests/e2e/desktop.e2e.mjs",
+    "test:e2e:live": "node tests/e2e/desktop.e2e.mjs --live",
+    "test:focused": "vitest run --environment jsdom"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
@@ -40,6 +43,7 @@
     "jsdom": "^30.0.1",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "webdriverio": "^9.32.0"
   }
 }

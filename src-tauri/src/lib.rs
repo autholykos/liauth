@@ -1,3 +1,6 @@
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!("The e2e driver must not be included in release builds");
+
 mod ai;
 mod config;
 mod document;
@@ -517,7 +520,31 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     apply_mac_text_defaults();
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    #[cfg(feature = "e2e")]
+    let context = {
+        let mut context = context;
+        let window = &mut context.config_mut().app.windows[0];
+        window.create = false;
+        window.visible = false;
+        window.focus = false;
+        window.focusable = false;
+        context
+    };
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "e2e")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .setup(|app| {
+            let store = std::env::var("LIAUTH_E2E_DATA_STORE")?;
+            // Tauri 2.11 does not copy this field from WindowConfig.
+            tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .data_store_identifier(serde_json::from_str(&store)?)
+                .build()?;
+            Ok(())
+        });
+
+    let app = builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -569,26 +596,32 @@ pub fn run() {
             paste_project_file,
             delete_project_file,
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            if let tauri::RunEvent::Opened { urls } = event {
-                let paths: Vec<_> = urls
-                    .iter()
-                    .filter_map(|u| u.to_file_path().ok())
-                    .map(|p| p.display().to_string())
-                    .collect();
-                // If every item is unsupported, forward the first one so the
-                // frontend can explain the rejection instead of silently ignoring it.
-                if let Some(path) =
-                    find_text_document(paths.clone()).or_else(|| paths.into_iter().next())
-                {
-                    *app.state::<PendingOpen>().0.lock().unwrap() = Some(path.clone());
-                    let _ = app.emit("open-file", path);
-                }
+        .build(context)
+        .expect("error while building tauri application");
+    #[cfg(all(feature = "e2e", target_os = "macos"))]
+    let app = {
+        let mut app = app;
+        app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        app
+    };
+    app.run(|app, event| {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let tauri::RunEvent::Opened { urls } = event {
+            let paths: Vec<_> = urls
+                .iter()
+                .filter_map(|u| u.to_file_path().ok())
+                .map(|p| p.display().to_string())
+                .collect();
+            // If every item is unsupported, forward the first one so the
+            // frontend can explain the rejection instead of silently ignoring it.
+            if let Some(path) =
+                find_text_document(paths.clone()).or_else(|| paths.into_iter().next())
+            {
+                *app.state::<PendingOpen>().0.lock().unwrap() = Some(path.clone());
+                let _ = app.emit("open-file", path);
             }
-        });
+        }
+    });
 }
 
 #[cfg(test)]
@@ -832,7 +865,8 @@ mod tests {
             format!("Previous paragraph.\r\n\r\n{paragraph}\r\n \t\r\nNext paragraph."),
         )
         .unwrap();
-        let search = search_project_files(p(&document), "needle".into(), false, None, None).unwrap();
+        let search =
+            search_project_files(p(&document), "needle".into(), false, None, None).unwrap();
         assert_eq!(search.matches.len(), 1);
         let found = &search.matches[0];
         assert_eq!(found.preview, paragraph.replace("\r\n", "\n"));
@@ -876,9 +910,10 @@ mod tests {
 
         assert_eq!(search.matches.len(), PROJECT_SEARCH_LIMIT);
         assert!(search.truncated);
-        assert!(search.matches.iter().all(|found| {
-            found.preview.len() <= 4096 && found.preview.contains("match")
-        }));
+        assert!(search
+            .matches
+            .iter()
+            .all(|found| { found.preview.len() <= 4096 && found.preview.contains("match") }));
         assert!(serde_json::to_vec(&search).unwrap().len() < 2_000_000);
     }
 
@@ -974,7 +1009,9 @@ mod tests {
         let repo = git2::Repository::open(dir.path()).unwrap();
         let tree = repo.head().unwrap().peel_to_tree().unwrap();
         assert!(tree.get_path(std::path::Path::new("draft.md")).is_err());
-        assert!(tree.get_path(std::path::Path::new("chapters/draft.md")).is_ok());
+        assert!(tree
+            .get_path(std::path::Path::new("chapters/draft.md"))
+            .is_ok());
         assert!(repo.statuses(None).unwrap().is_empty());
     }
 }
