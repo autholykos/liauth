@@ -43,6 +43,7 @@ tauri-plugin-wdio-webdriver = { version = "1.4.0", optional = true }
 # zero margins. Versions/features match what wry already pulls in, so this
 # adds nothing to the build.
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "NSPrintInfo",
