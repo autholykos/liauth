@@ -91,11 +91,10 @@ git engine for versioning and asynchronous review.
   passages from the current editor buffer, including unsaved text; clicking a
   result selects that passage. Less certain candidates are marked **Possible
   match**. Editing the document or query invalidates old
-  results. Searches run on request and can be cancelled. Add a TypeSafe API key
-  in **Jev settings**, or launch with `TYPESAFE_API_KEY`. The app stores an entered
-  key in `~/.config/liauth/typesafe-key`, readable only by its owner, and excludes
-  password fields from keylogs. Requests send passages to TypeSafe's official
-  API using `jev-1.13.0`. The first version supports documents up to 128 KB and
+  results. Searches run on request and can be cancelled. No API key is required.
+  Requests send passages to TypeSafe through Nanto's model router at
+  `https://models.nanto.org/v1/systemone` using model `jev`.
+  The first version supports documents up to 128 KB and
   256 passages, returning up to 20 matches; larger documents are rejected before
   sending. Cancel prevents further batches; an already sent batch may finish.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
@@ -127,8 +126,8 @@ npm test               # editor, document session, and app regression tests
 cd src-tauri && cargo test   # git engine end-to-end tests
 ```
 
-The opt-in Jev smoke test sends synthetic Italian fixtures to TypeSafe. With
-`TYPESAFE_API_KEY` in the environment, run from the repository root:
+The opt-in Jev smoke test sends synthetic Italian fixtures to TypeSafe through
+Nanto's model router. No API key is required. Run from the repository root:
 
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml live_jev_semantic_queries -- --ignored --nocapture
