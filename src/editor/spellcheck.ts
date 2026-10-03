@@ -246,13 +246,24 @@ const checking = ViewPlugin.fromClass(
     update(update: ViewUpdate) {
       // The parser finishes large documents asynchronously, in updates that
       // change neither the document nor the viewport.
-      if (
-        decorationsChanged(update) ||
+      const languageChanged =
         update.startState.facet(config).language !==
-          update.state.facet(config).language
-      ) {
+        update.state.facet(config).language;
+      if (decorationsChanged(update) || languageChanged) {
         this.generation++;
-        this.ranges = [];
+        // Marks stay visible until the recheck; only edited words lose theirs.
+        this.ranges = languageChanged
+          ? []
+          : this.ranges.flatMap((range) =>
+              update.changes.touchesRange(range.from, range.to)
+                ? []
+                : [
+                    {
+                      from: update.changes.mapPos(range.from),
+                      to: update.changes.mapPos(range.to),
+                    },
+                  ],
+            );
         this.fallback = false;
         this.draw(update.view);
         this.schedule(update.view);
