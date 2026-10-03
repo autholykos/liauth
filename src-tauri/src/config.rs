@@ -14,6 +14,14 @@ pub struct VimConfig {
 /// to their real vimrc (vimscript only — init.lua can't be parsed).
 #[tauri::command]
 pub fn read_vim_config() -> Option<VimConfig> {
+    #[cfg(feature = "e2e")]
+    if let Some(dir) = std::env::var_os("LIAUTH_E2E_CONFIG") {
+        let path = PathBuf::from(dir).join("vimrc");
+        return fs::read_to_string(&path).ok().map(|content| VimConfig {
+            path: path.display().to_string(),
+            content,
+        });
+    }
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let candidates = [
         home.join(".config/liauth/vimrc"),
@@ -33,6 +41,12 @@ pub fn read_vim_config() -> Option<VimConfig> {
 
 /// Liauth's own config directory, created on demand.
 fn config_dir() -> Result<PathBuf, String> {
+    #[cfg(feature = "e2e")]
+    if let Some(dir) = std::env::var_os("LIAUTH_E2E_CONFIG") {
+        let dir = PathBuf::from(dir);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        return Ok(dir);
+    }
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?);
     let dir = home.join(".config/liauth");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

@@ -77,8 +77,6 @@ vi.mock("../src/api", () => ({
   checkoutBranch: vi.fn(),
   draftNoteEdits: vi.fn(),
   findTextDocument: vi.fn(),
-  semanticSearch: vi.fn(),
-  cancelSemanticSearch: vi.fn(),
   writeKeylog: vi.fn(),
   spellingLanguages: vi.fn(),
   checkSpelling: vi.fn(),
@@ -133,8 +131,6 @@ beforeEach(async () => {
   });
   vi.mocked(api.takePendingOpen).mockResolvedValue(null);
   vi.mocked(api.findTextDocument).mockResolvedValue(null);
-  vi.mocked(api.semanticSearch).mockResolvedValue({ matches: [], passages: 1 });
-  vi.mocked(api.cancelSemanticSearch).mockResolvedValue(undefined);
   vi.mocked(api.writeKeylog).mockResolvedValue("/tmp/synthetic-keylog.jsonl");
   vi.mocked(api.spellingLanguages).mockResolvedValue([{ code: "it", name: "Italian" }]);
   vi.mocked(api.checkSpelling).mockResolvedValue({ supported: true, ranges: [] });
@@ -1000,91 +996,6 @@ it("does not discard typing while a branch switch is in progress", async () => {
   });
   expect(editor().state.doc.toString()).toBe("New First {>>note<<}");
   expect(host.textContent).toContain("newer editor changes kept");
-});
-
-const changeField = async (selector: string, value: string) => {
-  const field = host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
-  const prototype = field instanceof HTMLTextAreaElement
-    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(field, value);
-    field.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
-  });
-};
-
-it("searches the unsaved document by meaning and navigates its original passage from preview", async () => {
-  const source = "Introduzione.\n\nLia 😀 cambiò discorso e guardò altrove.\nVictor attese invano.";
-  await act(async () => editor().dispatch({
-    changes: { from: 0, to: editor().state.doc.length, insert: source },
-  }));
-  await run("toggle-markdown-preview");
-  await run("find-by-meaning");
-  const from = source.indexOf("Lia");
-  const passage = { from, to: source.length, line: 3, preview: source.slice(from), relevance: 0.98 };
-  vi.mocked(api.semanticSearch).mockResolvedValue({ matches: [passage], passages: 2 });
-  await changeField(".semantic-query", "qualcuno evita di rispondere");
-  expect(api.semanticSearch).not.toHaveBeenCalled();
-  expect(api.searchProjectFiles).not.toHaveBeenCalled();
-  await click("Find with Jev");
-  expect(api.semanticSearch).toHaveBeenCalledWith(source, "qualcuno evita di rispondere", expect.any(String));
-  expect(host.querySelector(".semantic-results")?.textContent).toContain(passage.preview);
-  await act(async () => host.querySelector<HTMLButtonElement>('.semantic-results button[title="Line 3"]')!.click());
-  expect(host.querySelector(".proof-hidden")).toBeNull();
-  expect(editor().state.selection.main.from).toBe(from);
-  expect(editor().state.selection.main.to).toBe(source.length);
-  expect(editor().state.doc.toString()).toBe(source);
-  await run("find-by-meaning");
-  expect(document.activeElement).toBe(host.querySelector(".semantic-query"));
-});
-
-it.each(["edit", "switch", "query", "cancel"])(
-  "discards a delayed semantic response after %s and cancels remaining work",
-  async (action) => {
-    let finish!: (result: api.SemanticResults) => void;
-    vi.mocked(api.semanticSearch).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
-    await run("find-by-meaning");
-    await changeField(".semantic-query", "first meaning");
-    await click("Find with Jev");
-    const id = vi.mocked(api.semanticSearch).mock.calls.at(-1)![2];
-    if (action === "edit") {
-      await act(async () => editor().dispatch({ changes: { from: 0, insert: "Changed " } }));
-    } else if (action === "switch") {
-      vi.mocked(openDialog).mockResolvedValueOnce("/novel/second.md");
-      vi.mocked(api.readDocument).mockResolvedValueOnce("Second document.");
-      await run("open");
-    } else if (action === "query") {
-      await changeField(".semantic-query", "another meaning");
-    } else {
-      await click("Cancel");
-    }
-    await act(async () => finish({
-      matches: [{ from: 0, to: 5, line: 1, preview: "Stale passage", relevance: 0.99 }], passages: 1,
-    }));
-    expect(api.cancelSemanticSearch).toHaveBeenCalledWith(id);
-    expect(host.textContent).not.toContain("Stale passage");
-    expect(host.textContent).not.toContain("Searching with Jev…");
-  },
-);
-
-it("invalidates displayed meaning results on edits and distinguishes provider errors from no matches", async () => {
-  await run("find-by-meaning");
-  await changeField(".semantic-query", "meaning");
-  vi.mocked(api.semanticSearch).mockRejectedValueOnce(new Error("Jev is busy"));
-  await click("Find with Jev");
-  expect(host.querySelector('[role="alert"]')?.textContent).toContain("Jev is busy");
-  expect(host.textContent).not.toContain("No convincing matches");
-  await click("Find with Jev");
-  expect(host.querySelector('[role="alert"]')).toBeNull();
-  expect(host.textContent).toContain("No convincing matches found.");
-  vi.mocked(api.semanticSearch).mockResolvedValueOnce({
-    matches: [{ from: 0, to: 5, line: 1, preview: "First", relevance: 0.55 }], passages: 1,
-  });
-  await click("Find with Jev");
-  expect(host.querySelector(".semantic-results button")).not.toBeNull();
-  expect(host.querySelector(".semantic-results")?.textContent).toContain("Possible match");
-  await act(async () => editor().dispatch({ changes: { from: 0, insert: "New " } }));
-  expect(host.querySelector(".semantic-results button")).toBeNull();
-  expect(host.textContent).toContain("Document changed");
 });
 
 it("persists the spelling dictionary and keeps spelling and Rephrase contexts distinct", async () => {

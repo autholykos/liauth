@@ -122,7 +122,10 @@ changing the storage model.
 npm install
 npm run tauri dev      # run the app
 npm run build          # typecheck + bundle frontend
-npm test               # editor, document session, and app regression tests
+npm test               # primary gate: real macOS app, hidden and unfocused
+npm run test:focused   # focused regressions not yet replaced by E2E
+npm run test:e2e       # real macOS app, isolated files/Git, controlled Jev HTTP
+npm run test:e2e:live  # real macOS app against the Nanto Jev endpoint
 cd src-tauri && cargo test   # git engine end-to-end tests
 ```
 
@@ -132,6 +135,9 @@ Nanto's model router. No API key is required. Run from the repository root:
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml live_jev_semantic_queries -- --ignored --nocapture
 ```
+
+Desktop E2E scenarios, retained coverage and artifact locations are described in
+[tests/e2e/README.md](tests/e2e/README.md).
 
 ## Releases
 

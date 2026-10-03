@@ -273,7 +273,12 @@ pub async fn semantic_search(
     searches: tauri::State<'_, Searches>,
 ) -> Result<SemanticResults, String> {
     let cancelled = searches.start(request_id.clone());
-    let result = search(&document, &query, ENDPOINT, &cancelled).await;
+    let endpoint = ENDPOINT;
+    #[cfg(feature = "e2e")]
+    let endpoint_override = std::env::var("LIAUTH_E2E_JEV_ENDPOINT").ok();
+    #[cfg(feature = "e2e")]
+    let endpoint = endpoint_override.as_deref().unwrap_or(endpoint);
+    let result = search(&document, &query, endpoint, &cancelled).await;
     searches.cancel(&request_id);
     result
 }
