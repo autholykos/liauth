@@ -18,7 +18,9 @@ const frontendLogs = [];
 let mode = 'matches';
 let app, browser;
 let starts = 0;
-const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+// Fixture Git ignores user config: signing or hooks could prompt on the desktop.
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnv }).trim();
 const wait = async (check, message, timeout = 15000) => {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
@@ -170,7 +172,10 @@ const scenario = async (name, fn) => {
   }
 };
 try {
-  const build = spawn('npm', ['run', 'tauri', '--', 'build', '--debug', '--no-bundle', '--features', 'e2e', '--config', join(run, 'tauri.json')], { stdio: 'inherit' });
+  const build = spawn('npm', ['run', 'tauri', '--', 'build', '--debug', '--no-bundle', '--features', 'e2e', '--config', join(run, 'tauri.json')], {
+    // start() launches src-tauri/target/debug/liauth; never a stale binary from another target dir.
+    stdio: 'inherit', env: { ...process.env, CARGO_TARGET_DIR: resolve('src-tauri/target') },
+  });
   if (await new Promise(r => build.on('exit', r)) !== 0) throw new Error('E2E build failed');
   
   await start();
