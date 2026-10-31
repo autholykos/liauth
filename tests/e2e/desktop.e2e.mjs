@@ -18,7 +18,6 @@ const chats = [];
 const frontendLogs = [];
 let mode = 'matches';
 const tokiSquash = 'Capitolo 22: Lisa e Victor nel parcheggio';
-let tokiSquashReply = tokiSquash;
 const tokiRecap = 'Ritocco al capitolo';
 // Held recaps answer only when the scenario releases them.
 let holdRecaps = false;
@@ -54,7 +53,7 @@ const server = createServer(async (req, res) => {
     const reply = () => {
       if (res.destroyed) return;
       res.writeHead(200, { 'content-type': 'application/json' });
-      const message = squash ? tokiSquashReply : tokiRecap;
+      const message = squash ? tokiSquash : tokiRecap;
       res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ message }) }, finish_reason: 'stop' }] }));
     };
     if (holdRecaps && !squash) heldRecaps.push(reply); else reply();
@@ -433,8 +432,9 @@ try {
       // Each save gets Toki's recap in the background; wait so nothing races it.
       await wait(() => git(m3, 'rev-parse', 'HEAD') !== before && git(m3, 'log', '-1', '--format=%s') === tokiRecap, 'Save was not committed and recapped');
     };
-    const published = () => git(origin, 'rev-parse', 'main');
-    await scenario('publish-arrival-divergence-and-squash', async () => {
+    const published = (branch = 'main') => git(origin, 'rev-parse', branch);
+    const pushedSubjects = since => git(origin, 'log', '--reverse', '--no-merges', '--format=%s', `${since}..main`).split('\n');
+    await scenario('publish-arrival-and-divergence', async () => {
       git(run, 'init', '-q', '--bare', '-b', 'main', origin);
       git(run, 'clone', '-q', origin, m3);
       for (const [name, body] of [['cap12.md', 'Victor ripete «Miguel».\n'], ['cap13.md', 'Il sogno della madre.\n'], ['cap22.md', scene.join('\n\n') + '\n']])
@@ -460,7 +460,6 @@ try {
       await save();
       await command('Squash Recent Commits');
       await wait(() => git(m3, 'rev-list', '--count', `${t1}..HEAD`) === '1', 'Manual squash did not happen');
-      const manual = git(m3, 'rev-parse', 'HEAD');
       await edit([scene[0], 'Victor aspettava in macchina, il motore acceso.', 'Pioveva da ore sul parcheggio deserto.'].join('\n\n'));
       await save();
 
@@ -470,34 +469,46 @@ try {
       await wait(async () => /↑2 ↓1/.test(await statusbar()), 'Divergence not shown after refocus');
       assert.equal(git(m3, 'rev-parse', 'origin/main'), t2);
 
+      // Publish keeps each commit as it is: provenance reads authorship per commit.
       await command('Publish');
       await wait(() => published() !== t2, 'Publish did not push');
       assert.equal(git(origin, 'merge-base', t2, 'main'), t2, 'Publish rewrote the upstream');
-      assert.equal(git(origin, 'rev-list', '--count', `${t2}..main`), '1', 'Publish did not leave one squashed commit on the upstream');
-      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), tokiSquash);
-      assert.ok(!git(origin, 'rev-list', 'main').split('\n').includes(manual), 'The local squash was published unsquashed');
+      assert.deepEqual(pushedSubjects(t2), [tokiSquash, tokiRecap], 'Publish changed the commits it pushed');
+      assert.equal(chats.filter(chat => chat.squash).length, 1, 'Publish asked Toki for a squash');
       assert.equal(git(m3, 'rev-parse', 'HEAD'), published());
       await wait(async () => (await bodyText()).includes('not committed: cap13.md'), 'Publish did not name the uncommitted chapter');
       await wait(async () => !/[↑↓]/.test(await statusbar()), 'Published branch still shows arrows');
-      assert.ok(chats.some(chat => chat.squash));
       git(tessaglia, 'pull', '-q', '--ff-only');
       assert.match(await readFile(join(tessaglia, 'cap22.md'), 'utf8'), /parcheggio deserto/);
       assert.match(await readFile(join(tessaglia, 'cap12.md'), 'utf8'), /ripete piano «Manuel»/);
     });
-    await scenario('publish-conflict-and-offline-retry', async () => {
+    await scenario('publish-conflict-squash-and-offline-retry', async () => {
       const t3 = await commitOnTessaglia('cap22.md', scene[0], 'Lisa lasciò la Panda accanto al cassonetto.', '22: la Panda accanto al cassonetto');
       const current = await readFile(cap22, 'utf8');
-      await edit(current.replace(scene[0], 'Lisa parcheggiò la Panda sotto il lampione spento.'));
+      // Two saves squashed by hand, then a conflicting edit published.
+      await edit(current.replace('il motore acceso', 'il motore acceso e le luci spente'));
+      await save();
+      await edit(current.replace('il motore acceso', 'il motore acceso e i fari spenti'));
+      await save();
+      await command('Squash Recent Commits');
+      await wait(() => git(m3, 'rev-list', '--count', 'origin/main..HEAD') === '1', 'Manual squash did not happen');
+      const edited = current.replace('il motore acceso', 'il motore acceso e i fari spenti');
+      await edit(edited.replace(scene[0], 'Lisa parcheggiò la Panda sotto il lampione spento.'));
       await command('Publish');
       await wait(async () => (await text()).includes('<<<<<<<'), 'Conflict was not shown in the editor');
       assert.equal(published(), t3, 'Conflicting work was pushed');
       assert.match(await statusbar(), /merging/);
       await command('Publish');
       await wait(async () => (await bodyText()).includes('finish the merge, then Publish'), 'Publish did not wait for the merge');
-      const resolved = current.replace(scene[0], 'Lisa lasciò la Panda sotto il lampione spento, accanto al cassonetto.');
+      const resolved = edited.replace(scene[0], 'Lisa lasciò la Panda sotto il lampione spento, accanto al cassonetto.');
       await edit(resolved);
       await save();
       assert.equal(git(m3, 'rev-list', '--merges', '--count', `${t3}..HEAD`), '1');
+
+      // Squashing after the merge must leave the upstream's commit alone.
+      await command('Squash Recent Commits');
+      await wait(() => git(m3, 'rev-list', '--count', `${t3}..HEAD`) === '1', 'Squash after the merge did not happen');
+      assert.equal(git(m3, 'merge-base', t3, 'HEAD'), t3, 'Squash rewrote the upstream');
 
       // Offline: nothing changes locally and the work stays ready to publish.
       const head = git(m3, 'rev-parse', 'HEAD');
@@ -505,20 +516,19 @@ try {
       await command('Publish');
       await wait(async () => (await bodyText()).includes('Could not publish'), 'Offline publish did not report the failure');
       assert.equal(git(m3, 'rev-parse', 'HEAD'), head);
-      assert.match(await statusbar(), /↑2/);
+      assert.match(await statusbar(), /↑1/);
       await rename(`${origin}.offline`, origin);
 
       await command('Publish');
-      await wait(() => published() !== t3, 'Publish after reconnecting did not push');
-      assert.equal(git(origin, 'merge-base', t3, 'main'), t3, 'Publish rewrote the upstream');
-      assert.equal(git(origin, 'rev-list', '--count', `${t3}..main`), '1', 'Resolution was not published as one commit');
+      await wait(() => published() === head, 'Publish after reconnecting did not push');
       const remote = git(origin, 'show', 'main:cap22.md');
       assert.match(remote, /sotto il lampione spento, accanto al cassonetto/);
+      assert.match(remote, /i fari spenti/);
       assert.doesNotMatch(remote, /<<<<<<<|>>>>>>>/);
       git(tessaglia, 'pull', '-q', '--ff-only');
       assert.equal(await readFile(join(tessaglia, 'cap22.md'), 'utf8'), await readFile(cap22, 'utf8'));
     });
-    await scenario('publish-before-the-recap-arrives', async () => {
+    await scenario('publish-recaps-stalls-and-timeouts', async () => {
       holdRecaps = true;
       const before = git(m3, 'rev-parse', 'HEAD');
       await edit((await readFile(cap22, 'utf8')).replace('Victor aspettava', 'Victor aspettava immobile'));
@@ -535,7 +545,8 @@ try {
       // The remote holds pushes while `stall` exists, as a slow network would.
       const stall = join(origin, 'stall');
       const pushing = join(origin, 'pushing');
-      await writeFile(join(origin, 'hooks', 'pre-receive'), '#!/bin/sh\ntouch pushing\nwhile [ -e stall ]; do sleep 0.1; done\nrm -f pushing\n', { mode: 0o755 });
+      const preReceive = join(origin, 'hooks', 'pre-receive');
+      await writeFile(preReceive, '#!/bin/sh\ntouch pushing\nwhile [ -e stall ]; do sleep 0.1; done\nrm -f pushing\n', { mode: 0o755 });
       holdRecaps = true;
       const saved = git(m3, 'rev-parse', 'HEAD');
       await edit((await readFile(cap22, 'utf8')).replace('Victor aspettava immobile', 'Victor aspettava, immobile,'));
@@ -549,21 +560,39 @@ try {
       heldRecaps.splice(0).forEach(reply => reply());
       await new Promise(r => setTimeout(r, 1000));
       assert.equal(git(m3, 'rev-parse', 'HEAD'), pushed, 'A recap amended the commit while it was being pushed');
+      // Typing and leaving the window while the push is held: autosave waits, then runs.
+      const typed = (await text()).replace('immobile,', 'immobile, assorto,');
+      await edit(typed);
+      await browser.execute(() => window.dispatchEvent(new Event('blur')));
       await unlink(stall);
       await wait(() => published() === pushed, 'Stalled push did not complete');
       await wait(async () => (await bodyText()).includes('Published to'), 'Publish did not finish');
+      await wait(async () => (await readFile(cap22, 'utf8')).includes('assorto'), 'Autosave skipped during the push never ran');
 
-      // A push that never completes is cut off, and Publish works again afterwards.
+      // A push that never completes is cut off with everything it started.
       await writeFile(stall, '');
-      await edit((await readFile(cap22, 'utf8')).replace('immobile,', 'immobile e muto,'));
       await save();
+      const waiting = published();
       await command('Publish');
       await wait(async () => (await bodyText()).includes('timed out'), 'A stalled push held Publish');
       await unlink(stall);
-      await wait(() => !existsSync(pushing), 'The remote kept the stalled push');
+      await new Promise(r => setTimeout(r, 1000));
+      assert.ok(existsSync(pushing), 'The remote hook outlived the timed-out push');
+      assert.equal(published(), waiting, 'The timed-out push still updated the remote');
+      await unlink(pushing);
       await command('Publish');
       await wait(() => published() === git(m3, 'rev-parse', 'HEAD'), 'Publish did not recover after a timeout');
       await wait(async () => !/[↑↓]/.test(await statusbar()), 'Recovered branch still shows arrows');
+
+      // A remote that talks a lot still lets the push finish.
+      await writeFile(preReceive, '#!/bin/sh\nhead -c 300000 /dev/zero | tr "\\\\0" x >&2\n', { mode: 0o755 });
+      await edit((await readFile(cap22, 'utf8')).replace('assorto', 'assorto nei pensieri'));
+      await save();
+      await command('Publish');
+      await wait(async () => /published|publish failed/.test(await statusbar()), 'Publish did not finish', 20000);
+      assert.doesNotMatch(await statusbar(), /publish failed/, 'A verbose remote stalled the push');
+      assert.equal(published(), git(m3, 'rev-parse', 'HEAD'));
+      await unlink(preReceive);
     });
     await scenario('publish-while-toki-is-down', async () => {
       tokiDown = true;
@@ -576,24 +605,10 @@ try {
       }
       await command('Publish');
       await wait(() => published() !== base, 'Publish depends on Toki');
-      assert.equal(git(origin, 'rev-list', '--count', `${base}..main`), '1');
-      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), 'Save cap22.md');
-      assert.match(git(origin, 'log', '-1', '--format=%b', 'main'), /- Save cap22\.md\n- Save cap22\.md/);
+      assert.deepEqual(pushedSubjects(base), ['Save cap22.md', 'Save cap22.md']);
       assert.equal(git(m3, 'rev-parse', 'HEAD'), published());
       assert.match(git(origin, 'show', 'main:cap22.md'), /Pioveva fitto/);
       tokiDown = false;
-
-      tokiSquashReply = `Capitolo 22: ${'molto '.repeat(12)}`;
-      const reachable = published();
-      for (const rain of ['Pioveva fitto sul parcheggio.', 'Pioveva fitto sul parcheggio vuoto.']) {
-        await edit((await readFile(cap22, 'utf8')).replace(/Pioveva[^\n]*/, rain));
-        await save();
-      }
-      await command('Publish');
-      await wait(() => published() !== reachable, 'An overlong Toki subject blocked Publish');
-      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), 'Save cap22.md');
-      assert.match(git(origin, 'log', '-1', '--format=%b', 'main'), new RegExp(`- ${tokiRecap}\n- ${tokiRecap}`));
-      tokiSquashReply = tokiSquash;
     });
     await scenario('publish-keeps-typing-during-the-wait', async () => {
       git(tessaglia, 'pull', '-q', '--ff-only');
@@ -626,6 +641,41 @@ try {
       assert.match(git(origin, 'show', 'main:cap22.md'), /Victor, zitto/);
       assert.equal(git(m3, 'rev-parse', '--abbrev-ref', '@{u}'), 'origin/main');
       git(tessaglia, 'pull', '-q', '--ff-only');
+    });
+    await scenario('publish-waits-for-an-arrival-fetch', async () => {
+      // Fetches from m3 wait while `fetch-stall` exists.
+      const fetchStall = join(run, 'fetch-stall');
+      const fetching = join(run, 'fetching');
+      const uploadPack = join(run, 'upload-pack.sh');
+      await writeFile(uploadPack, `#!/bin/sh\ntouch '${fetching}'\nwhile [ -e '${fetchStall}' ]; do sleep 0.1; done\nrm -f '${fetching}'\nexec git upload-pack "$@"\n`, { mode: 0o755 });
+      git(m3, 'config', 'remote.origin.uploadpack', uploadPack);
+      await writeFile(fetchStall, '');
+      await browser.execute(() => window.dispatchEvent(new Event('focus')));
+      await wait(() => existsSync(fetching), 'Refocus did not fetch');
+      const head = git(m3, 'rev-parse', 'HEAD');
+      const disk = await readFile(cap22, 'utf8');
+      await edit(disk.replace('Pioveva a dirotto.', 'Pioveva a dirotto, senza tregua.'));
+      await command('Publish');
+      await wait(async () => (await bodyText()).includes('Publish again in a moment'), 'Publish did not wait for the fetch');
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), head, 'Publish committed during a fetch');
+      assert.equal(await readFile(cap22, 'utf8'), disk, 'Publish wrote the file during a fetch');
+      await unlink(fetchStall);
+      await wait(() => !existsSync(fetching), 'Fetch did not finish');
+      git(m3, 'config', '--unset', 'remote.origin.uploadpack');
+      await new Promise(r => setTimeout(r, 500));
+      await command('Publish');
+      await wait(() => published() === git(m3, 'rev-parse', 'HEAD') && published() !== head, 'Publish after the fetch did not push');
+      assert.match(git(origin, 'show', 'main:cap22.md'), /senza tregua/);
+    });
+    await scenario('publish-follows-the-configured-upstream', async () => {
+      // main is set to publish to rilettura, which does not exist yet.
+      git(m3, 'config', 'branch.main.merge', 'refs/heads/rilettura');
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      const t = await commitOnTessaglia('cap12.md', 'sussurro', 'sussurro roco', '12: sussurro roco');
+      await edit((await readFile(cap22, 'utf8')).replace('senza tregua', 'senza tregua né vento'));
+      await command('Publish');
+      await wait(() => { try { return published('rilettura') === git(m3, 'rev-parse', 'HEAD'); } catch { return false; } }, 'Publish did not push to the configured branch');
+      assert.notEqual(git(m3, 'merge-base', t, 'HEAD'), t, 'Publish merged origin/main into a branch that publishes to rilettura');
     });
   }
   console.log(`Artifacts: ${run}`);

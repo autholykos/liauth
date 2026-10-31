@@ -71,51 +71,6 @@ pub struct SquashPlan {
     base: Oid,
     pub summaries: Vec<String>,
     pub diff: String,
-    files: Vec<String>,
-}
-
-impl SquashPlan {
-    /// The message when Toki cannot write one: the changed files, then the
-    /// subjects of the commits it replaces.
-    pub fn plain_message(&self) -> String {
-        let subject = match self.files.split_first() {
-            Some((file, [])) => format!("Save {file}"),
-            Some((file, rest)) => format!("Save {file} and {} more", rest.len()),
-            None => "Save".to_string(),
-        };
-        let body: Vec<String> = self
-            .summaries
-            .iter()
-            .map(|summary| format!("- {summary}"))
-            .collect();
-        format!(
-            "{}\n\n{}",
-            subject.chars().take(72).collect::<String>(),
-            body.join("\n")
-        )
-    }
-}
-
-/// Publishing skips a squash with nothing to do but stops on a failure.
-#[derive(Debug)]
-pub enum SquashError {
-    Nothing(&'static str),
-    Failed(String),
-}
-
-impl From<String> for SquashError {
-    fn from(message: String) -> Self {
-        Self::Failed(message)
-    }
-}
-
-impl From<SquashError> for String {
-    fn from(error: SquashError) -> Self {
-        match error {
-            SquashError::Nothing(message) => message.to_string(),
-            SquashError::Failed(message) => message,
-        }
-    }
 }
 
 fn err(e: git2::Error) -> String {
@@ -229,14 +184,19 @@ fn info(repo: &Repository) -> RepoInfo {
 }
 
 /// The configured upstream, else the same name on `origin`: where Publish
-/// pushes, so where commits already published live.
+/// pushes, so where commits already published live. A configured upstream
+/// that was never fetched stays the upstream, as it does for Publish.
 fn upstream_branch(repo: &Repository) -> Option<git2::Branch<'_>> {
     let head = repo.head().ok()?;
     let name = head.shorthand().ok()?;
-    repo.find_branch(name, BranchType::Local)
-        .ok()?
-        .upstream()
-        .or_else(|_| repo.find_branch(&format!("origin/{name}"), BranchType::Remote))
+    if repo.branch_upstream_name(head.name().ok()?).is_ok() {
+        return repo
+            .find_branch(name, BranchType::Local)
+            .ok()?
+            .upstream()
+            .ok();
+    }
+    repo.find_branch(&format!("origin/{name}"), BranchType::Remote)
         .ok()
 }
 
@@ -700,14 +660,12 @@ fn squash_backup(branch: &str) -> String {
 
 /// Squash boundary: an explicit ancestor, or the newer of the last squash
 /// and the integrated upstream point.
-pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, SquashError> {
+pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, String> {
     let repo = discover(file_path)?;
     require_no_git_operation(&repo)?;
     let head_ref = repo.head().map_err(err)?;
     if !head_ref.is_branch() {
-        return Err("squash requires a checked-out local branch"
-            .to_string()
-            .into());
+        return Err("squash requires a checked-out local branch".to_string());
     }
     let branch = head_ref.shorthand().map_err(err)?.to_string();
     let head = head_ref
@@ -717,9 +675,7 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Squ
     let base = match base {
         Some(base) => {
             if commits_after(&repo, head, base).is_none() {
-                return Err("the chosen commit is not part of this branch"
-                    .to_string()
-                    .into());
+                return Err("the chosen commit is not part of this branch".to_string());
             }
             base
         }
@@ -744,15 +700,16 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Squ
                 })
                 .min_by_key(|(_, distance)| *distance)
                 .map(|(candidate, _)| candidate)
-                .ok_or(SquashError::Nothing(
-                    "no squash boundary found; configure and pull a tracking branch first",
-                ))?
+                .ok_or_else(|| {
+                    "no squash boundary found; configure and pull a tracking branch first"
+                        .to_string()
+                })?
         }
     };
 
     let range = commits_after(&repo, head, base).unwrap_or_default();
     if range.len() < 2 {
-        return Err(SquashError::Nothing("fewer than two commits to squash"));
+        return Err("fewer than two commits to squash".to_string());
     }
     // Merge commits collapse into the result; their own subjects say nothing.
     let mut summaries = Vec::new();
@@ -766,19 +723,9 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Squ
     let base_tree = repo.find_commit(base).map_err(err)?.tree().map_err(err)?;
     let head_tree = repo.find_commit(head).map_err(err)?.tree().map_err(err)?;
     if base_tree.id() == head_tree.id() {
-        return Err(SquashError::Nothing(
-            "the selected commits have no net changes",
-        ));
+        return Err("the selected commits have no net changes".to_string());
     }
     let diff = patch_text(&repo, &base_tree, &head_tree)?;
-    let files = repo
-        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
-        .map_err(err)?
-        .deltas()
-        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
-        .filter_map(|path| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect();
 
     Ok(SquashPlan {
         branch,
@@ -786,7 +733,6 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Squ
         base,
         summaries,
         diff,
-        files,
     })
 }
 
@@ -889,26 +835,17 @@ pub fn reword_commit(
     })
 }
 
-/// Why Toki's message cannot be a squash commit's, if it cannot.
-pub fn message_problem(message: &str) -> Option<&'static str> {
-    let message = message.trim();
-    if message.is_empty() {
-        return Some("Toki returned an empty commit message");
-    }
-    if message.lines().next().unwrap_or("").chars().count() > 72 {
-        return Some("Toki returned a commit subject longer than 72 characters");
-    }
-    None
-}
-
 pub fn apply_squash(
     file_path: &str,
     plan: &SquashPlan,
     message: &str,
 ) -> Result<CommitInfo, String> {
     let message = message.trim();
-    if let Some(problem) = message_problem(message) {
-        return Err(problem.to_string());
+    if message.is_empty() {
+        return Err("Toki returned an empty commit message".to_string());
+    }
+    if message.lines().next().unwrap_or("").chars().count() > 72 {
+        return Err("Toki returned a commit subject longer than 72 characters".to_string());
     }
     let repo = discover(file_path)?;
     require_no_git_operation(&repo)?;
@@ -1276,19 +1213,40 @@ fn git_cli(repo: &Repository, args: &[&str]) -> Result<(), String> {
     let workdir = repo
         .workdir()
         .ok_or_else(|| "repository has no working directory".to_string())?;
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(workdir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Its own process group, so a timeout also ends ssh, helpers and hooks.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("could not run git: {e}"))?;
+    // Drained while git runs: a full pipe would block it until the timeout.
+    let mut stderr = child.stderr.take().ok_or("git has no stderr")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+        let _ = sender.send(bytes);
+    });
     let deadline = Instant::now() + timeout;
-    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
         if Instant::now() >= deadline {
+            #[cfg(unix)]
+            // SAFETY: kill(2) on the group this child leads; no memory involved.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
@@ -1298,12 +1256,17 @@ fn git_cli(repo: &Repository, args: &[&str]) -> Result<(), String> {
             ));
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if output.status.success() {
+    };
+    // A daemon git started may keep the pipe open; do not wait for it.
+    let bytes = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default();
+    if status.success() {
         return Ok(());
     }
-    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    // The cause is at the end; a flood of remote output need not reach the UI.
+    let tail = &bytes[bytes.len().saturating_sub(4096)..];
+    Err(String::from_utf8_lossy(tail).trim().to_string())
 }
 
 /// The remote the current branch publishes to and the branch it updates
@@ -1982,10 +1945,7 @@ mod tests {
         let err = squash_plan(&doc_s, Some(Oid::from_str(&squashed.id).unwrap()))
             .err()
             .expect("nothing newer than the squash commit");
-        assert!(
-            matches!(err, SquashError::Nothing(message) if message.contains("fewer than two")),
-            "{err:?}"
-        );
+        assert!(err.contains("fewer than two"), "{err}");
     }
 
     #[test]

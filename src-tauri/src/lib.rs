@@ -38,16 +38,15 @@ async fn squash_recent_commits(
 #[derive(serde::Serialize)]
 struct Publication {
     merge: git::MergeResult,
-    squashed: Option<git::CommitInfo>,
     /// Where the branch went, e.g. `origin/main`; None when conflicts stopped it.
     pushed_to: Option<String>,
     /// Tracked files whose changes stayed out of the publication.
     uncommitted: Vec<String>,
 }
 
-/// Integrate the upstream, squash what was saved since the last squash or
-/// upstream point, and push without forcing. Conflicts stop it before the
-/// squash; saving concludes the merge as for any other.
+/// Integrate the upstream and push without forcing, each commit as it is:
+/// provenance tools read authorship per commit. Conflicts stop it before
+/// the push; saving concludes the merge as for any other.
 #[tauri::command]
 async fn publish(file_path: String) -> Result<Publication, String> {
     git::fetch_upstream(file_path.clone()).await?;
@@ -55,29 +54,14 @@ async fn publish(file_path: String) -> Result<Publication, String> {
     if merge.status == "conflicts" {
         return Ok(Publication {
             merge,
-            squashed: None,
             pushed_to: None,
             uncommitted: Vec::new(),
         });
     }
-    let squashed = match git::squash_plan(&file_path, None) {
-        Ok(plan) => {
-            // Toki only words the message: publishing must not depend on it.
-            let message = ai::squash_commit_message(&plan.branch, &plan.summaries, &plan.diff)
-                .await
-                .ok()
-                .filter(|message| git::message_problem(message).is_none())
-                .unwrap_or_else(|| plan.plain_message());
-            Some(git::apply_squash(&file_path, &plan, &message)?)
-        }
-        Err(git::SquashError::Nothing(_)) => None,
-        Err(git::SquashError::Failed(error)) => return Err(error),
-    };
     Ok(Publication {
         pushed_to: Some(git::push(&file_path)?),
         uncommitted: git::uncommitted(file_path.clone())?,
         merge,
-        squashed,
     })
 }
 

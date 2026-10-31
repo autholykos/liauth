@@ -134,9 +134,8 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
         <p>
           <em>Publish</em> takes this branch to its upstream so another
           computer can continue from it: it saves the document, merges what
-          the upstream gained meanwhile, squashes the commits since the last
-          squash with Toki's message (or a plain one when Toki is
-          unreachable), and pushes without forcing. Conflicts
+          the upstream gained meanwhile, and pushes every commit as it is,
+          without forcing. Conflicts
           appear as <code>&lt;&lt;&lt;</code> markers — fix them, save, and
           Publish again. Opening a repository or returning to Liauth fetches
           and fast-forwards when the branch has nothing of its own. The status

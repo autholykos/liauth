@@ -145,7 +145,6 @@ export const fastForwardUpstream = (filePath: string) =>
 
 export interface Publication {
   merge: MergeResult;
-  squashed: CommitInfo | null;
   /** e.g. "origin/main"; null when conflicts stopped publishing. */
   pushed_to: string | null;
   uncommitted: string[];

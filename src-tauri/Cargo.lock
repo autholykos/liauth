@@ -2180,6 +2180,7 @@ version = "2.0.2"
 dependencies = [
  "diffy",
  "git2",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

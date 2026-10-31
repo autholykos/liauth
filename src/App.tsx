@@ -1698,8 +1698,9 @@ function App() {
       console.warn("[liauth] fetch failed:", e);
     } finally {
       syncingUpstream.current = false;
+      void autoSave();
     }
-  }, [session, reloadAfterGit, refreshGit, flash]);
+  }, [session, reloadAfterGit, refreshGit, flash, autoSave]);
 
   const upstreamRoot = repo?.upstream ? repo.repo_root : null;
   useEffect(() => {
@@ -2148,6 +2149,11 @@ function App() {
     const snapshot = session.getSnapshot();
     const path = snapshot.filePath;
     if (!view || !path || publishing || squashing) return;
+    // A sync may be rewriting the file; saving now would write over it.
+    if (syncingUpstream.current) {
+      flash("Fetching from the upstream; Publish again in a moment");
+      return;
+    }
     if (snapshot.viewing) {
       flash("Return to the current document before publishing");
       return;
@@ -2192,7 +2198,6 @@ function App() {
         return;
       }
       const notes = [`Published to ${result.pushed_to}`];
-      if (result.squashed) notes.push(result.squashed.summary);
       if (result.uncommitted.length)
         notes.push(`not committed: ${result.uncommitted.join(", ")}`);
       flash(notes.join(" · "), result.uncommitted.length ? 15000 : 6000);
@@ -2203,13 +2208,18 @@ function App() {
         session.setLastSave(`publish failed · ${e}`);
       flash(`Could not publish: ${e}`, 15000);
     } finally {
-      if (holding) syncingUpstream.current = false;
+      if (holding) {
+        syncingUpstream.current = false;
+        // An autosave turned away while Publish held the file runs now.
+        void autoSave();
+      }
       setPublishing(false);
     }
   }, [
     session,
     publishing,
     squashing,
+    autoSave,
     recapCommit,
     refreshGit,
     reloadAfterGit,
