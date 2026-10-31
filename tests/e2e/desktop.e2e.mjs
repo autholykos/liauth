@@ -631,10 +631,35 @@ try {
       }
       assert.match(git(origin, 'show', 'main:cap22.md'), /Lisa, stanca[\s\S]*Pioveva a dirotto/);
     });
+    await scenario('publish-rejected-after-merging', async () => {
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      await commitOnTessaglia('cap22.md', 'Pioveva a dirotto.', 'Pioveva a dirotto sul cofano.', '22: pioggia sul cofano');
+      const preReceive = join(origin, 'hooks', 'pre-receive');
+      await writeFile(preReceive, '#!/bin/sh\necho "rifiutato" >&2\nexit 1\n', { mode: 0o755 });
+      holdRecaps = true;
+      await edit((await readFile(cap22, 'utf8')).replace('Lisa, stanca,', 'Lisa, stanchissima,'));
+      await command('Publish');
+      await wait(() => heldRecaps.length === 1, 'Publish did not ask for its recap');
+      // Typing before the merge; the remote then refuses the push at once.
+      await edit((await text()).replace('Victor, zitto,', 'Victor, zitto e cupo,'));
+      holdRecaps = false;
+      heldRecaps.splice(0).forEach(reply => reply());
+      await wait(async () => (await bodyText()).includes('Could not publish'), 'The rejected push was not reported');
+      await new Promise(r => setTimeout(r, 1500));
+      for (const words of ['Lisa, stanchissima', 'Victor, zitto e cupo', 'sul cofano']) {
+        assert.ok((await text()).includes(words), `Editor lost "${words}" after a rejected push`);
+        assert.ok((await readFile(cap22, 'utf8')).includes(words), `Disk lost "${words}" after a rejected push`);
+      }
+      await unlink(preReceive);
+      await command('Publish');
+      await wait(() => published() === git(m3, 'rev-parse', 'HEAD'), 'Publish did not push after the rejection');
+      assert.match(git(origin, 'show', 'main:cap22.md'), /stanchissima[\s\S]*zitto e cupo[\s\S]*sul cofano/);
+    });
     await scenario('publish-without-a-configured-upstream', async () => {
       git(m3, 'branch', '--unset-upstream');
       git(tessaglia, 'pull', '-q', '--ff-only');
       const t = await commitOnTessaglia('cap12.md', 'piano', 'piano, quasi in un sussurro,', '12: sussurro');
+      await edit((await readFile(cap22, 'utf8')).replace('sul cofano', 'sul cofano e sui vetri'));
       await command('Publish');
       await wait(() => published() !== t, 'Publish without an upstream did not push');
       assert.equal(git(origin, 'merge-base', t, 'main'), t, 'Publish rewrote the upstream');
@@ -654,15 +679,15 @@ try {
       await wait(() => existsSync(fetching), 'Refocus did not fetch');
       const head = git(m3, 'rev-parse', 'HEAD');
       const disk = await readFile(cap22, 'utf8');
-      await edit(disk.replace('Pioveva a dirotto.', 'Pioveva a dirotto, senza tregua.'));
+      await edit(disk.replace(/Pioveva[^\n]*/, 'Pioveva a dirotto, senza tregua.'));
       await command('Publish');
       await wait(async () => (await bodyText()).includes('Publish again in a moment'), 'Publish did not wait for the fetch');
       assert.equal(git(m3, 'rev-parse', 'HEAD'), head, 'Publish committed during a fetch');
       assert.equal(await readFile(cap22, 'utf8'), disk, 'Publish wrote the file during a fetch');
       await unlink(fetchStall);
-      await wait(() => !existsSync(fetching), 'Fetch did not finish');
+      // The autosave the fetch held back runs once it ends.
+      await wait(async () => (await readFile(cap22, 'utf8')).includes('senza tregua'), 'Autosave did not run after the fetch');
       git(m3, 'config', '--unset', 'remote.origin.uploadpack');
-      await new Promise(r => setTimeout(r, 500));
       await command('Publish');
       await wait(() => published() === git(m3, 'rev-parse', 'HEAD') && published() !== head, 'Publish after the fetch did not push');
       assert.match(git(origin, 'show', 'main:cap22.md'), /senza tregua/);
@@ -676,6 +701,16 @@ try {
       await command('Publish');
       await wait(() => { try { return published('rilettura') === git(m3, 'rev-parse', 'HEAD'); } catch { return false; } }, 'Publish did not push to the configured branch');
       assert.notEqual(git(m3, 'merge-base', t, 'HEAD'), t, 'Publish merged origin/main into a branch that publishes to rilettura');
+
+      // The same holds when the fetch refspec covers only main.
+      git(m3, 'config', '--replace-all', 'remote.origin.fetch', '+refs/heads/main:refs/remotes/origin/main');
+      git(m3, 'update-ref', '-d', 'refs/remotes/origin/rilettura');
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      const t2 = await commitOnTessaglia('cap12.md', 'roco', 'roco e lento', '12: sussurro lento');
+      await edit((await readFile(cap22, 'utf8')).replace('né vento', 'né vento né luna'));
+      await command('Publish');
+      await wait(() => { try { return published('rilettura') === git(m3, 'rev-parse', 'HEAD'); } catch { return false; } }, 'Publish with a restricted refspec did not push to the configured branch');
+      assert.notEqual(git(m3, 'merge-base', t2, 'HEAD'), t2, 'Publish merged origin/main when the refspec could not map rilettura');
     });
   }
   console.log(`Artifacts: ${run}`);

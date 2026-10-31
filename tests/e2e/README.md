@@ -55,9 +55,10 @@ uncommitted work, divergence after a manual squash, conflicts and a squash
 after resolving them, an unreachable remote, pushes the remote stalls or floods
 with output (via a `pre-receive` hook) and a timeout that ends them, a fetch
 Publish has to wait for, Toki being down, commit recaps that arrive during or
-after the push, typing and autosave while Publish waits, branches without a
-configured upstream or with one that does not exist yet, and that the other
-clone can always fast-forward. The quit reminder is a native dialog and remains
+after the push, typing and autosave while Publish waits, a push rejected after
+merging, branches without a configured upstream or with one that does not exist
+yet or that the fetch refspec does not cover, and that the other clone can
+always fast-forward. The quit reminder is a native dialog and remains
 unverified.
 
 The external-change scenario exposed a missing production dependency feature:

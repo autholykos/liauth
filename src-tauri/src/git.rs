@@ -184,12 +184,13 @@ fn info(repo: &Repository) -> RepoInfo {
 }
 
 /// The configured upstream, else the same name on `origin`: where Publish
-/// pushes, so where commits already published live. A configured upstream
-/// that was never fetched stays the upstream, as it does for Publish.
+/// pushes, so where commits already published live. Configured means
+/// `branch.<name>.merge` is set, as for `publish_target`, even when no
+/// fetched ref matches it.
 fn upstream_branch(repo: &Repository) -> Option<git2::Branch<'_>> {
     let head = repo.head().ok()?;
     let name = head.shorthand().ok()?;
-    if repo.branch_upstream_name(head.name().ok()?).is_ok() {
+    if repo.branch_upstream_merge(head.name().ok()?).is_ok() {
         return repo
             .find_branch(name, BranchType::Local)
             .ok()?

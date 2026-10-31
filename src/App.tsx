@@ -1665,6 +1665,14 @@ function App() {
     [session, handleExternalChange, refreshGit, loadFile, flash],
   );
 
+  // Whatever git wrote merges into the editor before the guard lifts, so the
+  // autosave it held back cannot write a stale buffer over it.
+  const releaseSync = useCallback(async () => {
+    await handleExternalChange();
+    syncingUpstream.current = false;
+    void autoSave();
+  }, [handleExternalChange, autoSave]);
+
   // Arriving at a repository, or back at Liauth: fetch, and take in the
   // upstream when this branch has nothing of its own to publish.
   const updateFromUpstream = useCallback(async () => {
@@ -1697,10 +1705,9 @@ function App() {
     } catch (e) {
       console.warn("[liauth] fetch failed:", e);
     } finally {
-      syncingUpstream.current = false;
-      void autoSave();
+      await releaseSync();
     }
-  }, [session, reloadAfterGit, refreshGit, flash, autoSave]);
+  }, [session, reloadAfterGit, refreshGit, flash, releaseSync]);
 
   const upstreamRoot = repo?.upstream ? repo.repo_root : null;
   useEffect(() => {
@@ -2170,6 +2177,7 @@ function App() {
     flash("Publishing…");
     let holding = false;
     let saved = snapshot;
+    let failure: unknown = null;
     try {
       if (snapshot.dirty || snapshot.diskDirty) {
         const { commit, current } = await session.save(
@@ -2204,22 +2212,20 @@ function App() {
       if (session.sameDocument(saved))
         session.setLastSave(`published ${timeNow()}`);
     } catch (e) {
+      failure = e;
       if (session.sameDocument(snapshot))
         session.setLastSave(`publish failed · ${e}`);
-      flash(`Could not publish: ${e}`, 15000);
     } finally {
-      if (holding) {
-        syncingUpstream.current = false;
-        // An autosave turned away while Publish held the file runs now.
-        void autoSave();
-      }
+      if (holding) await releaseSync();
       setPublishing(false);
     }
+    // Last, so a merge notice from releasing the sync does not hide it.
+    if (failure !== null) flash(`Could not publish: ${failure}`, 15000);
   }, [
     session,
     publishing,
     squashing,
-    autoSave,
+    releaseSync,
     recapCommit,
     refreshGit,
     reloadAfterGit,
