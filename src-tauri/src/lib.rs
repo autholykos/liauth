@@ -65,7 +65,9 @@ async fn publish(file_path: String) -> Result<Publication, String> {
             // Toki only words the message: publishing must not depend on it.
             let message = ai::squash_commit_message(&plan.branch, &plan.summaries, &plan.diff)
                 .await
-                .unwrap_or_else(|_| plan.plain_message());
+                .ok()
+                .filter(|message| git::message_problem(message).is_none())
+                .unwrap_or_else(|| plan.plain_message());
             Some(git::apply_squash(&file_path, &plan, &message)?)
         }
         Err(git::SquashError::Nothing(_)) => None,
@@ -73,7 +75,7 @@ async fn publish(file_path: String) -> Result<Publication, String> {
     };
     Ok(Publication {
         pushed_to: Some(git::push(&file_path)?),
-        uncommitted: git::uncommitted(&file_path)?,
+        uncommitted: git::uncommitted(file_path.clone())?,
         merge,
         squashed,
     })
@@ -619,6 +621,7 @@ pub fn run() {
             git::reword_commit,
             git::fetch_upstream,
             git::fast_forward_upstream,
+            git::uncommitted,
             publish,
             describe_commit,
             config::read_vim_config,

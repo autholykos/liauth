@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -18,6 +18,7 @@ const chats = [];
 const frontendLogs = [];
 let mode = 'matches';
 const tokiSquash = 'Capitolo 22: Lisa e Victor nel parcheggio';
+let tokiSquashReply = tokiSquash;
 const tokiRecap = 'Ritocco al capitolo';
 // Held recaps answer only when the scenario releases them.
 let holdRecaps = false;
@@ -53,7 +54,7 @@ const server = createServer(async (req, res) => {
     const reply = () => {
       if (res.destroyed) return;
       res.writeHead(200, { 'content-type': 'application/json' });
-      const message = squash ? tokiSquash : tokiRecap;
+      const message = squash ? tokiSquashReply : tokiRecap;
       res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ message }) }, finish_reason: 'stop' }] }));
     };
     if (holdRecaps && !squash) heldRecaps.push(reply); else reply();
@@ -102,6 +103,7 @@ if (!live) {
   env.LIAUTH_E2E_JEV_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/systemone`;
   env.LIAUTH_E2E_TOKI_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
 }
+env.LIAUTH_E2E_GIT_TIMEOUT_SECS = '5';
 const assertBackground = async () => {
   assert.deepEqual(await browser.execute(async () => {
     const appWindow = globalThis.__TAURI__.window.getCurrentWindow();
@@ -529,6 +531,39 @@ try {
       await new Promise(r => setTimeout(r, 1500));
       assert.equal(git(m3, 'rev-parse', 'HEAD'), published(), 'A late recap rewrote the published commit');
       assert.doesNotMatch(await statusbar(), /[↑↓]/);
+
+      // The remote holds pushes while `stall` exists, as a slow network would.
+      const stall = join(origin, 'stall');
+      const pushing = join(origin, 'pushing');
+      await writeFile(join(origin, 'hooks', 'pre-receive'), '#!/bin/sh\ntouch pushing\nwhile [ -e stall ]; do sleep 0.1; done\nrm -f pushing\n', { mode: 0o755 });
+      holdRecaps = true;
+      const saved = git(m3, 'rev-parse', 'HEAD');
+      await edit((await readFile(cap22, 'utf8')).replace('Victor aspettava immobile', 'Victor aspettava, immobile,'));
+      await command('Save (Commit)');
+      await wait(() => heldRecaps.length === 1 && git(m3, 'rev-parse', 'HEAD') !== saved, 'Save did not request its recap');
+      await writeFile(stall, '');
+      await command('Publish');
+      await wait(() => existsSync(pushing), 'Push never reached the remote');
+      const pushed = git(m3, 'rev-parse', 'HEAD');
+      holdRecaps = false;
+      heldRecaps.splice(0).forEach(reply => reply());
+      await new Promise(r => setTimeout(r, 1000));
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), pushed, 'A recap amended the commit while it was being pushed');
+      await unlink(stall);
+      await wait(() => published() === pushed, 'Stalled push did not complete');
+      await wait(async () => (await bodyText()).includes('Published to'), 'Publish did not finish');
+
+      // A push that never completes is cut off, and Publish works again afterwards.
+      await writeFile(stall, '');
+      await edit((await readFile(cap22, 'utf8')).replace('immobile,', 'immobile e muto,'));
+      await save();
+      await command('Publish');
+      await wait(async () => (await bodyText()).includes('timed out'), 'A stalled push held Publish');
+      await unlink(stall);
+      await wait(() => !existsSync(pushing), 'The remote kept the stalled push');
+      await command('Publish');
+      await wait(() => published() === git(m3, 'rev-parse', 'HEAD'), 'Publish did not recover after a timeout');
+      await wait(async () => !/[↑↓]/.test(await statusbar()), 'Recovered branch still shows arrows');
     });
     await scenario('publish-while-toki-is-down', async () => {
       tokiDown = true;
@@ -547,6 +582,50 @@ try {
       assert.equal(git(m3, 'rev-parse', 'HEAD'), published());
       assert.match(git(origin, 'show', 'main:cap22.md'), /Pioveva fitto/);
       tokiDown = false;
+
+      tokiSquashReply = `Capitolo 22: ${'molto '.repeat(12)}`;
+      const reachable = published();
+      for (const rain of ['Pioveva fitto sul parcheggio.', 'Pioveva fitto sul parcheggio vuoto.']) {
+        await edit((await readFile(cap22, 'utf8')).replace(/Pioveva[^\n]*/, rain));
+        await save();
+      }
+      await command('Publish');
+      await wait(() => published() !== reachable, 'An overlong Toki subject blocked Publish');
+      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), 'Save cap22.md');
+      assert.match(git(origin, 'log', '-1', '--format=%b', 'main'), new RegExp(`- ${tokiRecap}\n- ${tokiRecap}`));
+      tokiSquashReply = tokiSquash;
+    });
+    await scenario('publish-keeps-typing-during-the-wait', async () => {
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      await commitOnTessaglia('cap22.md', /Pioveva[^\n]*/, 'Pioveva a dirotto.', '22: pioggia a dirotto');
+      holdRecaps = true;
+      await edit((await readFile(cap22, 'utf8')).replace('Lisa lasciò', 'Lisa, stanca, lasciò'));
+      await command('Publish');
+      await wait(() => heldRecaps.length === 1, 'Publish did not ask for its recap');
+      // Typing while Toki writes the recap; the upstream changed the same chapter.
+      await edit((await text()).replace('Victor aspettava', 'Victor, zitto, aspettava'));
+      holdRecaps = false;
+      const before = published();
+      heldRecaps.splice(0).forEach(reply => reply());
+      await wait(() => published() !== before, 'Publish did not push');
+      await wait(async () => (await bodyText()).includes('Published to'), 'Publish did not finish');
+      await browser.execute(() => window.dispatchEvent(new Event('blur')));
+      for (const words of ['Lisa, stanca', 'Victor, zitto', 'Pioveva a dirotto']) {
+        await wait(async () => (await text()).includes(words), `Editor lost "${words}"`);
+        await wait(async () => (await readFile(cap22, 'utf8')).includes(words), `Disk lost "${words}"`);
+      }
+      assert.match(git(origin, 'show', 'main:cap22.md'), /Lisa, stanca[\s\S]*Pioveva a dirotto/);
+    });
+    await scenario('publish-without-a-configured-upstream', async () => {
+      git(m3, 'branch', '--unset-upstream');
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      const t = await commitOnTessaglia('cap12.md', 'piano', 'piano, quasi in un sussurro,', '12: sussurro');
+      await command('Publish');
+      await wait(() => published() !== t, 'Publish without an upstream did not push');
+      assert.equal(git(origin, 'merge-base', t, 'main'), t, 'Publish rewrote the upstream');
+      assert.match(git(origin, 'show', 'main:cap22.md'), /Victor, zitto/);
+      assert.equal(git(m3, 'rev-parse', '--abbrev-ref', '@{u}'), 'origin/main');
+      git(tessaglia, 'pull', '-q', '--ff-only');
     });
   }
   console.log(`Artifacts: ${run}`);

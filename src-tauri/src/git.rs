@@ -228,11 +228,15 @@ fn info(repo: &Repository) -> RepoInfo {
     }
 }
 
+/// The configured upstream, else the same name on `origin`: where Publish
+/// pushes, so where commits already published live.
 fn upstream_branch(repo: &Repository) -> Option<git2::Branch<'_>> {
     let head = repo.head().ok()?;
-    repo.find_branch(head.shorthand().ok()?, BranchType::Local)
+    let name = head.shorthand().ok()?;
+    repo.find_branch(name, BranchType::Local)
         .ok()?
         .upstream()
+        .or_else(|_| repo.find_branch(&format!("origin/{name}"), BranchType::Remote))
         .ok()
 }
 
@@ -885,17 +889,26 @@ pub fn reword_commit(
     })
 }
 
+/// Why Toki's message cannot be a squash commit's, if it cannot.
+pub fn message_problem(message: &str) -> Option<&'static str> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Some("Toki returned an empty commit message");
+    }
+    if message.lines().next().unwrap_or("").chars().count() > 72 {
+        return Some("Toki returned a commit subject longer than 72 characters");
+    }
+    None
+}
+
 pub fn apply_squash(
     file_path: &str,
     plan: &SquashPlan,
     message: &str,
 ) -> Result<CommitInfo, String> {
     let message = message.trim();
-    if message.is_empty() {
-        return Err("Toki returned an empty commit message".to_string());
-    }
-    if message.lines().next().unwrap_or("").chars().count() > 72 {
-        return Err("Toki returned a commit subject longer than 72 characters".to_string());
+    if let Some(problem) = message_problem(message) {
+        return Err(problem.to_string());
     }
     let repo = discover(file_path)?;
     require_no_git_operation(&repo)?;
@@ -1249,19 +1262,44 @@ fn merge_reference(repo: &Repository, refname: &str, name: &str) -> Result<Merge
 }
 
 /// Network operations run git itself: unlike libgit2's transports, it uses
-/// the user's SSH configuration, agents and credential helpers.
+/// the user's SSH configuration, agents and credential helpers. A stalled
+/// connection is cut off instead of holding Publish forever.
 fn git_cli(repo: &Repository, args: &[&str]) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let timeout = Duration::from_secs(120);
+    #[cfg(feature = "e2e")]
+    let timeout = std::env::var("LIAUTH_E2E_GIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .map_or(timeout, Duration::from_secs);
     let workdir = repo
         .workdir()
         .ok_or_else(|| "repository has no working directory".to_string())?;
-    let output = std::process::Command::new("git")
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(workdir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("could not run git: {e}"))?;
+    let deadline = Instant::now() + timeout;
+    while child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "git {} timed out after {}s; check the connection",
+                args[0],
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if output.status.success() {
         return Ok(());
     }
@@ -1344,8 +1382,9 @@ pub fn push(file_path: &str) -> Result<String, String> {
 }
 
 /// Tracked files whose changes are not committed.
-pub fn uncommitted(file_path: &str) -> Result<Vec<String>, String> {
-    let repo = discover(file_path)?;
+#[tauri::command]
+pub fn uncommitted(file_path: String) -> Result<Vec<String>, String> {
+    let repo = discover(&file_path)?;
     let mut options = StatusOptions::new();
     options.include_untracked(false);
     let statuses = repo.statuses(Some(&mut options)).map_err(err)?;

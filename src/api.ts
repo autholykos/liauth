@@ -154,6 +154,9 @@ export interface Publication {
 export const publish = (filePath: string) =>
   invoke<Publication>("publish", { filePath });
 
+export const uncommittedFiles = (filePath: string) =>
+  invoke<string[]>("uncommitted", { filePath });
+
 export interface ContentMerge {
   content: string;
   conflicts: boolean;

@@ -52,9 +52,11 @@ keyboard focus or macOS input prediction behavior. Those tests remain in place o
 The publish scenarios use a bare remote and two clones: Liauth writes in one,
 plain git publishes from the other. They cover arrival fast-forwards next to
 uncommitted work, divergence after a manual squash, conflicts, an unreachable
-remote, Toki being down, a commit recap that arrives after the push, and that
-the other clone can always fast-forward. The quit reminder is a native dialog
-and remains unverified.
+remote, a push the remote stalls (via a `pre-receive` hook) until it times out,
+Toki being down or answering with an unusable subject, commit recaps that
+arrive during or after the push, typing while Publish waits, a branch without a
+configured upstream, and that the other clone can always fast-forward. The
+quit reminder is a native dialog and remains unverified.
 
 The external-change scenario exposed a missing production dependency feature:
 `tauri-plugin-fs/watch`. It now verifies real filesystem notifications, automatic

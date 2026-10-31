@@ -87,7 +87,12 @@ import "./App.css";
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type NavigatorView = "files" | "search";
 type WorkspaceSearchState = api.ProjectSearch | "searching" | "error" | null;
-type AutoSaveResult = "ok" | "blocked-conflict" | "failed" | "changed";
+type AutoSaveResult =
+  | "ok"
+  | "blocked-conflict"
+  | "busy"
+  | "failed"
+  | "changed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
 type RephraseState = {
   id: number;
@@ -288,6 +293,8 @@ function App() {
   // A newer toast must not be cleared by an older toast's timer: an error
   // arriving a second after "Toki is writing…" would vanish almost at once.
   const flashTimer = useRef<number | undefined>(undefined);
+  // Set while Publish or an arrival fetch moves the branch.
+  const syncingUpstream = useRef(false);
   const flash = useCallback((msg: string, ms = 4000) => {
     window.clearTimeout(flashTimer.current);
     setStatus(msg);
@@ -340,6 +347,8 @@ function App() {
     if (!view || !snapshot.filePath || snapshot.viewing || !snapshot.diskDirty)
       return "ok";
     if (snapshot.extConflict !== null) return "blocked-conflict";
+    // Git may be rewriting the file; its changes merge in before any write.
+    if (syncingUpstream.current) return "busy";
     const content = view.state.doc.toString();
     try {
       const saved = await session.save(content, false);
@@ -357,6 +366,8 @@ function App() {
       const saved = await autoSave();
       if (saved === "blocked-conflict")
         flash(`Resolve the disk conflict before ${action}`);
+      if (saved === "busy")
+        flash(`Syncing with the upstream; ${action} canceled`);
       if (saved === "failed") flash(`Autosave failed; ${action} canceled`);
       if (saved === "changed")
         flash(`Document changed while saving; ${action} canceled`);
@@ -916,6 +927,8 @@ function App() {
     async (path: string, commitId: string) => {
       try {
         const message = await api.describeCommit(path, commitId);
+        // Amending while Publish pushes would fork what it publishes.
+        if (syncingUpstream.current) return;
         await api.rewordCommit(path, commitId, message);
         if (
           session.getSnapshot().filePath === path &&
@@ -1438,7 +1451,17 @@ function App() {
         return;
       }
       const upstream = session.getSnapshot().versioning?.repo.upstream;
-      if (upstream && (upstream.ahead > 0 || session.getSnapshot().dirty)) {
+      // Other documents may hold autosaved edits that were never committed.
+      const uncommitted =
+        upstream && path
+          ? await api.uncommittedFiles(path).catch(() => null)
+          : [];
+      if (
+        upstream &&
+        (upstream.ahead > 0 ||
+          session.getSnapshot().dirty ||
+          uncommitted?.length !== 0)
+      ) {
         const ok = await ask(
           `This work is not published to ${upstream.name}. Quit anyway?`,
           { title: "Quit Liauth", kind: "warning" },
@@ -1630,20 +1653,20 @@ function App() {
   const reloadAfterGit = useCallback(
     async (snapshot: DocumentSnapshot) => {
       if (!snapshot.filePath || !session.sameDocument(snapshot)) return false;
-      if (!session.isCurrent(snapshot)) {
-        await refreshGit(snapshot.filePath);
+      if (!session.isCurrent(snapshot) || session.getSnapshot().diskDirty) {
+        // Unsaved edits stay, and what git wrote merges into them.
         flash("Repository changed; newer editor changes kept");
+        await handleExternalChange();
+        await refreshGit(snapshot.filePath);
         return false;
       }
       return loadFile(snapshot.filePath);
     },
-    [session, refreshGit, loadFile, flash],
+    [session, handleExternalChange, refreshGit, loadFile, flash],
   );
 
   // Arriving at a repository, or back at Liauth: fetch, and take in the
-  // upstream when this branch has nothing of its own to publish. Publish
-  // shares the guard: both move the branch.
-  const syncingUpstream = useRef(false);
+  // upstream when this branch has nothing of its own to publish.
   const updateFromUpstream = useCallback(async () => {
     const snapshot = session.getSnapshot();
     const path = snapshot.filePath;
@@ -2125,10 +2148,6 @@ function App() {
     const snapshot = session.getSnapshot();
     const path = snapshot.filePath;
     if (!view || !path || publishing || squashing) return;
-    if (syncingUpstream.current) {
-      flash("Fetching from the upstream; Publish again in a moment");
-      return;
-    }
     if (snapshot.viewing) {
       flash("Return to the current document before publishing");
       return;
@@ -2142,18 +2161,25 @@ function App() {
       return;
     }
     setPublishing(true);
-    syncingUpstream.current = true;
     flash("Publishing…");
+    let holding = false;
+    let saved = snapshot;
     try {
       if (snapshot.dirty || snapshot.diskDirty) {
         const { commit, current } = await session.save(
           view.state.doc.toString(),
         );
         if (!current) return;
+        // Typing from here on is newer than what gets published.
+        saved = session.getSnapshot();
         // A lone commit is published under Toki's recap, not "Save …".
         if (commit) await recapCommit(path, commit.id);
       }
-      const saved = session.getSnapshot();
+      if (syncingUpstream.current) {
+        flash("Fetching from the upstream; Publish again in a moment");
+        return;
+      }
+      syncingUpstream.current = holding = true;
       const result = await api.publish(path);
       if (result.merge.status === "up_to_date") await refreshGit(path);
       else await reloadAfterGit(saved);
@@ -2177,7 +2203,7 @@ function App() {
         session.setLastSave(`publish failed · ${e}`);
       flash(`Could not publish: ${e}`, 15000);
     } finally {
-      syncingUpstream.current = false;
+      if (holding) syncingUpstream.current = false;
       setPublishing(false);
     }
   }, [
