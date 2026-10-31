@@ -576,8 +576,13 @@ async fn chat_once(
 ) -> Result<String, String> {
     let body = request_body(prompt, temperature, max_tokens);
     ensure_tls();
+    let endpoint = ENDPOINT;
+    #[cfg(feature = "e2e")]
+    let endpoint_override = std::env::var("LIAUTH_E2E_TOKI_ENDPOINT").ok();
+    #[cfg(feature = "e2e")]
+    let endpoint = endpoint_override.as_deref().unwrap_or(endpoint);
     let response = reqwest::Client::new()
-        .post(ENDPOINT)
+        .post(endpoint)
         .timeout(std::time::Duration::from_secs(600))
         .json(&body)
         .send()

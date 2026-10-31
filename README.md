@@ -44,6 +44,16 @@ git engine for versioning and asynchronous review.
   standard `<<< >>>` markers right in the editor; saving while a merge is in
   progress concludes it with a proper two-parent merge commit. Aborting
   restores the pre-merge state.
+- **Publish across computers** — **Publish** takes your work to the branch's
+  upstream (or `origin`) so another computer can continue from it. It saves
+  the open document, merges what the upstream gained meanwhile, squashes the
+  commits since the last squash with a Toki message (a plain one naming the
+  changed files when Toki is unreachable), and pushes without ever forcing. Conflicts stop it with markers in the editor: save to conclude the
+  merge, then Publish again. Opening a repository or returning to Liauth
+  fetches and fast-forwards when the branch has nothing of its own. The
+  status bar shows `↑` commits to publish and `↓` commits to integrate, and
+  quitting with unpublished work asks first. Fetch and push run the system
+  `git`, so they use your SSH configuration and credential helpers.
 - **Notes** — review annotations stored as CriticMarkup in the text itself
   (`{== span ==}{>> comment <<}`), so they version, branch, and merge like
   any other edit. Select text and hit ⌘⇧M; the live view shows a highlight

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rename, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -14,8 +14,15 @@ await mkdir(root, { recursive: true });
 const run = await mkdtemp(join(root, live ? 'live-' : 'desktop-'));
 const results = [];
 const requests = [];
+const chats = [];
 const frontendLogs = [];
 let mode = 'matches';
+const tokiSquash = 'Capitolo 22: Lisa e Victor nel parcheggio';
+const tokiRecap = 'Ritocco al capitolo';
+// Held recaps answer only when the scenario releases them.
+let holdRecaps = false;
+const heldRecaps = [];
+let tokiDown = false;
 // Slow replies wait until the scenario has stopped the search, however long that took.
 const heldReplies = [];
 let app, browser;
@@ -35,6 +42,23 @@ const server = createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks));
+  if (req.url === '/v1/chat/completions') {
+    const prompt = body.messages[0].content;
+    const squash = prompt.startsWith('Genera il messaggio Git per lo squash');
+    chats.push({ squash, prompt, down: tokiDown });
+    if (tokiDown) {
+      res.writeHead(503); res.end();
+      return;
+    }
+    const reply = () => {
+      if (res.destroyed) return;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      const message = squash ? tokiSquash : tokiRecap;
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ message }) }, finish_reason: 'stop' }] }));
+    };
+    if (holdRecaps && !squash) heldRecaps.push(reply); else reply();
+    return;
+  }
   requests.push({ method: req.method, path: req.url, headers: req.headers, body, mode });
   const responseMode = mode;
   const reply = () => {
@@ -69,10 +93,15 @@ git(repo, 'config', 'user.email', 'e2e@example.invalid');
 git(repo, 'config', 'user.name', 'Liauth E2E');
 git(repo, 'add', 'chapter.md', 'second.md');
 git(repo, 'commit', '-m', 'Initial synthetic manuscript');
-const env = { ...process.env, TAURI_WEBDRIVER_PORT: String(driverPort), LIAUTH_E2E_CONFIG: join(run, 'config'), LIAUTH_E2E_DATA_STORE: JSON.stringify([...randomBytes(16)]) };
+// The app's own git (fetch, push) ignores user config the same way.
+const env = { ...gitEnv, TAURI_WEBDRIVER_PORT: String(driverPort), LIAUTH_E2E_CONFIG: join(run, 'config'), LIAUTH_E2E_DATA_STORE: JSON.stringify([...randomBytes(16)]) };
 delete env.TYPESAFE_API_KEY;
 delete env.LIAUTH_E2E_JEV_ENDPOINT;
-if (!live) env.LIAUTH_E2E_JEV_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/systemone`;
+delete env.LIAUTH_E2E_TOKI_ENDPOINT;
+if (!live) {
+  env.LIAUTH_E2E_JEV_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/systemone`;
+  env.LIAUTH_E2E_TOKI_ENDPOINT = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+}
 const assertBackground = async () => {
   assert.deepEqual(await browser.execute(async () => {
     const appWindow = globalThis.__TAURI__.window.getCurrentWindow();
@@ -139,6 +168,7 @@ const open = async path => {
   await wait(async () => (await browser.execute(() => localStorage.getItem('liauth.lastFile'))) === path, `Did not open ${path}`);
   await browser.$('button=History').waitForExist();
 };
+const statusbar = () => browser.$('.statusbar').getText();
 const text = () => browser.execute(() => [...document.querySelectorAll('.cm-content .cm-line')].map(line => line.textContent).join('\n'));
 const edit = async value => {
   await browser.$('.cm-content').click();
@@ -380,6 +410,145 @@ try {
     assert.equal(await readFile(vimFile, 'utf8'), original);
     await command('Disable Vim Keybindings');
   });
+  if (!live) {
+    // One writer on two computers: m3 runs Liauth, tessaglia is the other
+    // computer publishing to the same bare remote with plain git.
+    const origin = join(run, 'origin.git');
+    const m3 = join(run, 'm3');
+    const tessaglia = join(run, 'tessaglia');
+    const cap22 = join(m3, 'cap22.md');
+    const scene = ['Lisa parcheggiò la Panda sotto il lampione.', 'Victor aspettava in macchina.', 'Pioveva da ore.'];
+    const commitOnTessaglia = async (file, from, to, message) => {
+      const path = join(tessaglia, file);
+      await writeFile(path, (await readFile(path, 'utf8')).replace(from, to));
+      git(tessaglia, 'commit', '-qam', message);
+      git(tessaglia, 'push', '-q');
+      return git(tessaglia, 'rev-parse', 'HEAD');
+    };
+    const save = async () => {
+      const before = git(m3, 'rev-parse', 'HEAD');
+      await command('Save (Commit)');
+      // Each save gets Toki's recap in the background; wait so nothing races it.
+      await wait(() => git(m3, 'rev-parse', 'HEAD') !== before && git(m3, 'log', '-1', '--format=%s') === tokiRecap, 'Save was not committed and recapped');
+    };
+    const published = () => git(origin, 'rev-parse', 'main');
+    await scenario('publish-arrival-divergence-and-squash', async () => {
+      git(run, 'init', '-q', '--bare', '-b', 'main', origin);
+      git(run, 'clone', '-q', origin, m3);
+      for (const [name, body] of [['cap12.md', 'Victor ripete «Miguel».\n'], ['cap13.md', 'Il sogno della madre.\n'], ['cap22.md', scene.join('\n\n') + '\n']])
+        await writeFile(join(m3, name), body);
+      git(m3, 'config', 'user.email', 'm3@example.invalid'); git(m3, 'config', 'user.name', 'M3');
+      git(m3, 'add', '.'); git(m3, 'commit', '-qm', 'Manoscritto'); git(m3, 'push', '-q', '-u', 'origin', 'main');
+      git(run, 'clone', '-q', origin, tessaglia);
+      git(tessaglia, 'config', 'user.email', 'tessaglia@example.invalid'); git(tessaglia, 'config', 'user.name', 'Tessaglia');
+
+      // Arrival: tessaglia published while m3 holds an autosaved, uncommitted chapter.
+      const t1 = await commitOnTessaglia('cap12.md', '«Miguel»', '«Manuel»', '12: Victor ripete «Manuel»');
+      await writeFile(join(m3, 'cap13.md'), 'Il sogno della madre, non salvato.\n');
+      await open(cap22);
+      await wait(() => git(m3, 'rev-parse', 'HEAD') === t1, 'Arrival did not fast-forward to the upstream');
+      assert.equal(await readFile(join(m3, 'cap12.md'), 'utf8'), 'Victor ripete «Manuel».\n');
+      assert.equal(await readFile(join(m3, 'cap13.md'), 'utf8'), 'Il sogno della madre, non salvato.\n', 'Fast-forward overwrote uncommitted work');
+      await wait(async () => !/[↑↓]/.test(await statusbar()), 'Up-to-date branch still shows arrows');
+
+      // Writing on m3, squashing by hand once along the way.
+      await edit([scene[0], 'Victor aspettava in macchina, il motore acceso.', scene[2]].join('\n\n'));
+      await save();
+      await edit([scene[0], 'Victor aspettava in macchina, il motore acceso.', 'Pioveva da ore sul parcheggio.'].join('\n\n'));
+      await save();
+      await command('Squash Recent Commits');
+      await wait(() => git(m3, 'rev-list', '--count', `${t1}..HEAD`) === '1', 'Manual squash did not happen');
+      const manual = git(m3, 'rev-parse', 'HEAD');
+      await edit([scene[0], 'Victor aspettava in macchina, il motore acceso.', 'Pioveva da ore sul parcheggio deserto.'].join('\n\n'));
+      await save();
+
+      // Meanwhile tessaglia publishes again; coming back to Liauth shows both sides.
+      const t2 = await commitOnTessaglia('cap12.md', 'ripete', 'ripete piano', '12: Victor ripete piano');
+      await browser.execute(() => window.dispatchEvent(new Event('focus')));
+      await wait(async () => /↑2 ↓1/.test(await statusbar()), 'Divergence not shown after refocus');
+      assert.equal(git(m3, 'rev-parse', 'origin/main'), t2);
+
+      await command('Publish');
+      await wait(() => published() !== t2, 'Publish did not push');
+      assert.equal(git(origin, 'merge-base', t2, 'main'), t2, 'Publish rewrote the upstream');
+      assert.equal(git(origin, 'rev-list', '--count', `${t2}..main`), '1', 'Publish did not leave one squashed commit on the upstream');
+      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), tokiSquash);
+      assert.ok(!git(origin, 'rev-list', 'main').split('\n').includes(manual), 'The local squash was published unsquashed');
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), published());
+      await wait(async () => (await bodyText()).includes('not committed: cap13.md'), 'Publish did not name the uncommitted chapter');
+      await wait(async () => !/[↑↓]/.test(await statusbar()), 'Published branch still shows arrows');
+      assert.ok(chats.some(chat => chat.squash));
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      assert.match(await readFile(join(tessaglia, 'cap22.md'), 'utf8'), /parcheggio deserto/);
+      assert.match(await readFile(join(tessaglia, 'cap12.md'), 'utf8'), /ripete piano «Manuel»/);
+    });
+    await scenario('publish-conflict-and-offline-retry', async () => {
+      const t3 = await commitOnTessaglia('cap22.md', scene[0], 'Lisa lasciò la Panda accanto al cassonetto.', '22: la Panda accanto al cassonetto');
+      const current = await readFile(cap22, 'utf8');
+      await edit(current.replace(scene[0], 'Lisa parcheggiò la Panda sotto il lampione spento.'));
+      await command('Publish');
+      await wait(async () => (await text()).includes('<<<<<<<'), 'Conflict was not shown in the editor');
+      assert.equal(published(), t3, 'Conflicting work was pushed');
+      assert.match(await statusbar(), /merging/);
+      await command('Publish');
+      await wait(async () => (await bodyText()).includes('finish the merge, then Publish'), 'Publish did not wait for the merge');
+      const resolved = current.replace(scene[0], 'Lisa lasciò la Panda sotto il lampione spento, accanto al cassonetto.');
+      await edit(resolved);
+      await save();
+      assert.equal(git(m3, 'rev-list', '--merges', '--count', `${t3}..HEAD`), '1');
+
+      // Offline: nothing changes locally and the work stays ready to publish.
+      const head = git(m3, 'rev-parse', 'HEAD');
+      await rename(origin, `${origin}.offline`);
+      await command('Publish');
+      await wait(async () => (await bodyText()).includes('Could not publish'), 'Offline publish did not report the failure');
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), head);
+      assert.match(await statusbar(), /↑2/);
+      await rename(`${origin}.offline`, origin);
+
+      await command('Publish');
+      await wait(() => published() !== t3, 'Publish after reconnecting did not push');
+      assert.equal(git(origin, 'merge-base', t3, 'main'), t3, 'Publish rewrote the upstream');
+      assert.equal(git(origin, 'rev-list', '--count', `${t3}..main`), '1', 'Resolution was not published as one commit');
+      const remote = git(origin, 'show', 'main:cap22.md');
+      assert.match(remote, /sotto il lampione spento, accanto al cassonetto/);
+      assert.doesNotMatch(remote, /<<<<<<<|>>>>>>>/);
+      git(tessaglia, 'pull', '-q', '--ff-only');
+      assert.equal(await readFile(join(tessaglia, 'cap22.md'), 'utf8'), await readFile(cap22, 'utf8'));
+    });
+    await scenario('publish-before-the-recap-arrives', async () => {
+      holdRecaps = true;
+      const before = git(m3, 'rev-parse', 'HEAD');
+      await edit((await readFile(cap22, 'utf8')).replace('Victor aspettava', 'Victor aspettava immobile'));
+      await command('Save (Commit)');
+      await wait(() => heldRecaps.length === 1 && git(m3, 'rev-parse', 'HEAD') !== before, 'Save did not request its recap');
+      await command('Publish');
+      await wait(() => published() === git(m3, 'rev-parse', 'HEAD'), 'Publish did not push the saved commit');
+      holdRecaps = false;
+      heldRecaps.splice(0).forEach(reply => reply());
+      await new Promise(r => setTimeout(r, 1500));
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), published(), 'A late recap rewrote the published commit');
+      assert.doesNotMatch(await statusbar(), /[↑↓]/);
+    });
+    await scenario('publish-while-toki-is-down', async () => {
+      tokiDown = true;
+      const base = published();
+      for (const rain of ['Pioveva sul parcheggio deserto.', 'Pioveva fitto sul parcheggio deserto.']) {
+        const before = git(m3, 'rev-parse', 'HEAD');
+        await edit((await readFile(cap22, 'utf8')).replace(/Pioveva[^\n]*/, rain));
+        await command('Save (Commit)');
+        await wait(() => git(m3, 'rev-parse', 'HEAD') !== before, 'Save was not committed');
+      }
+      await command('Publish');
+      await wait(() => published() !== base, 'Publish depends on Toki');
+      assert.equal(git(origin, 'rev-list', '--count', `${base}..main`), '1');
+      assert.equal(git(origin, 'log', '-1', '--format=%s', 'main'), 'Save cap22.md');
+      assert.match(git(origin, 'log', '-1', '--format=%b', 'main'), /- Save cap22\.md\n- Save cap22\.md/);
+      assert.equal(git(m3, 'rev-parse', 'HEAD'), published());
+      assert.match(git(origin, 'show', 'main:cap22.md'), /Pioveva fitto/);
+      tokiDown = false;
+    });
+  }
   console.log(`Artifacts: ${run}`);
 } catch (error) {
   await snapshot('failure').catch(() => {});
@@ -389,6 +558,8 @@ try {
 } finally {
   await stop();
   server.closeAllConnections(); await new Promise(r => server.close(r));
-  await writeFile(join(run, 'results.json'), JSON.stringify({ live, command: live ? 'npm run test:e2e:live' : 'npm run test:e2e', commit: git(resolve('.'), 'rev-parse', 'HEAD'), node: process.version, platform: process.platform, results, requests, frontendLogs }, null, 2));
+  await writeFile(join(run, 'results.json'), JSON.stringify({ live, command: live ? 'npm run test:e2e:live' : 'npm run test:e2e', commit: git(resolve('.'), 'rev-parse', 'HEAD'), node: process.version, platform: process.platform, results, requests, chats, frontendLogs }, null, 2));
   await writeFile(join(run, 'git.txt'), git(repo, 'log', '--all', '--oneline', '--graph'));
+  if (existsSync(join(run, 'origin.git')))
+    await writeFile(join(run, 'publish-git.txt'), git(join(run, 'origin.git'), 'log', '--all', '--oneline', '--graph'));
 }

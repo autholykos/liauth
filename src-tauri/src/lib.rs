@@ -35,6 +35,50 @@ async fn squash_recent_commits(
     git::apply_squash(&file_path, &plan, &message)
 }
 
+#[derive(serde::Serialize)]
+struct Publication {
+    merge: git::MergeResult,
+    squashed: Option<git::CommitInfo>,
+    /// Where the branch went, e.g. `origin/main`; None when conflicts stopped it.
+    pushed_to: Option<String>,
+    /// Tracked files whose changes stayed out of the publication.
+    uncommitted: Vec<String>,
+}
+
+/// Integrate the upstream, squash what was saved since the last squash or
+/// upstream point, and push without forcing. Conflicts stop it before the
+/// squash; saving concludes the merge as for any other.
+#[tauri::command]
+async fn publish(file_path: String) -> Result<Publication, String> {
+    git::fetch_upstream(file_path.clone()).await?;
+    let merge = git::integrate_upstream(&file_path)?;
+    if merge.status == "conflicts" {
+        return Ok(Publication {
+            merge,
+            squashed: None,
+            pushed_to: None,
+            uncommitted: Vec::new(),
+        });
+    }
+    let squashed = match git::squash_plan(&file_path, None) {
+        Ok(plan) => {
+            // Toki only words the message: publishing must not depend on it.
+            let message = ai::squash_commit_message(&plan.branch, &plan.summaries, &plan.diff)
+                .await
+                .unwrap_or_else(|_| plan.plain_message());
+            Some(git::apply_squash(&file_path, &plan, &message)?)
+        }
+        Err(git::SquashError::Nothing(_)) => None,
+        Err(git::SquashError::Failed(error)) => return Err(error),
+    };
+    Ok(Publication {
+        pushed_to: Some(git::push(&file_path)?),
+        uncommitted: git::uncommitted(&file_path)?,
+        merge,
+        squashed,
+    })
+}
+
 /// One-line recap of a commit's edit, for its message.
 #[tauri::command]
 async fn describe_commit(file_path: String, commit_id: String) -> Result<String, String> {
@@ -573,6 +617,9 @@ pub fn run() {
             git::abort_merge,
             git::merge_contents,
             git::reword_commit,
+            git::fetch_upstream,
+            git::fast_forward_upstream,
+            publish,
             describe_commit,
             config::read_vim_config,
             config::write_vim_config,

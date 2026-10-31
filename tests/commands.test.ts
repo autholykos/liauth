@@ -44,6 +44,7 @@ const snapshot: CommandSnapshot = {
   showHiddenFiles: false,
   versioned: false,
   squashing: false,
+  publishing: false,
   panel: "none",
   recents: ["/novel/chapter.md"],
 };

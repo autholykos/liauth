@@ -30,6 +30,7 @@ export interface CommandSnapshot {
   showHiddenFiles: boolean;
   versioned: boolean;
   squashing: boolean;
+  publishing: boolean;
   panel: string;
   recents: string[];
 }
@@ -221,6 +222,12 @@ const definitions = (s: CommandSnapshot) =>
         ? "Squashing Recent Commits with Toki…"
         : "Squash Recent Commits",
       menuTitle: "Squash Recent Commits",
+      visible: s.versioned,
+    },
+    {
+      id: "publish",
+      title: s.publishing ? "Publishing…" : "Publish",
+      menuTitle: "Publish",
       visible: s.versioned,
     },
     {

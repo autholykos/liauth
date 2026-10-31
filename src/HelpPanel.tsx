@@ -127,6 +127,25 @@ export function HelpPanel({ vimActive, vimrc }: Props) {
       ),
     },
     {
+      title: "Publish",
+      search:
+        "publish push pull fetch sync upstream origin remote computers laptop continue travel ahead behind arrows",
+      body: (
+        <p>
+          <em>Publish</em> takes this branch to its upstream so another
+          computer can continue from it: it saves the document, merges what
+          the upstream gained meanwhile, squashes the commits since the last
+          squash with Toki's message (or a plain one when Toki is
+          unreachable), and pushes without forcing. Conflicts
+          appear as <code>&lt;&lt;&lt;</code> markers — fix them, save, and
+          Publish again. Opening a repository or returning to Liauth fetches
+          and fast-forwards when the branch has nothing of its own. The status
+          bar shows <code>↑</code> commits to publish and <code>↓</code>{" "}
+          commits to integrate; quitting with unpublished work asks first.
+        </p>
+      ),
+    },
+    {
       title: "Branches",
       search:
         "branches branch new switch merge conflicts markers worktree copy open there delete try experiment",

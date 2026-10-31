@@ -12,6 +12,15 @@ pub struct RepoInfo {
     pub branch: Option<String>,
     pub merging: bool,
     pub file_dirty: bool,
+    pub upstream: Option<Upstream>,
+}
+
+/// The current branch against its remote-tracking branch, as last fetched.
+#[derive(Serialize)]
+pub struct Upstream {
+    pub name: String,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 #[derive(Serialize)]
@@ -62,6 +71,51 @@ pub struct SquashPlan {
     base: Oid,
     pub summaries: Vec<String>,
     pub diff: String,
+    files: Vec<String>,
+}
+
+impl SquashPlan {
+    /// The message when Toki cannot write one: the changed files, then the
+    /// subjects of the commits it replaces.
+    pub fn plain_message(&self) -> String {
+        let subject = match self.files.split_first() {
+            Some((file, [])) => format!("Save {file}"),
+            Some((file, rest)) => format!("Save {file} and {} more", rest.len()),
+            None => "Save".to_string(),
+        };
+        let body: Vec<String> = self
+            .summaries
+            .iter()
+            .map(|summary| format!("- {summary}"))
+            .collect();
+        format!(
+            "{}\n\n{}",
+            subject.chars().take(72).collect::<String>(),
+            body.join("\n")
+        )
+    }
+}
+
+/// Publishing skips a squash with nothing to do but stops on a failure.
+#[derive(Debug)]
+pub enum SquashError {
+    Nothing(&'static str),
+    Failed(String),
+}
+
+impl From<String> for SquashError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<SquashError> for String {
+    fn from(error: SquashError) -> Self {
+        match error {
+            SquashError::Nothing(message) => message.to_string(),
+            SquashError::Failed(message) => message,
+        }
+    }
 }
 
 fn err(e: git2::Error) -> String {
@@ -160,7 +214,26 @@ fn info(repo: &Repository) -> RepoInfo {
         branch,
         merging: repo.state() == RepositoryState::Merge,
         file_dirty: false,
+        upstream: upstream_branch(repo).and_then(|upstream| {
+            let head = repo.head().ok()?.target()?;
+            let (ahead, behind) = repo
+                .graph_ahead_behind(head, upstream.get().target()?)
+                .ok()?;
+            Some(Upstream {
+                name: upstream.name().ok()??.to_string(),
+                ahead,
+                behind,
+            })
+        }),
     }
+}
+
+fn upstream_branch(repo: &Repository) -> Option<git2::Branch<'_>> {
+    let head = repo.head().ok()?;
+    repo.find_branch(head.shorthand().ok()?, BranchType::Local)
+        .ok()?
+        .upstream()
+        .ok()
 }
 
 fn info_for_file(repo: &Repository, file_path: &str) -> RepoInfo {
@@ -183,6 +256,7 @@ pub fn repo_info(file_path: String) -> RepoInfo {
             branch: None,
             merging: false,
             file_dirty: false,
+            upstream: None,
         },
     }
 }
@@ -622,12 +696,14 @@ fn squash_backup(branch: &str) -> String {
 
 /// Squash boundary: an explicit ancestor, or the newer of the last squash
 /// and the integrated upstream point.
-pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, String> {
+pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, SquashError> {
     let repo = discover(file_path)?;
     require_no_git_operation(&repo)?;
     let head_ref = repo.head().map_err(err)?;
     if !head_ref.is_branch() {
-        return Err("squash requires a checked-out local branch".to_string());
+        return Err("squash requires a checked-out local branch"
+            .to_string()
+            .into());
     }
     let branch = head_ref.shorthand().map_err(err)?.to_string();
     let head = head_ref
@@ -637,21 +713,25 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
     let base = match base {
         Some(base) => {
             if commits_after(&repo, head, base).is_none() {
-                return Err("the chosen commit is not part of this branch".to_string());
+                return Err("the chosen commit is not part of this branch"
+                    .to_string()
+                    .into());
             }
             base
         }
         None => {
+            let upstream_base = upstream_branch(&repo)
+                .and_then(|upstream| upstream.get().target())
+                .and_then(|upstream| repo.merge_base(head, upstream).ok());
+            // Never rewrite what the upstream has: a squash made before
+            // integrating the upstream stops being a boundary afterwards.
             let marker = repo
                 .find_reference(&squash_marker(&branch))
                 .ok()
-                .and_then(|reference| reference.target());
-            let upstream_base = repo
-                .find_branch(&branch, BranchType::Local)
-                .ok()
-                .and_then(|local| local.upstream().ok())
-                .and_then(|upstream| upstream.get().target())
-                .and_then(|upstream| repo.merge_base(head, upstream).ok());
+                .and_then(|reference| reference.target())
+                .filter(|&marker| {
+                    upstream_base.is_none_or(|base| commits_after(&repo, marker, base).is_some())
+                });
             [marker, upstream_base]
                 .into_iter()
                 .flatten()
@@ -660,16 +740,15 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
                 })
                 .min_by_key(|(_, distance)| *distance)
                 .map(|(candidate, _)| candidate)
-                .ok_or_else(|| {
-                    "no squash boundary found; configure and pull a tracking branch first"
-                        .to_string()
-                })?
+                .ok_or(SquashError::Nothing(
+                    "no squash boundary found; configure and pull a tracking branch first",
+                ))?
         }
     };
 
     let range = commits_after(&repo, head, base).unwrap_or_default();
     if range.len() < 2 {
-        return Err("fewer than two commits to squash".to_string());
+        return Err(SquashError::Nothing("fewer than two commits to squash"));
     }
     // Merge commits collapse into the result; their own subjects say nothing.
     let mut summaries = Vec::new();
@@ -683,9 +762,19 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
     let base_tree = repo.find_commit(base).map_err(err)?.tree().map_err(err)?;
     let head_tree = repo.find_commit(head).map_err(err)?.tree().map_err(err)?;
     if base_tree.id() == head_tree.id() {
-        return Err("the selected commits have no net changes".to_string());
+        return Err(SquashError::Nothing(
+            "the selected commits have no net changes",
+        ));
     }
     let diff = patch_text(&repo, &base_tree, &head_tree)?;
+    let files = repo
+        .diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)
+        .map_err(err)?
+        .deltas()
+        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
 
     Ok(SquashPlan {
         branch,
@@ -693,6 +782,7 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
         base,
         summaries,
         diff,
+        files,
     })
 }
 
@@ -766,6 +856,12 @@ pub fn reword_commit(
         .ok_or_else(|| "current branch has no commit".to_string())?;
     if head.to_string() != commit_id {
         return Err("the commit is no longer the latest".to_string());
+    }
+    if upstream_branch(&repo)
+        .and_then(|upstream| upstream.get().target())
+        .is_some_and(|upstream| commits_after(&repo, upstream, head).is_some())
+    {
+        return Err("the commit is already published".to_string());
     }
     let branch = head_ref.shorthand().map_err(err)?.to_string();
     let commit = repo.find_commit(head).map_err(err)?;
@@ -1071,8 +1167,11 @@ pub fn checkout_branch(file_path: String, name: String) -> Result<(), String> {
 #[tauri::command]
 pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, String> {
     let repo = discover(&file_path)?;
-    let refname = format!("refs/heads/{name}");
-    let their_ref = repo.find_reference(&refname).map_err(err)?;
+    merge_reference(&repo, &format!("refs/heads/{name}"), &name)
+}
+
+fn merge_reference(repo: &Repository, refname: &str, name: &str) -> Result<MergeResult, String> {
+    let their_ref = repo.find_reference(refname).map_err(err)?;
     let annotated = repo
         .reference_to_annotated_commit(&their_ref)
         .map_err(err)?;
@@ -1087,12 +1186,13 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
 
     if analysis.is_fast_forward() {
         let target = annotated.id();
+        // Update files before moving HEAD: a safe checkout compares them
+        // with HEAD and refuses rather than overwrite uncommitted edits.
+        let obj = repo.find_object(target, None).map_err(err)?;
+        repo.checkout_tree(&obj, Some(git2::build::CheckoutBuilder::new().safe()))
+            .map_err(err)?;
         let mut head = repo.head().map_err(err)?;
         head.set_target(target, "fast-forward merge").map_err(err)?;
-        let obj = repo.find_object(target, None).map_err(err)?;
-        let mut opts = git2::build::CheckoutBuilder::new();
-        opts.force();
-        repo.checkout_tree(&obj, Some(&mut opts)).map_err(err)?;
         return Ok(MergeResult {
             status: "fast_forward".into(),
             conflicts: vec![],
@@ -1146,6 +1246,113 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
         status: "merged".into(),
         conflicts: vec![],
     })
+}
+
+/// Network operations run git itself: unlike libgit2's transports, it uses
+/// the user's SSH configuration, agents and credential helpers.
+fn git_cli(repo: &Repository, args: &[&str]) -> Result<(), String> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "repository has no working directory".to_string())?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+/// The remote the current branch publishes to and the branch it updates
+/// there: its upstream, else the same name on `origin`.
+fn publish_target(repo: &Repository) -> Result<(String, String), String> {
+    let head = repo.head().map_err(err)?;
+    if !head.is_branch() {
+        return Err("publishing requires a checked-out branch".to_string());
+    }
+    let refname = head.name().map_err(err)?;
+    if let (Ok(remote), Ok(merge)) = (
+        repo.branch_upstream_remote(refname),
+        repo.branch_upstream_merge(refname),
+    ) {
+        return Ok((
+            remote.as_str().map_err(err)?.to_string(),
+            merge.as_str().map_err(err)?.to_string(),
+        ));
+    }
+    repo.find_remote("origin")
+        .map_err(|_| "add a remote named origin to publish this repository".to_string())?;
+    Ok(("origin".to_string(), refname.to_string()))
+}
+
+#[tauri::command]
+pub async fn fetch_upstream(file_path: String) -> Result<(), String> {
+    let repo = discover(&file_path)?;
+    let (remote, _) = publish_target(&repo)?;
+    git_cli(&repo, &["fetch", "--quiet", &remote])
+}
+
+/// Merge the fetched upstream into the current branch, like `merge_branch`.
+pub fn integrate_upstream(file_path: &str) -> Result<MergeResult, String> {
+    let repo = discover(file_path)?;
+    let Some(upstream) = upstream_branch(&repo) else {
+        return Ok(MergeResult {
+            status: "up_to_date".into(),
+            conflicts: vec![],
+        });
+    };
+    let refname = upstream.get().name().map_err(err)?;
+    let name = upstream.name().map_err(err)?.unwrap_or(refname);
+    merge_reference(&repo, refname, name)
+}
+
+/// Take in the fetched upstream when the branch has no commits of its own;
+/// true when the branch moved.
+#[tauri::command]
+pub fn fast_forward_upstream(file_path: String) -> Result<bool, String> {
+    let behind_only = discover(&file_path)
+        .ok()
+        .and_then(|repo| info(&repo).upstream)
+        .is_some_and(|upstream| upstream.ahead == 0 && upstream.behind > 0);
+    Ok(behind_only && integrate_upstream(&file_path)?.status == "fast_forward")
+}
+
+/// Push without forcing: a rejected push leaves both sides as they were.
+/// Returns where the branch went, e.g. `origin/main`.
+pub fn push(file_path: &str) -> Result<String, String> {
+    let repo = discover(file_path)?;
+    let (remote, destination) = publish_target(&repo)?;
+    git_cli(
+        &repo,
+        &[
+            "push",
+            "--quiet",
+            "--set-upstream",
+            &remote,
+            &format!("HEAD:{destination}"),
+        ],
+    )?;
+    Ok(format!(
+        "{remote}/{}",
+        destination.trim_start_matches("refs/heads/")
+    ))
+}
+
+/// Tracked files whose changes are not committed.
+pub fn uncommitted(file_path: &str) -> Result<Vec<String>, String> {
+    let repo = discover(file_path)?;
+    let mut options = StatusOptions::new();
+    options.include_untracked(false);
+    let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
+    Ok(statuses
+        .iter()
+        .filter_map(|entry| entry.path().ok().map(str::to_string))
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -1736,7 +1943,10 @@ mod tests {
         let err = squash_plan(&doc_s, Some(Oid::from_str(&squashed.id).unwrap()))
             .err()
             .expect("nothing newer than the squash commit");
-        assert!(err.contains("fewer than two"), "{err}");
+        assert!(
+            matches!(err, SquashError::Nothing(message) if message.contains("fewer than two")),
+            "{err:?}"
+        );
     }
 
     #[test]

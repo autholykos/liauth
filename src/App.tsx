@@ -177,6 +177,7 @@ function App() {
   const repo = versioning?.repo ?? null;
   const [panel, setPanel] = useState<Panel>("none");
   const [squashing, setSquashing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [vimMode, setVimMode] = usePersistedSetting(
     "liauth.vim",
@@ -1436,6 +1437,18 @@ function App() {
         }
         return;
       }
+      const upstream = session.getSnapshot().versioning?.repo.upstream;
+      if (upstream && (upstream.ahead > 0 || session.getSnapshot().dirty)) {
+        const ok = await ask(
+          `This work is not published to ${upstream.name}. Quit anyway?`,
+          { title: "Quit Liauth", kind: "warning" },
+        );
+        if (!ok) {
+          e.preventDefault();
+          flash("Publish to take this work to your other computers");
+          return;
+        }
+      }
       if (view && path && session.getSnapshot().diskDirty) {
         try {
           const content = view.state.doc.toString();
@@ -1626,6 +1639,55 @@ function App() {
     },
     [session, refreshGit, loadFile, flash],
   );
+
+  // Arriving at a repository, or back at Liauth: fetch, and take in the
+  // upstream when this branch has nothing of its own to publish. Publish
+  // shares the guard: both move the branch.
+  const syncingUpstream = useRef(false);
+  const updateFromUpstream = useCallback(async () => {
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    const upstream = snapshot.versioning?.repo.upstream;
+    if (!path || !upstream || syncingUpstream.current) return;
+    syncingUpstream.current = true;
+    try {
+      await api.fetchUpstream(path);
+      const fetched = session.getSnapshot();
+      if (!session.sameDocument(snapshot)) return;
+      if (
+        !fetched.dirty &&
+        !fetched.diskDirty &&
+        !fetched.viewing &&
+        fetched.extConflict === null &&
+        (await api.fastForwardUpstream(path))
+      ) {
+        if (await reloadAfterGit(fetched))
+          flash(`Updated from ${upstream.name}`);
+        return;
+      }
+      const behind = (await refreshGit(path)).upstream?.behind ?? 0;
+      if (behind && session.sameDocument(snapshot))
+        flash(
+          `${upstream.name} has ${behind} new commit${behind === 1 ? "" : "s"} — Publish to integrate`,
+          8000,
+        );
+    } catch (e) {
+      console.warn("[liauth] fetch failed:", e);
+    } finally {
+      syncingUpstream.current = false;
+    }
+  }, [session, reloadAfterGit, refreshGit, flash]);
+
+  const upstreamRoot = repo?.upstream ? repo.repo_root : null;
+  useEffect(() => {
+    if (upstreamRoot) void updateFromUpstream();
+  }, [upstreamRoot, updateFromUpstream]);
+
+  useEffect(() => {
+    const onFocus = () => void updateFromUpstream();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [updateFromUpstream]);
 
   const newReviewBranch = useCallback(async () => {
     if (!session.getSnapshot().filePath) return;
@@ -2058,6 +2120,77 @@ function App() {
     [session, squashing, refreshGit, flash],
   );
 
+  const publishBranch = useCallback(async () => {
+    const view = viewRef.current;
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    if (!view || !path || publishing || squashing) return;
+    if (syncingUpstream.current) {
+      flash("Fetching from the upstream; Publish again in a moment");
+      return;
+    }
+    if (snapshot.viewing) {
+      flash("Return to the current document before publishing");
+      return;
+    }
+    if (snapshot.extConflict !== null) {
+      flash("Resolve the disk conflict before publishing");
+      return;
+    }
+    if (snapshot.versioning?.repo.merging) {
+      flash("Resolve the conflicts and Save to finish the merge, then Publish");
+      return;
+    }
+    setPublishing(true);
+    syncingUpstream.current = true;
+    flash("Publishing…");
+    try {
+      if (snapshot.dirty || snapshot.diskDirty) {
+        const { commit, current } = await session.save(
+          view.state.doc.toString(),
+        );
+        if (!current) return;
+        // A lone commit is published under Toki's recap, not "Save …".
+        if (commit) await recapCommit(path, commit.id);
+      }
+      const saved = session.getSnapshot();
+      const result = await api.publish(path);
+      if (result.merge.status === "up_to_date") await refreshGit(path);
+      else await reloadAfterGit(saved);
+      await refreshProject(path);
+      if (!result.pushed_to) {
+        flash(
+          "Conflicts with the upstream — resolve the <<< >>> markers, Save, then Publish again",
+          15000,
+        );
+        return;
+      }
+      const notes = [`Published to ${result.pushed_to}`];
+      if (result.squashed) notes.push(result.squashed.summary);
+      if (result.uncommitted.length)
+        notes.push(`not committed: ${result.uncommitted.join(", ")}`);
+      flash(notes.join(" · "), result.uncommitted.length ? 15000 : 6000);
+      if (session.sameDocument(saved))
+        session.setLastSave(`published ${timeNow()}`);
+    } catch (e) {
+      if (session.sameDocument(snapshot))
+        session.setLastSave(`publish failed · ${e}`);
+      flash(`Could not publish: ${e}`, 15000);
+    } finally {
+      syncingUpstream.current = false;
+      setPublishing(false);
+    }
+  }, [
+    session,
+    publishing,
+    squashing,
+    recapCommit,
+    refreshGit,
+    reloadAfterGit,
+    refreshProject,
+    flash,
+  ]);
+
   const commands = createCommands(
     {
       theme,
@@ -2077,6 +2210,7 @@ function App() {
       showHiddenFiles,
       versioned,
       squashing,
+      publishing,
       panel,
       recents,
     },
@@ -2151,6 +2285,7 @@ function App() {
       "enable-versioning": enableVersioning,
       "new-review-branch": newReviewBranch,
       "squash-recent": squashRecentCommits,
+      publish: publishBranch,
       palette: () => setPaletteOpen((open) => !open),
       openRecent: openPath,
       theme: setTheme,
@@ -2200,6 +2335,7 @@ function App() {
     showHiddenFiles,
     versioned,
     squashing,
+    publishing,
     panel,
     recents,
     execCommand,
@@ -2598,8 +2734,16 @@ function App() {
       </main>
 
       <footer className="statusbar">
-        <span>
+        <span
+          title={
+            repo?.upstream
+              ? `${repo.upstream.ahead} to publish · ${repo.upstream.behind} to integrate from ${repo.upstream.name}`
+              : undefined
+          }
+        >
           {versioned && repo?.branch ? `⎇ ${repo.branch}` : ""}
+          {repo?.upstream?.ahead ? ` ↑${repo.upstream.ahead}` : ""}
+          {repo?.upstream?.behind ? ` ↓${repo.upstream.behind}` : ""}
           {repo?.merging ? " · merging" : ""}
         </span>
         <span>
@@ -2608,9 +2752,11 @@ function App() {
           {zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}
         </span>
         <span>
-          {squashing
-            ? "Toki is squashing commits…"
-            : lastSave || (dirty ? "uncommitted changes" : "")}
+          {publishing
+            ? "Publishing…"
+            : squashing
+              ? "Toki is squashing commits…"
+              : lastSave || (dirty ? "uncommitted changes" : "")}
         </span>
       </footer>
 
