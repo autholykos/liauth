@@ -216,8 +216,6 @@ export async function buildAppMenu(
           await sep(),
           ...(await items("bold", "italic")),
           await sep(),
-          await item("find-by-meaning"),
-          await sep(),
           ...(await items("insert-note", "insert-suggestion", "next-note")),
         ],
       }),

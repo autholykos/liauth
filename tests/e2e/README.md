@@ -6,9 +6,7 @@ policy to Prohibited before its event loop starts. It must not show or activate
 the application on the user's desktop. The runner
 builds and launches the actual Tauri application with an optional embedded
 WebDriver. React, CodeMirror, IPC, Rust, filesystem, Git and NSSpellChecker are
-real. Only the external Jev and Toki HTTP services are controlled in the
-default suite. `npm run test:e2e:live` uses the real Nanto endpoints with
-synthetic documents and skips the scenarios that need a scripted Toki.
+real. Only the external Toki HTTP service is controlled.
 
 Each run retains its fixture repositories, HTTP requests, app log, screenshots,
 DOM snapshots and JSON results under `artifacts/e2e/`. Tests do not use the user's
@@ -19,7 +17,6 @@ with the `e2e` Cargo feature; release builds must omit that feature.
 
 | Area | Failure modes to exercise | Existing coverage retained until replaced |
 | --- | --- | --- |
-| Jev | Missing credentials, wrong HTTP contract, batching, Unicode selection, stale results, cancellation, provider failure vs no matches | Rust parsing/bounds, malformed responses and overlapping request IDs |
 | Spelling | Loaded text unchecked, wrong dictionary, UTF-16 drift, code/comment exclusions, lost marks after rendering, persisted language | Native-menu correction/Undo/Ignore/Learn, stale callbacks, timeout and unavailable dictionaries |
 | Documents | Autosave loss, wrong document reopened, external overwrite, merge discarding either edit | Out-of-order open/drop/save completions and binary rejection |
 | Git | Save without commit, wrong branch, lost changes after merge, incorrect history | Worktree, staging, squash, conflict and recovery edge cases |
@@ -34,13 +31,10 @@ elements; WebView coverage alone does not establish their behavior.
 ## Migrated coverage
 
 The default `npm test` runs the desktop suite. `npm run test:focused` retains the
-remaining Vitest tests. CI runs both, plus Rust integration tests; the scheduled
-and manually dispatched workflows also run the live Jev suite.
+remaining Vitest tests. CI runs both, plus Rust integration tests.
 
-Six frontend tests were replaced: the unsaved-document semantic search and
-preview navigation scenario, four stale-response cases (edit, switch, query,
-cancel), and provider-error/no-match/result-invalidation behavior. The spelling
-scenario covers loaded documents, stable marks, Unicode and Markdown exclusions.
+The spelling scenario covers loaded documents, stable marks, Unicode and
+Markdown exclusions.
 
 The driver synthesizes DOM input in the real WKWebView. Opening fixtures uses the
 normal Tauri `open-file` event; bulk text input uses a DOM paste event with an

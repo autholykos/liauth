@@ -79,7 +79,6 @@ import { BranchesPanel } from "./BranchesPanel";
 import { FileNavigator } from "./FileNavigator";
 import { SearchResults } from "./SearchResults";
 import { openSpellingContextMenu, setSpellingLanguage as updateSpellingLanguage } from "./editor/spellcheck";
-import { SemanticSearch } from "./SemanticSearch";
 import { useFolderExpansion } from "./useFolderExpansion";
 import { isInFolder } from "./folders";
 import "./App.css";
@@ -260,7 +259,6 @@ function App() {
   const [savingFolder, setSavingFolder] = useState<string | null>(null);
   const projectRequestRef = useRef(0);
   const [workspaceQuery, setWorkspaceQuery] = useState("");
-  const [searchMode, setSearchMode] = useState<"text" | "meaning">("text");
   const [expandedSearchFiles, setExpandedSearchFiles] = useState<Set<string>>(
     new Set(),
   );
@@ -269,7 +267,6 @@ function App() {
   const workspaceSearchRequestRef = useRef(0);
   const workspaceSearchNavigationRef = useRef(0);
   const workspaceSearchInputRef = useRef<HTMLInputElement>(null);
-  const semanticSearchInputRef = useRef<HTMLTextAreaElement>(null);
   const [fileClipboard, setFileClipboard] = useState<FileClipboard | null>(
     null,
   );
@@ -536,21 +533,18 @@ function App() {
   }, [navOpen, filePath, openFolder, repo?.repo_root, refreshProject]);
 
   useEffect(() => {
-    if (!navOpen || navigatorView !== "search" || searchMode !== "text") return;
+    if (!navOpen || navigatorView !== "search") return;
     const frame = requestAnimationFrame(() =>
       workspaceSearchInputRef.current?.focus(),
     );
     return () => cancelAnimationFrame(frame);
-  }, [navOpen, navigatorView, searchMode]);
+  }, [navOpen, navigatorView]);
 
   useEffect(() => {
     const request = ++workspaceSearchRequestRef.current;
     const query = workspaceQuery.trim();
     const anchor = filePath ?? openFolder;
-    if (
-      !navOpen || navigatorView !== "search" || searchMode !== "text" ||
-      !anchor || !query
-    ) {
+    if (!navOpen || navigatorView !== "search" || !anchor || !query) {
       setWorkspaceSearch(null);
       return;
     }
@@ -586,7 +580,6 @@ function App() {
     navOpen,
     navigatorView,
     workspaceQuery,
-    searchMode,
     filePath,
     openFolder,
     repo?.repo_root,
@@ -2272,13 +2265,6 @@ function App() {
       reload: doReload,
       "export-pdf": exportPdf,
       "check-updates": checkForUpdates,
-      "find-by-meaning": () => {
-        setRoom(false);
-        setNavOpen(true);
-        setNavigatorView("search");
-        setSearchMode("meaning");
-        semanticSearchInputRef.current?.focus();
-      },
       quit: () => {
         void getCurrentWindow().close();
       },
@@ -2569,38 +2555,7 @@ function App() {
         {searchNavigatorOpen && !room ? (
           <aside className="nav-panel">
             <h3 title={project?.root}>Search</h3>
-            <div className="search-modes" role="group" aria-label="Search mode">
-              <button
-                aria-pressed={searchMode === "text"}
-                onClick={() => setSearchMode("text")}
-              >Text</button>
-              <button
-                aria-pressed={searchMode === "meaning"}
-                onClick={() => setSearchMode("meaning")}
-              >Meaning</button>
-            </div>
-            {searchMode === "meaning" ? (
-              <SemanticSearch
-                session={session}
-                inputRef={semanticSearchInputRef}
-                getText={() => viewRef.current?.state.doc.toString() ?? ""}
-                onOpen={(match, source) => {
-                  const view = viewRef.current;
-                  if (
-                    !view || view.state.doc.toString() !== source ||
-                    match.from < 0 || match.to > view.state.doc.length ||
-                    match.from >= match.to
-                  ) return;
-                  setPreviewMode(null);
-                  view.dispatch({
-                    selection: { anchor: match.from, head: match.to },
-                    effects: EditorView.scrollIntoView(match.from, { y: "center" }),
-                  });
-                  view.focus();
-                }}
-              />
-            ) : null}
-            <div className="nav-search" hidden={searchMode !== "text"}>
+            <div className="nav-search">
               <input
                 ref={workspaceSearchInputRef}
                 className="nav-search-input"
