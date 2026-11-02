@@ -97,17 +97,6 @@ git engine for versioning and asynchronous review.
   folders' staged changes remain separate; ignored files and nested repositories
   are excluded. Resolve and save conflicted files individually first; a resolved
   merge is committed as a whole.
-- **Find by meaning** — choose **Search > Meaning**, or **Edit > Find by
-  Meaning…** (⌥⌘F), and describe the passage you want to find. Jev ranks original
-  passages from the current editor buffer, including unsaved text; clicking a
-  result selects that passage. Less certain candidates are marked **Possible
-  match**. Editing the document or query invalidates old
-  results. Searches run on request and can be cancelled. No API key is required.
-  Requests send passages to TypeSafe through Nanto's model router at
-  `https://models.nanto.org/v1/systemone` using model `jev`.
-  The first version supports documents up to 128 KB and
-  256 passages, returning up to 20 matches; larger documents are rejected before
-  sending. Cancel prevents further batches; an already sent batch may finish.
 - **PDF export** — renders the document to HTML (markdown-it + DOMPurify) and
   hands it to the system print dialog (Save as PDF on macOS).
 
@@ -135,16 +124,8 @@ npm run tauri dev      # run the app
 npm run build          # typecheck + bundle frontend
 npm test               # primary gate: real macOS app, hidden and unfocused
 npm run test:focused   # focused regressions not yet replaced by E2E
-npm run test:e2e       # real macOS app, isolated files/Git, controlled Jev HTTP
-npm run test:e2e:live  # real macOS app against the Nanto Jev endpoint
+npm run test:e2e       # real macOS app, isolated files/Git, controlled Toki HTTP
 cd src-tauri && cargo test   # git engine end-to-end tests
-```
-
-The opt-in Jev smoke test sends synthetic Italian fixtures to TypeSafe through
-Nanto's model router. No API key is required. Run from the repository root:
-
-```sh
-cargo test --manifest-path src-tauri/Cargo.toml live_jev_semantic_queries -- --ignored --nocapture
 ```
 
 Desktop E2E scenarios, retained coverage and artifact locations are described in

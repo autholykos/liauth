@@ -192,24 +192,6 @@ export const spellingSuggestions = (word: string, language: string) =>
   invoke<string[]>("spelling_suggestions", { word, language });
 export const learnSpellingWord = (word: string) => invoke<void>("learn_spelling_word", { word });
 
-export interface SemanticMatch {
-  from: number;
-  to: number;
-  line: number;
-  preview: string;
-  relevance: number;
-}
-
-export interface SemanticResults {
-  matches: SemanticMatch[];
-  passages: number;
-}
-
-export const semanticSearch = (document: string, query: string, requestId: string) =>
-  invoke<SemanticResults>("semantic_search", { document, query, requestId });
-export const cancelSemanticSearch = (requestId: string) =>
-  invoke<void>("cancel_semantic_search", { requestId });
-
 export interface EditPair {
   find: string;
   replace: string;

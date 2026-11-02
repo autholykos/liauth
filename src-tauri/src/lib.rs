@@ -5,7 +5,6 @@ mod ai;
 mod config;
 mod document;
 mod git;
-mod semantic;
 mod spelling;
 
 use std::sync::Mutex;
@@ -581,7 +580,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(PendingOpen(Mutex::new(None)))
-        .manage(semantic::Searches::default())
         .invoke_handler(tauri::generate_handler![
             print_page,
             git::repo_info,
@@ -615,8 +613,6 @@ pub fn run() {
             spelling::check_spelling,
             spelling::spelling_suggestions,
             spelling::learn_spelling_word,
-            semantic::semantic_search,
-            semantic::cancel_semantic_search,
             ai::draft_note_edits,
             ai::warm_note_cache,
             ai::list_rephrase_skills,

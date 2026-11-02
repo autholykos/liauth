@@ -10,7 +10,6 @@
     "tauri": "tauri",
     "test": "npm run test:e2e",
     "test:e2e": "node tests/e2e/desktop.e2e.mjs",
-    "test:e2e:live": "node tests/e2e/desktop.e2e.mjs --live",
     "test:focused": "vitest run --environment jsdom"
   },
   "dependencies": {
