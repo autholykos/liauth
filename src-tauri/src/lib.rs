@@ -35,6 +35,36 @@ async fn squash_recent_commits(
     git::apply_squash(&file_path, &plan, &message)
 }
 
+#[derive(serde::Serialize)]
+struct Publication {
+    merge: git::MergeResult,
+    /// Where the branch went, e.g. `origin/main`; None when conflicts stopped it.
+    pushed_to: Option<String>,
+    /// Tracked files whose changes stayed out of the publication.
+    uncommitted: Vec<String>,
+}
+
+/// Integrate the upstream and push without forcing, each commit as it is:
+/// provenance tools read authorship per commit. Conflicts stop it before
+/// the push; saving concludes the merge as for any other.
+#[tauri::command]
+async fn publish(file_path: String) -> Result<Publication, String> {
+    git::fetch_upstream(file_path.clone()).await?;
+    let merge = git::integrate_upstream(&file_path)?;
+    if merge.status == "conflicts" {
+        return Ok(Publication {
+            merge,
+            pushed_to: None,
+            uncommitted: Vec::new(),
+        });
+    }
+    Ok(Publication {
+        pushed_to: Some(git::push(&file_path)?),
+        uncommitted: git::uncommitted(file_path.clone())?,
+        merge,
+    })
+}
+
 /// One-line recap of a commit's edit, for its message.
 #[tauri::command]
 async fn describe_commit(file_path: String, commit_id: String) -> Result<String, String> {
@@ -573,6 +603,10 @@ pub fn run() {
             git::abort_merge,
             git::merge_contents,
             git::reword_commit,
+            git::fetch_upstream,
+            git::fast_forward_upstream,
+            git::uncommitted,
+            publish,
             describe_commit,
             config::read_vim_config,
             config::write_vim_config,

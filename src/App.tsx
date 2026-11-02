@@ -87,7 +87,12 @@ import "./App.css";
 type Panel = "none" | "history" | "review" | "notes" | "help" | "vimrc";
 type NavigatorView = "files" | "search";
 type WorkspaceSearchState = api.ProjectSearch | "searching" | "error" | null;
-type AutoSaveResult = "ok" | "blocked-conflict" | "failed" | "changed";
+type AutoSaveResult =
+  | "ok"
+  | "blocked-conflict"
+  | "busy"
+  | "failed"
+  | "changed";
 type FileClipboard = { path: string; mode: "cut" | "copy" };
 type RephraseState = {
   id: number;
@@ -177,6 +182,7 @@ function App() {
   const repo = versioning?.repo ?? null;
   const [panel, setPanel] = useState<Panel>("none");
   const [squashing, setSquashing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [vimMode, setVimMode] = usePersistedSetting(
     "liauth.vim",
@@ -287,6 +293,8 @@ function App() {
   // A newer toast must not be cleared by an older toast's timer: an error
   // arriving a second after "Toki is writing…" would vanish almost at once.
   const flashTimer = useRef<number | undefined>(undefined);
+  // Who is moving the branch: an arrival fetch or Publish.
+  const syncingUpstream = useRef<"arrival" | "publish" | null>(null);
   const flash = useCallback((msg: string, ms = 4000) => {
     window.clearTimeout(flashTimer.current);
     setStatus(msg);
@@ -339,6 +347,8 @@ function App() {
     if (!view || !snapshot.filePath || snapshot.viewing || !snapshot.diskDirty)
       return "ok";
     if (snapshot.extConflict !== null) return "blocked-conflict";
+    // Git may be rewriting the file; its changes merge in before any write.
+    if (syncingUpstream.current) return "busy";
     const content = view.state.doc.toString();
     try {
       const saved = await session.save(content, false);
@@ -356,6 +366,8 @@ function App() {
       const saved = await autoSave();
       if (saved === "blocked-conflict")
         flash(`Resolve the disk conflict before ${action}`);
+      if (saved === "busy")
+        flash(`Syncing with the upstream; ${action} canceled`);
       if (saved === "failed") flash(`Autosave failed; ${action} canceled`);
       if (saved === "changed")
         flash(`Document changed while saving; ${action} canceled`);
@@ -915,6 +927,9 @@ function App() {
     async (path: string, commitId: string) => {
       try {
         const message = await api.describeCommit(path, commitId);
+        // Amending while Publish pushes would fork what it publishes. An
+        // arrival only fast-forwards a branch with no commits of its own.
+        if (syncingUpstream.current === "publish") return;
         await api.rewordCommit(path, commitId, message);
         if (
           session.getSnapshot().filePath === path &&
@@ -1436,6 +1451,28 @@ function App() {
         }
         return;
       }
+      const upstream = session.getSnapshot().versioning?.repo.upstream;
+      // Other documents may hold autosaved edits that were never committed.
+      const uncommitted =
+        upstream && path
+          ? await api.uncommittedFiles(path).catch(() => null)
+          : [];
+      if (
+        upstream &&
+        (upstream.ahead > 0 ||
+          session.getSnapshot().dirty ||
+          uncommitted?.length !== 0)
+      ) {
+        const ok = await ask(
+          `This work is not published to ${upstream.name}. Quit anyway?`,
+          { title: "Quit Liauth", kind: "warning" },
+        );
+        if (!ok) {
+          e.preventDefault();
+          flash("Publish to take this work to your other computers");
+          return;
+        }
+      }
       if (view && path && session.getSnapshot().diskDirty) {
         try {
           const content = view.state.doc.toString();
@@ -1617,15 +1654,78 @@ function App() {
   const reloadAfterGit = useCallback(
     async (snapshot: DocumentSnapshot) => {
       if (!snapshot.filePath || !session.sameDocument(snapshot)) return false;
-      if (!session.isCurrent(snapshot)) {
-        await refreshGit(snapshot.filePath);
+      if (!session.isCurrent(snapshot) || session.getSnapshot().diskDirty) {
+        // Unsaved edits stay, and what git wrote merges into them.
         flash("Repository changed; newer editor changes kept");
+        await handleExternalChange();
+        await refreshGit(snapshot.filePath);
         return false;
       }
       return loadFile(snapshot.filePath);
     },
-    [session, refreshGit, loadFile, flash],
+    [session, handleExternalChange, refreshGit, loadFile, flash],
   );
+
+  // Whatever git wrote merges into the editor before the guard lifts, so the
+  // autosave it held back cannot write a stale buffer over it.
+  const releaseSync = useCallback(async () => {
+    try {
+      await handleExternalChange();
+    } catch (e) {
+      // Only the history refresh after reconciling can fail here.
+      console.warn("[liauth] refresh after sync failed:", e);
+    } finally {
+      syncingUpstream.current = null;
+    }
+    void autoSave();
+  }, [handleExternalChange, autoSave]);
+
+  // Arriving at a repository, or back at Liauth: fetch, and take in the
+  // upstream when this branch has nothing of its own to publish.
+  const updateFromUpstream = useCallback(async () => {
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    const upstream = snapshot.versioning?.repo.upstream;
+    if (!path || !upstream || syncingUpstream.current) return;
+    syncingUpstream.current = "arrival";
+    try {
+      await api.fetchUpstream(path);
+      const fetched = session.getSnapshot();
+      if (!session.sameDocument(snapshot)) return;
+      if (
+        !fetched.dirty &&
+        !fetched.diskDirty &&
+        !fetched.viewing &&
+        fetched.extConflict === null &&
+        (await api.fastForwardUpstream(path))
+      ) {
+        if (await reloadAfterGit(fetched))
+          flash(`Updated from ${upstream.name}`);
+        return;
+      }
+      const behind = (await refreshGit(path)).upstream?.behind ?? 0;
+      if (behind && session.sameDocument(snapshot))
+        flash(
+          `${upstream.name} has ${behind} new commit${behind === 1 ? "" : "s"} — Publish to integrate`,
+          8000,
+        );
+    } catch (e) {
+      console.warn("[liauth] fetch failed:", e);
+    } finally {
+      await releaseSync();
+    }
+  }, [session, reloadAfterGit, refreshGit, flash, releaseSync]);
+
+  const upstreamRoot = repo?.upstream ? repo.repo_root : null;
+  useEffect(() => {
+    if (upstreamRoot) void updateFromUpstream();
+  }, [upstreamRoot, updateFromUpstream]);
+
+  useEffect(() => {
+    const onFocus = () => void updateFromUpstream();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [updateFromUpstream]);
 
   const newReviewBranch = useCallback(async () => {
     if (!session.getSnapshot().filePath) return;
@@ -2058,6 +2158,89 @@ function App() {
     [session, squashing, refreshGit, flash],
   );
 
+  const publishBranch = useCallback(async () => {
+    const view = viewRef.current;
+    const snapshot = session.getSnapshot();
+    const path = snapshot.filePath;
+    if (!view || !path || publishing || squashing) return;
+    // A sync may be rewriting the file; saving now would write over it.
+    if (syncingUpstream.current) {
+      flash("Fetching from the upstream; Publish again in a moment");
+      return;
+    }
+    if (snapshot.viewing) {
+      flash("Return to the current document before publishing");
+      return;
+    }
+    if (snapshot.extConflict !== null) {
+      flash("Resolve the disk conflict before publishing");
+      return;
+    }
+    if (snapshot.versioning?.repo.merging) {
+      flash("Resolve the conflicts and Save to finish the merge, then Publish");
+      return;
+    }
+    setPublishing(true);
+    flash("Publishing…");
+    let holding = false;
+    let saved = snapshot;
+    let failure: unknown = null;
+    try {
+      if (snapshot.dirty || snapshot.diskDirty) {
+        const { commit, current } = await session.save(
+          view.state.doc.toString(),
+        );
+        if (!current) return;
+        // Typing from here on is newer than what gets published.
+        saved = session.getSnapshot();
+        // A lone commit is published under Toki's recap, not "Save …".
+        if (commit) await recapCommit(path, commit.id);
+      }
+      if (syncingUpstream.current) {
+        flash("Fetching from the upstream; Publish again in a moment");
+        return;
+      }
+      syncingUpstream.current = "publish";
+      holding = true;
+      const result = await api.publish(path);
+      if (result.merge.status === "up_to_date") await refreshGit(path);
+      else await reloadAfterGit(saved);
+      await refreshProject(path);
+      if (!result.pushed_to) {
+        flash(
+          "Conflicts with the upstream — resolve the <<< >>> markers, Save, then Publish again",
+          15000,
+        );
+        return;
+      }
+      const notes = [`Published to ${result.pushed_to}`];
+      if (result.uncommitted.length)
+        notes.push(`not committed: ${result.uncommitted.join(", ")}`);
+      flash(notes.join(" · "), result.uncommitted.length ? 15000 : 6000);
+      if (session.sameDocument(saved))
+        session.setLastSave(`published ${timeNow()}`);
+    } catch (e) {
+      failure = e;
+      if (session.sameDocument(snapshot))
+        session.setLastSave(`publish failed · ${e}`);
+    } finally {
+      if (holding) await releaseSync();
+      setPublishing(false);
+    }
+    // Last, so a merge notice from releasing the sync does not hide it.
+    if (failure !== null) flash(`Could not publish: ${failure}`, 15000);
+  }, [
+    session,
+    publishing,
+    squashing,
+    releaseSync,
+    recapCommit,
+    refreshGit,
+    reloadAfterGit,
+    refreshProject,
+    flash,
+  ]);
+
   const commands = createCommands(
     {
       theme,
@@ -2077,6 +2260,7 @@ function App() {
       showHiddenFiles,
       versioned,
       squashing,
+      publishing,
       panel,
       recents,
     },
@@ -2151,6 +2335,7 @@ function App() {
       "enable-versioning": enableVersioning,
       "new-review-branch": newReviewBranch,
       "squash-recent": squashRecentCommits,
+      publish: publishBranch,
       palette: () => setPaletteOpen((open) => !open),
       openRecent: openPath,
       theme: setTheme,
@@ -2200,6 +2385,7 @@ function App() {
     showHiddenFiles,
     versioned,
     squashing,
+    publishing,
     panel,
     recents,
     execCommand,
@@ -2598,8 +2784,16 @@ function App() {
       </main>
 
       <footer className="statusbar">
-        <span>
+        <span
+          title={
+            repo?.upstream
+              ? `${repo.upstream.ahead} to publish · ${repo.upstream.behind} to integrate from ${repo.upstream.name}`
+              : undefined
+          }
+        >
           {versioned && repo?.branch ? `⎇ ${repo.branch}` : ""}
+          {repo?.upstream?.ahead ? ` ↑${repo.upstream.ahead}` : ""}
+          {repo?.upstream?.behind ? ` ↓${repo.upstream.behind}` : ""}
           {repo?.merging ? " · merging" : ""}
         </span>
         <span>
@@ -2608,9 +2802,11 @@ function App() {
           {zoom !== 1 ? ` · ${Math.round(zoom * 100)}%` : ""}
         </span>
         <span>
-          {squashing
-            ? "Toki is squashing commits…"
-            : lastSave || (dirty ? "uncommitted changes" : "")}
+          {publishing
+            ? "Publishing…"
+            : squashing
+              ? "Toki is squashing commits…"
+              : lastSave || (dirty ? "uncommitted changes" : "")}
         </span>
       </footer>
 

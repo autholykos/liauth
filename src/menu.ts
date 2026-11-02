@@ -259,6 +259,7 @@ export async function buildAppMenu(
                 "panel-review",
                 "new-review-branch",
                 "squash-recent",
+                "publish",
               )
             : items("enable-versioning"))),
           await sep(),

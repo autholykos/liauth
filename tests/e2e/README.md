@@ -6,12 +6,13 @@ policy to Prohibited before its event loop starts. It must not show or activate
 the application on the user's desktop. The runner
 builds and launches the actual Tauri application with an optional embedded
 WebDriver. React, CodeMirror, IPC, Rust, filesystem, Git and NSSpellChecker are
-real. Only the external Jev HTTP service is controlled in the default suite.
-`npm run test:e2e:live` uses the real Nanto endpoint with synthetic documents.
+real. Only the external Jev and Toki HTTP services are controlled in the
+default suite. `npm run test:e2e:live` uses the real Nanto endpoints with
+synthetic documents and skips the scenarios that need a scripted Toki.
 
 Each run retains its fixture repositories, HTTP requests, app log, screenshots,
 DOM snapshots and JSON results under `artifacts/e2e/`. Tests do not use the user's
-documents or configuration. The driver and endpoint override are compiled only
+documents or configuration. The driver and endpoint overrides are compiled only
 with the `e2e` Cargo feature; release builds must omit that feature.
 
 ## Failure inventory and migration
@@ -44,9 +45,21 @@ scenario covers loaded documents, stable marks, Unicode and Markdown exclusions.
 The driver synthesizes DOM input in the real WKWebView. Opening fixtures uses the
 normal Tauri `open-file` event; bulk text input uses a DOM paste event with an
 in-memory DataTransfer, without reading or writing the system clipboard. Window
-blur is dispatched for the autosave scenario. These tests do not establish OS
-file-picker behavior, native contextual menus, real keyboard focus or macOS input
-prediction behavior. Those tests remain in place or require a dedicated runner.
+blur and focus are dispatched for the autosave and refocus scenarios. These
+tests do not establish OS file-picker behavior, native contextual menus, real
+keyboard focus or macOS input prediction behavior. Those tests remain in place or require a dedicated runner.
+
+The publish scenarios use a bare remote and two clones: Liauth writes in one,
+plain git publishes from the other. They cover arrival fast-forwards next to
+uncommitted work, divergence after a manual squash, conflicts and a squash
+after resolving them, an unreachable remote, pushes the remote stalls or floods
+with output (via a `pre-receive` hook) and a timeout that ends them, a fetch
+Publish has to wait for, Toki being down, commit recaps that arrive during or
+after the push, typing and autosave while Publish waits, a push rejected after
+merging, branches without a configured upstream or with one that does not exist
+yet or that the fetch refspec does not cover, and that the other clone can
+always fast-forward. The quit reminder is a native dialog and remains
+unverified.
 
 The external-change scenario exposed a missing production dependency feature:
 `tauri-plugin-fs/watch`. It now verifies real filesystem notifications, automatic

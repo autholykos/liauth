@@ -5,6 +5,8 @@ export interface RepoInfo {
   branch: string | null;
   merging: boolean;
   file_dirty: boolean;
+  /** The branch against its remote-tracking branch, as last fetched. */
+  upstream: { name: string; ahead: number; behind: number } | null;
 }
 
 export interface CommitInfo {
@@ -133,6 +135,26 @@ export const mergeBranch = (filePath: string, name: string) =>
 
 export const abortMerge = (filePath: string) =>
   invoke<void>("abort_merge", { filePath });
+
+export const fetchUpstream = (filePath: string) =>
+  invoke<void>("fetch_upstream", { filePath });
+
+/** True when the branch moved to its fetched upstream. */
+export const fastForwardUpstream = (filePath: string) =>
+  invoke<boolean>("fast_forward_upstream", { filePath });
+
+export interface Publication {
+  merge: MergeResult;
+  /** e.g. "origin/main"; null when conflicts stopped publishing. */
+  pushed_to: string | null;
+  uncommitted: string[];
+}
+
+export const publish = (filePath: string) =>
+  invoke<Publication>("publish", { filePath });
+
+export const uncommittedFiles = (filePath: string) =>
+  invoke<string[]>("uncommitted", { filePath });
 
 export interface ContentMerge {
   content: string;

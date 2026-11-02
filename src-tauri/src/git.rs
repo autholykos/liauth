@@ -12,6 +12,15 @@ pub struct RepoInfo {
     pub branch: Option<String>,
     pub merging: bool,
     pub file_dirty: bool,
+    pub upstream: Option<Upstream>,
+}
+
+/// The current branch against its remote-tracking branch, as last fetched.
+#[derive(Serialize)]
+pub struct Upstream {
+    pub name: String,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 #[derive(Serialize)]
@@ -160,7 +169,37 @@ fn info(repo: &Repository) -> RepoInfo {
         branch,
         merging: repo.state() == RepositoryState::Merge,
         file_dirty: false,
+        upstream: upstream_branch(repo).and_then(|upstream| {
+            let head = repo.head().ok()?.target()?;
+            let (ahead, behind) = repo
+                .graph_ahead_behind(head, upstream.get().target()?)
+                .ok()?;
+            Some(Upstream {
+                name: upstream.name().ok()??.to_string(),
+                ahead,
+                behind,
+            })
+        }),
     }
+}
+
+/// The configured upstream, else the same name on `origin`: where Publish
+/// pushes, so where commits already published live. Configured means what
+/// `publish_target` reads, `branch.<name>.remote` and `.merge`, even when
+/// no fetched ref matches them.
+fn upstream_branch(repo: &Repository) -> Option<git2::Branch<'_>> {
+    let head = repo.head().ok()?;
+    let name = head.shorthand().ok()?;
+    let refname = head.name().ok()?;
+    if repo.branch_upstream_remote(refname).is_ok() && repo.branch_upstream_merge(refname).is_ok() {
+        return repo
+            .find_branch(name, BranchType::Local)
+            .ok()?
+            .upstream()
+            .ok();
+    }
+    repo.find_branch(&format!("origin/{name}"), BranchType::Remote)
+        .ok()
 }
 
 fn info_for_file(repo: &Repository, file_path: &str) -> RepoInfo {
@@ -183,6 +222,7 @@ pub fn repo_info(file_path: String) -> RepoInfo {
             branch: None,
             merging: false,
             file_dirty: false,
+            upstream: None,
         },
     }
 }
@@ -642,16 +682,18 @@ pub fn squash_plan(file_path: &str, base: Option<Oid>) -> Result<SquashPlan, Str
             base
         }
         None => {
+            let upstream_base = upstream_branch(&repo)
+                .and_then(|upstream| upstream.get().target())
+                .and_then(|upstream| repo.merge_base(head, upstream).ok());
+            // Never rewrite what the upstream has: a squash made before
+            // integrating the upstream stops being a boundary afterwards.
             let marker = repo
                 .find_reference(&squash_marker(&branch))
                 .ok()
-                .and_then(|reference| reference.target());
-            let upstream_base = repo
-                .find_branch(&branch, BranchType::Local)
-                .ok()
-                .and_then(|local| local.upstream().ok())
-                .and_then(|upstream| upstream.get().target())
-                .and_then(|upstream| repo.merge_base(head, upstream).ok());
+                .and_then(|reference| reference.target())
+                .filter(|&marker| {
+                    upstream_base.is_none_or(|base| commits_after(&repo, marker, base).is_some())
+                });
             [marker, upstream_base]
                 .into_iter()
                 .flatten()
@@ -766,6 +808,12 @@ pub fn reword_commit(
         .ok_or_else(|| "current branch has no commit".to_string())?;
     if head.to_string() != commit_id {
         return Err("the commit is no longer the latest".to_string());
+    }
+    if upstream_branch(&repo)
+        .and_then(|upstream| upstream.get().target())
+        .is_some_and(|upstream| commits_after(&repo, upstream, head).is_some())
+    {
+        return Err("the commit is already published".to_string());
     }
     let branch = head_ref.shorthand().map_err(err)?.to_string();
     let commit = repo.find_commit(head).map_err(err)?;
@@ -1071,8 +1119,11 @@ pub fn checkout_branch(file_path: String, name: String) -> Result<(), String> {
 #[tauri::command]
 pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, String> {
     let repo = discover(&file_path)?;
-    let refname = format!("refs/heads/{name}");
-    let their_ref = repo.find_reference(&refname).map_err(err)?;
+    merge_reference(&repo, &format!("refs/heads/{name}"), &name)
+}
+
+fn merge_reference(repo: &Repository, refname: &str, name: &str) -> Result<MergeResult, String> {
+    let their_ref = repo.find_reference(refname).map_err(err)?;
     let annotated = repo
         .reference_to_annotated_commit(&their_ref)
         .map_err(err)?;
@@ -1087,12 +1138,13 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
 
     if analysis.is_fast_forward() {
         let target = annotated.id();
+        // Update files before moving HEAD: a safe checkout compares them
+        // with HEAD and refuses rather than overwrite uncommitted edits.
+        let obj = repo.find_object(target, None).map_err(err)?;
+        repo.checkout_tree(&obj, Some(git2::build::CheckoutBuilder::new().safe()))
+            .map_err(err)?;
         let mut head = repo.head().map_err(err)?;
         head.set_target(target, "fast-forward merge").map_err(err)?;
-        let obj = repo.find_object(target, None).map_err(err)?;
-        let mut opts = git2::build::CheckoutBuilder::new();
-        opts.force();
-        repo.checkout_tree(&obj, Some(&mut opts)).map_err(err)?;
         return Ok(MergeResult {
             status: "fast_forward".into(),
             conflicts: vec![],
@@ -1146,6 +1198,165 @@ pub fn merge_branch(file_path: String, name: String) -> Result<MergeResult, Stri
         status: "merged".into(),
         conflicts: vec![],
     })
+}
+
+/// Network operations run git itself: unlike libgit2's transports, it uses
+/// the user's SSH configuration, agents and credential helpers. A stalled
+/// connection is cut off instead of holding Publish forever.
+fn git_cli(repo: &Repository, args: &[&str]) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let timeout = Duration::from_secs(120);
+    #[cfg(feature = "e2e")]
+    let timeout = std::env::var("LIAUTH_E2E_GIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+        .map_or(timeout, Duration::from_secs);
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "repository has no working directory".to_string())?;
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(workdir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // Its own process group, so a timeout also ends ssh, helpers and hooks.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    // Drained while git runs: a full pipe would block it until the timeout.
+    let mut stderr = child.stderr.take().ok_or("git has no stderr")?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut bytes);
+        let _ = sender.send(bytes);
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            #[cfg(unix)]
+            // SAFETY: kill(2) on the group this child leads; no memory involved.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "git {} timed out after {}s; check the connection",
+                args[0],
+                timeout.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    // A daemon git started may keep the pipe open; do not wait for it.
+    let bytes = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap_or_default();
+    if status.success() {
+        return Ok(());
+    }
+    // The cause is at the end; a flood of remote output need not reach the UI.
+    let tail = &bytes[bytes.len().saturating_sub(4096)..];
+    Err(String::from_utf8_lossy(tail).trim().to_string())
+}
+
+/// The remote the current branch publishes to and the branch it updates
+/// there: its upstream, else the same name on `origin`.
+fn publish_target(repo: &Repository) -> Result<(String, String), String> {
+    let head = repo.head().map_err(err)?;
+    if !head.is_branch() {
+        return Err("publishing requires a checked-out branch".to_string());
+    }
+    let refname = head.name().map_err(err)?;
+    if let (Ok(remote), Ok(merge)) = (
+        repo.branch_upstream_remote(refname),
+        repo.branch_upstream_merge(refname),
+    ) {
+        return Ok((
+            remote.as_str().map_err(err)?.to_string(),
+            merge.as_str().map_err(err)?.to_string(),
+        ));
+    }
+    repo.find_remote("origin")
+        .map_err(|_| "add a remote named origin to publish this repository".to_string())?;
+    Ok(("origin".to_string(), refname.to_string()))
+}
+
+#[tauri::command]
+pub async fn fetch_upstream(file_path: String) -> Result<(), String> {
+    let repo = discover(&file_path)?;
+    let (remote, _) = publish_target(&repo)?;
+    git_cli(&repo, &["fetch", "--quiet", &remote])
+}
+
+/// Merge the fetched upstream into the current branch, like `merge_branch`.
+pub fn integrate_upstream(file_path: &str) -> Result<MergeResult, String> {
+    let repo = discover(file_path)?;
+    let Some(upstream) = upstream_branch(&repo) else {
+        return Ok(MergeResult {
+            status: "up_to_date".into(),
+            conflicts: vec![],
+        });
+    };
+    let refname = upstream.get().name().map_err(err)?;
+    let name = upstream.name().map_err(err)?.unwrap_or(refname);
+    merge_reference(&repo, refname, name)
+}
+
+/// Take in the fetched upstream when the branch has no commits of its own;
+/// true when the branch moved.
+#[tauri::command]
+pub fn fast_forward_upstream(file_path: String) -> Result<bool, String> {
+    let behind_only = discover(&file_path)
+        .ok()
+        .and_then(|repo| info(&repo).upstream)
+        .is_some_and(|upstream| upstream.ahead == 0 && upstream.behind > 0);
+    Ok(behind_only && integrate_upstream(&file_path)?.status == "fast_forward")
+}
+
+/// Push without forcing: a rejected push leaves both sides as they were.
+/// Returns where the branch went, e.g. `origin/main`.
+pub fn push(file_path: &str) -> Result<String, String> {
+    let repo = discover(file_path)?;
+    let (remote, destination) = publish_target(&repo)?;
+    git_cli(
+        &repo,
+        &[
+            "push",
+            "--quiet",
+            "--set-upstream",
+            &remote,
+            &format!("HEAD:{destination}"),
+        ],
+    )?;
+    Ok(format!(
+        "{remote}/{}",
+        destination.trim_start_matches("refs/heads/")
+    ))
+}
+
+/// Tracked files whose changes are not committed.
+#[tauri::command]
+pub fn uncommitted(file_path: String) -> Result<Vec<String>, String> {
+    let repo = discover(&file_path)?;
+    let mut options = StatusOptions::new();
+    options.include_untracked(false);
+    let statuses = repo.statuses(Some(&mut options)).map_err(err)?;
+    Ok(statuses
+        .iter()
+        .filter_map(|entry| entry.path().ok().map(str::to_string))
+        .collect())
 }
 
 #[derive(Serialize)]
