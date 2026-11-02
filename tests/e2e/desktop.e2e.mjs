@@ -718,8 +718,10 @@ try {
       const t3 = await commitOnTessaglia('cap12.md', 'lento', 'lento e basso', '12: sussurro basso');
       await edit((await readFile(cap22, 'utf8')).replace('né luna', 'né luna né stelle'));
       // The save's refresh finds origin/main as the upstream and fetches it.
+      // The cached origin/main already shows ↓, so wait for the fetch to end:
+      // Publish refuses to start while it runs.
       await save();
-      await wait(async () => /↓/.test(await statusbar()), 'origin/main was not taken as the upstream');
+      await wait(async () => (await bodyText()).includes('Publish to integrate'), 'origin/main was not taken as the upstream and fetched');
       await command('Publish');
       await wait(() => published() === git(m3, 'rev-parse', 'HEAD'), 'Publish without a configured remote did not push to origin/main');
       assert.equal(git(m3, 'merge-base', t3, 'HEAD'), t3);
