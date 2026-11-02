@@ -293,8 +293,8 @@ function App() {
   // A newer toast must not be cleared by an older toast's timer: an error
   // arriving a second after "Toki is writing…" would vanish almost at once.
   const flashTimer = useRef<number | undefined>(undefined);
-  // Set while Publish or an arrival fetch moves the branch.
-  const syncingUpstream = useRef(false);
+  // Who is moving the branch: an arrival fetch or Publish.
+  const syncingUpstream = useRef<"arrival" | "publish" | null>(null);
   const flash = useCallback((msg: string, ms = 4000) => {
     window.clearTimeout(flashTimer.current);
     setStatus(msg);
@@ -927,8 +927,9 @@ function App() {
     async (path: string, commitId: string) => {
       try {
         const message = await api.describeCommit(path, commitId);
-        // Amending while Publish pushes would fork what it publishes.
-        if (syncingUpstream.current) return;
+        // Amending while Publish pushes would fork what it publishes. An
+        // arrival only fast-forwards a branch with no commits of its own.
+        if (syncingUpstream.current === "publish") return;
         await api.rewordCommit(path, commitId, message);
         if (
           session.getSnapshot().filePath === path &&
@@ -1668,8 +1669,14 @@ function App() {
   // Whatever git wrote merges into the editor before the guard lifts, so the
   // autosave it held back cannot write a stale buffer over it.
   const releaseSync = useCallback(async () => {
-    await handleExternalChange();
-    syncingUpstream.current = false;
+    try {
+      await handleExternalChange();
+    } catch (e) {
+      // Only the history refresh after reconciling can fail here.
+      console.warn("[liauth] refresh after sync failed:", e);
+    } finally {
+      syncingUpstream.current = null;
+    }
     void autoSave();
   }, [handleExternalChange, autoSave]);
 
@@ -1680,7 +1687,7 @@ function App() {
     const path = snapshot.filePath;
     const upstream = snapshot.versioning?.repo.upstream;
     if (!path || !upstream || syncingUpstream.current) return;
-    syncingUpstream.current = true;
+    syncingUpstream.current = "arrival";
     try {
       await api.fetchUpstream(path);
       const fetched = session.getSnapshot();
@@ -2193,7 +2200,8 @@ function App() {
         flash("Fetching from the upstream; Publish again in a moment");
         return;
       }
-      syncingUpstream.current = holding = true;
+      syncingUpstream.current = "publish";
+      holding = true;
       const result = await api.publish(path);
       if (result.merge.status === "up_to_date") await refreshGit(path);
       else await reloadAfterGit(saved);
